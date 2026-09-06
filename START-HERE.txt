@@ -1,0 +1,19 @@
+SIGNALYTH v1.8.4.3 credential-safe local candidate
+
+SIGNALYTH v1.8.4 — START HERE
+
+THIS IS A COLLECTION-ORCHESTRATOR HARDENING CANDIDATE, NOT PRODUCTION APPROVAL.
+
+For now:
+1. Use the local/server app, not file://, for real integrations.
+2. Enter Apify/OpenAI credentials only inside the server-side Connections flow; never paste keys into chat.
+3. Keep large paid runs OFF until tiny paid smoke tests pass for every source route you intend to use.
+4. If Comments is ON, comment/reply deepening stays blocked on any route that has not been independently live-smoke-verified.
+5. After tiny source smokes, run a small 2-source test, then a small 3–6-source test, before a 500/1,000-item analysis.
+6. The user should enter only the research brief (topic, market, dates, sources, target, comments, budget). SIGNALYTH owns query anchoring, batching, retry/recovery and truthful shortfall reporting.
+
+Preview only:
+Open SIGNALYTH-v1.8.4-preview.html to inspect the UI without live integrations.
+
+Acceptance rule:
+No live/production approval before real paid Apify/OpenAI acceptance and an end-to-end pilot with numbers checked against underlying evidence.

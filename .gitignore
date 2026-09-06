@@ -1,0 +1,12 @@
+.env
+config/secrets.env
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+.vercel/
+.DS_Store
+data/*
+!data/.gitkeep
+config/secrets.tmp
+config/actor_candidates.json

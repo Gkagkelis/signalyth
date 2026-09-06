@@ -1,0 +1,20 @@
+{
+  "generated_at": "2026-09-05T11:55:41.642835+00:00",
+  "seed": 18220260905,
+  "source_combinations": 63,
+  "planner_matrix_variants": 1575,
+  "random_resilience_scenarios": 10000,
+  "invariant_checks": 61025,
+  "failures": [],
+  "status": "PASS",
+  "invariants": [
+    "all 63 non-empty source combinations plan successfully",
+    "planned logical-batch caps never exceed user max budget",
+    "source targets sum exactly to requested sample",
+    "multi-target fan-out stays within conservative source batch limits",
+    "comments coverage is never falsely presented as live-verified",
+    "resilient retries never exceed logical cost envelope",
+    "resilient retries are bounded",
+    "diagnostic rows never become analysis rows"
+  ]
+}

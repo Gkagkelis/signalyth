@@ -1,0 +1,3131 @@
+{
+  "evidence_pack": {
+    "contract_version": "signalyth-evidence-pack-v1.1",
+    "generated_at": "2026-09-03T12:00:00+00:00",
+    "research_context": {
+      "client": "OPAP",
+      "topic": "Eurojackpot",
+      "market": "Greece",
+      "date_from": "2026-08-01",
+      "date_to": "2026-08-31"
+    },
+    "indicator_inventory": [
+      {
+        "indicator_id": "sample_volume",
+        "label": "Sample volume / usable evidence",
+        "role": "quality",
+        "examined": true,
+        "available": true,
+        "availability": "available",
+        "value": {
+          "analysis_ready_records": 120,
+          "reputation_eligible_records": 96,
+          "organic_opinion_records": 82,
+          "trusted_records": 120,
+          "collected_cleaning_records": 150,
+          "effective_independent_voices": 91.5
+        }
+      },
+      {
+        "indicator_id": "market_relevance",
+        "label": "Target-market relevance",
+        "role": "quality",
+        "examined": true,
+        "available": true,
+        "availability": "available",
+        "value": {
+          "market": "Greece",
+          "records_with_market_score": 120,
+          "high_relevance_records": 110,
+          "high_relevance_share": 0.9167,
+          "average_market_score": 0.88
+        }
+      },
+      {
+        "indicator_id": "brand_reputation",
+        "label": "Brand Reputation",
+        "role": "core",
+        "examined": true,
+        "available": true,
+        "availability": "available",
+        "value": {
+          "index": 61.25,
+          "interpretation": "positive"
+        }
+      },
+      {
+        "indicator_id": "evidence_confidence",
+        "label": "Evidence confidence",
+        "role": "quality",
+        "examined": true,
+        "available": true,
+        "availability": "available",
+        "value": {
+          "score": 83.2,
+          "label": "high",
+          "effective_sample_size": 76.1,
+          "note": "Evidence strength only."
+        }
+      },
+      {
+        "indicator_id": "sentiment",
+        "label": "Sentiment",
+        "role": "core",
+        "examined": true,
+        "available": true,
+        "availability": "available",
+        "value": {
+          "counts": {
+            "positive": 48,
+            "negative": 28,
+            "neutral": 15,
+            "mixed": 5
+          },
+          "weighted_percent": {
+            "positive": 52.1,
+            "negative": 30.2,
+            "neutral": 12.7,
+            "mixed": 5.0
+          },
+          "records": 96
+        }
+      },
+      {
+        "indicator_id": "emotions",
+        "label": "Emotions",
+        "role": "core",
+        "examined": true,
+        "available": true,
+        "availability": "available",
+        "value": {
+          "counts": {
+            "joy": 30,
+            "anger": 24,
+            "sadness": 8,
+            "fear": 4,
+            "disgust": 2,
+            "surprise": 8,
+            "neutral": 6
+          },
+          "weighted_percent": {
+            "joy": 36.0,
+            "anger": 29.0,
+            "sadness": 9.0,
+            "fear": 5.0,
+            "disgust": 2.0,
+            "surprise": 10.0,
+            "neutral": 9.0
+          },
+          "records": 82
+        }
+      },
+      {
+        "indicator_id": "stance",
+        "label": "Target stance",
+        "role": "core",
+        "examined": true,
+        "available": true,
+        "availability": "available",
+        "value": {
+          "counts": {
+            "supportive": 46,
+            "critical": 29,
+            "neutral": 15,
+            "mixed": 6,
+            "not_applicable": 0
+          },
+          "weighted_percent": {
+            "supportive": 50.0,
+            "critical": 31.0,
+            "neutral": 13.0,
+            "mixed": 6.0,
+            "not_applicable": 0.0
+          },
+          "records": 96
+        }
+      },
+      {
+        "indicator_id": "impact_attention",
+        "label": "Impact / attention",
+        "role": "core",
+        "examined": true,
+        "available": true,
+        "availability": "available",
+        "value": {
+          "records_with_known_public_metrics": 100,
+          "records": 120,
+          "known_metric_share": 0.8333
+        }
+      },
+      {
+        "indicator_id": "effective_independent_voices",
+        "label": "Effective independent voices",
+        "role": "quality",
+        "examined": true,
+        "available": true,
+        "availability": "available",
+        "value": 91.5
+      },
+      {
+        "indicator_id": "origin_breakdown",
+        "label": "Media / people / owned / organization",
+        "role": "core",
+        "examined": true,
+        "available": true,
+        "availability": "available",
+        "value": {
+          "media": {
+            "records": 40,
+            "record_share_percent": 33.3,
+            "attention_share_percent": 55.0,
+            "brand_reputation_index": 57.0,
+            "reputation_eligible": 30
+          },
+          "person": {
+            "records": 70,
+            "record_share_percent": 58.3,
+            "attention_share_percent": 38.0,
+            "brand_reputation_index": 64.0,
+            "reputation_eligible": 60
+          },
+          "owned": {
+            "records": 10,
+            "record_share_percent": 8.4,
+            "attention_share_percent": 7.0,
+            "brand_reputation_index": null,
+            "reputation_eligible": 0
+          }
+        }
+      },
+      {
+        "indicator_id": "source_breakdown",
+        "label": "Source breakdown",
+        "role": "core",
+        "examined": true,
+        "available": true,
+        "availability": "available",
+        "value": {
+          "x": {
+            "records": 45,
+            "reputation_eligible": 38,
+            "brand_reputation_index": 58.0,
+            "average_impact": 0.62,
+            "organic_opinion_records": 35
+          },
+          "tiktok": {
+            "records": 35,
+            "reputation_eligible": 30,
+            "brand_reputation_index": 66.0,
+            "average_impact": 0.77,
+            "organic_opinion_records": 29
+          },
+          "news": {
+            "records": 40,
+            "reputation_eligible": 28,
+            "brand_reputation_index": 60.0,
+            "average_impact": 0.55,
+            "organic_opinion_records": 18
+          }
+        }
+      },
+      {
+        "indicator_id": "positive_narrative_drivers",
+        "label": "Positive narrative drivers",
+        "role": "core",
+        "examined": true,
+        "available": true,
+        "availability": "available",
+        "value": [
+          {
+            "name": "Winning dream",
+            "mention_count": 22,
+            "reputation_point_contribution": 8.4,
+            "average_sentiment": 0.7,
+            "average_impact": 0.65
+          }
+        ]
+      },
+      {
+        "indicator_id": "negative_narrative_drivers",
+        "label": "Negative narrative drivers",
+        "role": "core",
+        "examined": true,
+        "available": true,
+        "availability": "available",
+        "value": [
+          {
+            "name": "Trust concern",
+            "mention_count": 15,
+            "reputation_point_contribution": -5.1,
+            "average_sentiment": -0.8,
+            "average_impact": 0.72
+          }
+        ]
+      },
+      {
+        "indicator_id": "topic_drivers",
+        "label": "Topic drivers",
+        "role": "core",
+        "examined": true,
+        "available": true,
+        "availability": "available",
+        "value": [
+          {
+            "name": "Jackpot",
+            "mention_count": 30,
+            "reputation_point_contribution": 5.0,
+            "average_sentiment": 0.5
+          },
+          {
+            "name": "Price",
+            "mention_count": 18,
+            "reputation_point_contribution": -3.0,
+            "average_sentiment": -0.6
+          }
+        ]
+      },
+      {
+        "indicator_id": "media_influence",
+        "label": "Media influence",
+        "role": "core",
+        "examined": true,
+        "available": true,
+        "availability": "available",
+        "value": [
+          {
+            "author": "SKAI.gr",
+            "records": 7,
+            "attention_score_sum": 6.8,
+            "weighted_sentiment": 0.44
+          },
+          {
+            "author": "NewsIt",
+            "records": 6,
+            "attention_score_sum": 5.9,
+            "weighted_sentiment": 0.21
+          },
+          {
+            "author": "iefimerida",
+            "records": 5,
+            "attention_score_sum": 4.8,
+            "weighted_sentiment": -0.1
+          },
+          {
+            "author": "NEWS 24/7",
+            "records": 4,
+            "attention_score_sum": 3.9,
+            "weighted_sentiment": 0.08
+          }
+        ]
+      },
+      {
+        "indicator_id": "people_influence",
+        "label": "People / creator influence",
+        "role": "core",
+        "examined": true,
+        "available": true,
+        "availability": "available",
+        "value": [
+          {
+            "author": "creator_gr",
+            "records": 4,
+            "attention_score_sum": 4.3,
+            "weighted_sentiment": 0.62
+          },
+          {
+            "author": "user_gr_2",
+            "records": 3,
+            "attention_score_sum": 2.7,
+            "weighted_sentiment": -0.71
+          },
+          {
+            "author": "user_gr_1",
+            "records": 2,
+            "attention_score_sum": 2.1,
+            "weighted_sentiment": 0.8
+          }
+        ]
+      },
+      {
+        "indicator_id": "time_trends",
+        "label": "Time trends",
+        "role": "core",
+        "examined": true,
+        "available": true,
+        "availability": "available",
+        "value": {
+          "daily_points": 10,
+          "daily": [
+            {
+              "date": "2026-08-01",
+              "records": 18,
+              "brand_reputation_index": 63,
+              "negative_weight_share": 0.2,
+              "anger_opinion_weight_share": 0.18,
+              "joy_opinion_weight_share": 0.42,
+              "surprise_opinion_weight_share": 0.11,
+              "sadness_opinion_weight_share": 0.08,
+              "fear_opinion_weight_share": 0.05,
+              "disgust_opinion_weight_share": 0.03,
+              "neutral_opinion_weight_share": 0.13,
+              "attention_score_sum": 11.16
+            },
+            {
+              "date": "2026-08-02",
+              "records": 20,
+              "brand_reputation_index": 64,
+              "negative_weight_share": 0.18,
+              "anger_opinion_weight_share": 0.17,
+              "joy_opinion_weight_share": 0.44,
+              "surprise_opinion_weight_share": 0.1,
+              "sadness_opinion_weight_share": 0.07,
+              "fear_opinion_weight_share": 0.05,
+              "disgust_opinion_weight_share": 0.03,
+              "neutral_opinion_weight_share": 0.14,
+              "attention_score_sum": 12.4
+            },
+            {
+              "date": "2026-08-03",
+              "records": 22,
+              "brand_reputation_index": 62,
+              "negative_weight_share": 0.22,
+              "anger_opinion_weight_share": 0.2,
+              "joy_opinion_weight_share": 0.4,
+              "surprise_opinion_weight_share": 0.12,
+              "sadness_opinion_weight_share": 0.08,
+              "fear_opinion_weight_share": 0.05,
+              "disgust_opinion_weight_share": 0.03,
+              "neutral_opinion_weight_share": 0.12,
+              "attention_score_sum": 13.64
+            },
+            {
+              "date": "2026-08-04",
+              "records": 19,
+              "brand_reputation_index": 61,
+              "negative_weight_share": 0.24,
+              "anger_opinion_weight_share": 0.21,
+              "joy_opinion_weight_share": 0.39,
+              "surprise_opinion_weight_share": 0.13,
+              "sadness_opinion_weight_share": 0.09,
+              "fear_opinion_weight_share": 0.05,
+              "disgust_opinion_weight_share": 0.03,
+              "neutral_opinion_weight_share": 0.1,
+              "attention_score_sum": 11.78
+            },
+            {
+              "date": "2026-08-05",
+              "records": 24,
+              "brand_reputation_index": 60,
+              "negative_weight_share": 0.25,
+              "anger_opinion_weight_share": 0.22,
+              "joy_opinion_weight_share": 0.38,
+              "surprise_opinion_weight_share": 0.12,
+              "sadness_opinion_weight_share": 0.1,
+              "fear_opinion_weight_share": 0.06,
+              "disgust_opinion_weight_share": 0.03,
+              "neutral_opinion_weight_share": 0.09,
+              "attention_score_sum": 14.88
+            },
+            {
+              "date": "2026-08-06",
+              "records": 28,
+              "brand_reputation_index": 58,
+              "negative_weight_share": 0.28,
+              "anger_opinion_weight_share": 0.25,
+              "joy_opinion_weight_share": 0.35,
+              "surprise_opinion_weight_share": 0.11,
+              "sadness_opinion_weight_share": 0.1,
+              "fear_opinion_weight_share": 0.06,
+              "disgust_opinion_weight_share": 0.04,
+              "neutral_opinion_weight_share": 0.09,
+              "attention_score_sum": 17.36
+            },
+            {
+              "date": "2026-08-07",
+              "records": 30,
+              "brand_reputation_index": 57,
+              "negative_weight_share": 0.3,
+              "anger_opinion_weight_share": 0.27,
+              "joy_opinion_weight_share": 0.34,
+              "surprise_opinion_weight_share": 0.1,
+              "sadness_opinion_weight_share": 0.11,
+              "fear_opinion_weight_share": 0.06,
+              "disgust_opinion_weight_share": 0.04,
+              "neutral_opinion_weight_share": 0.08,
+              "attention_score_sum": 18.6
+            },
+            {
+              "date": "2026-08-08",
+              "records": 62,
+              "brand_reputation_index": 49,
+              "negative_weight_share": 0.57,
+              "anger_opinion_weight_share": 0.52,
+              "joy_opinion_weight_share": 0.22,
+              "surprise_opinion_weight_share": 0.08,
+              "sadness_opinion_weight_share": 0.1,
+              "fear_opinion_weight_share": 0.04,
+              "disgust_opinion_weight_share": 0.02,
+              "neutral_opinion_weight_share": 0.02,
+              "attention_score_sum": 38.44
+            },
+            {
+              "date": "2026-08-09",
+              "records": 38,
+              "brand_reputation_index": 52,
+              "negative_weight_share": 0.4,
+              "anger_opinion_weight_share": 0.35,
+              "joy_opinion_weight_share": 0.28,
+              "surprise_opinion_weight_share": 0.1,
+              "sadness_opinion_weight_share": 0.09,
+              "fear_opinion_weight_share": 0.05,
+              "disgust_opinion_weight_share": 0.03,
+              "neutral_opinion_weight_share": 0.1,
+              "attention_score_sum": 23.56
+            },
+            {
+              "date": "2026-08-10",
+              "records": 31,
+              "brand_reputation_index": 55,
+              "negative_weight_share": 0.34,
+              "anger_opinion_weight_share": 0.29,
+              "joy_opinion_weight_share": 0.32,
+              "surprise_opinion_weight_share": 0.11,
+              "sadness_opinion_weight_share": 0.08,
+              "fear_opinion_weight_share": 0.05,
+              "disgust_opinion_weight_share": 0.03,
+              "neutral_opinion_weight_share": 0.12,
+              "attention_score_sum": 19.22
+            }
+          ]
+        }
+      },
+      {
+        "indicator_id": "numeric_anomalies",
+        "label": "Numeric anomalies",
+        "role": "core",
+        "examined": true,
+        "available": true,
+        "availability": "available",
+        "value": [
+          {
+            "date": "2026-08-08",
+            "flags": [
+              "volume_spike",
+              "negative_share_spike",
+              "anger_share_spike"
+            ],
+            "volume_robust_z": 6.1,
+            "negative_robust_z": 4.8,
+            "anger_robust_z": 5.4,
+            "joy_robust_z": -3.0,
+            "sadness_robust_z": 0.8,
+            "fear_robust_z": -0.3,
+            "disgust_robust_z": -0.2,
+            "surprise_robust_z": -0.5,
+            "neutral_robust_z": -2.1
+          }
+        ]
+      },
+      {
+        "indicator_id": "data_quality",
+        "label": "Data quality",
+        "role": "quality",
+        "examined": true,
+        "available": true,
+        "availability": "available",
+        "value": {
+          "score": 91,
+          "label": "high"
+        }
+      },
+      {
+        "indicator_id": "source_coverage",
+        "label": "Source coverage",
+        "role": "quality",
+        "examined": true,
+        "available": true,
+        "availability": "available",
+        "value": {
+          "ratio": 0.83,
+          "source_count": 3
+        }
+      },
+      {
+        "indicator_id": "sample_achievement",
+        "label": "Sample achievement",
+        "role": "quality",
+        "examined": true,
+        "available": true,
+        "availability": "available",
+        "value": {
+          "ratio": 0.92,
+          "trusted_records": 120
+        }
+      },
+      {
+        "indicator_id": "authenticity_risk",
+        "label": "Authenticity / bot risk",
+        "role": "quality",
+        "examined": true,
+        "available": true,
+        "availability": "available",
+        "value": {
+          "low_authenticity_records": 4,
+          "low_authenticity_share": 0.0333
+        }
+      },
+      {
+        "indicator_id": "coordination",
+        "label": "Coordinated behaviour",
+        "role": "quality",
+        "examined": true,
+        "available": true,
+        "availability": "available",
+        "value": [
+          {
+            "cluster_id": "coord-1",
+            "records": 9,
+            "accounts": 7,
+            "risk": "suspicious"
+          }
+        ]
+      },
+      {
+        "indicator_id": "story_syndication",
+        "label": "Story syndication / replication",
+        "role": "context",
+        "examined": true,
+        "available": true,
+        "availability": "available",
+        "value": [
+          {
+            "cluster_id": "story-1",
+            "records": 12,
+            "sources": [
+              "news"
+            ],
+            "representative_excerpt": "Same story"
+          }
+        ]
+      },
+      {
+        "indicator_id": "top_mentions",
+        "label": "Top evidence mentions",
+        "role": "core",
+        "examined": true,
+        "available": true,
+        "availability": "available",
+        "value": [
+          {
+            "record_id": "m1",
+            "platform": "news",
+            "author": "SKAI.gr",
+            "origin_group": "media",
+            "content_type": "article",
+            "date": "2026-08-02",
+            "url": "https://example.com/m1",
+            "excerpt": "Το μεγάλο έπαθλο του Eurojackpot ενισχύει το ενδιαφέρον των Ελλήνων παικτών, με την επόμενη κλήρωση να συγκεντρώνει αυξημένη προσοχή.",
+            "sentiment_label": "positive",
+            "sentiment_score": 0.72,
+            "emotion": "joy",
+            "topic": "Jackpot",
+            "narrative": "Winning dream",
+            "impact_score": 0.91,
+            "evidence_confidence": 0.96
+          },
+          {
+            "record_id": "m2",
+            "platform": "x",
+            "author": "user_gr_1",
+            "origin_group": "person",
+            "content_type": "post",
+            "date": "2026-08-03",
+            "url": "https://example.com/m2",
+            "excerpt": "Αν το κέρδιζα θα έκλεινα όλα τα χρέη και θα έφευγα ταξίδι. Μόνο που το σκέφτεσαι χαμογελάς.",
+            "sentiment_label": "positive",
+            "sentiment_score": 0.86,
+            "emotion": "joy",
+            "topic": "Winning fantasy",
+            "narrative": "Winning dream",
+            "impact_score": 0.72,
+            "evidence_confidence": 0.91
+          },
+          {
+            "record_id": "m3",
+            "platform": "tiktok",
+            "author": "creator_gr",
+            "origin_group": "person",
+            "content_type": "video",
+            "date": "2026-08-04",
+            "url": "https://example.com/m3",
+            "excerpt": "Eurojackpot στην Ελλάδα και όλοι συζητάνε τι θα έκαναν με το jackpot.",
+            "sentiment_label": "positive",
+            "sentiment_score": 0.64,
+            "emotion": "surprise",
+            "topic": "Jackpot",
+            "narrative": "Winning dream",
+            "impact_score": 0.88,
+            "evidence_confidence": 0.9
+          },
+          {
+            "record_id": "m4",
+            "platform": "x",
+            "author": "user_gr_2",
+            "origin_group": "person",
+            "content_type": "post",
+            "date": "2026-08-08",
+            "url": "https://example.com/m4",
+            "excerpt": "Με τέτοιες πιθανότητες και τέτοια τιμή, δύσκολα το βλέπω να αξίζει.",
+            "sentiment_label": "negative",
+            "sentiment_score": -0.78,
+            "emotion": "anger",
+            "topic": "Price",
+            "narrative": "Trust concern",
+            "impact_score": 0.83,
+            "evidence_confidence": 0.94
+          },
+          {
+            "record_id": "m5",
+            "platform": "x",
+            "author": "user_gr_3",
+            "origin_group": "person",
+            "content_type": "post",
+            "date": "2026-08-08",
+            "url": "https://example.com/m5",
+            "excerpt": "Πάλι jackpot; Ο κόσμος αρχίζει να αναρωτιέται πόσο πιθανό είναι πραγματικά να κερδίσεις.",
+            "sentiment_label": "negative",
+            "sentiment_score": -0.71,
+            "emotion": "anger",
+            "topic": "Odds",
+            "narrative": "Trust concern",
+            "impact_score": 0.79,
+            "evidence_confidence": 0.92
+          },
+          {
+            "record_id": "m6",
+            "platform": "news",
+            "author": "NewsIt",
+            "origin_group": "media",
+            "content_type": "article",
+            "date": "2026-08-05",
+            "url": "https://example.com/m6",
+            "excerpt": "Η επιτυχία ελληνικού δελτίου επαναφέρει το Eurojackpot στο επίκεντρο και αυξάνει το ενδιαφέρον για την επόμενη κλήρωση.",
+            "sentiment_label": "positive",
+            "sentiment_score": 0.58,
+            "emotion": "joy",
+            "topic": "Greek winner",
+            "narrative": "Local winner momentum",
+            "impact_score": 0.87,
+            "evidence_confidence": 0.95
+          },
+          {
+            "record_id": "m7",
+            "platform": "news",
+            "author": "iefimerida",
+            "origin_group": "media",
+            "content_type": "article",
+            "date": "2026-08-08",
+            "url": "https://example.com/m7",
+            "excerpt": "Στα social media καταγράφονται και επιφυλάξεις γύρω από το κόστος συμμετοχής και τις πιθανότητες επιτυχίας.",
+            "sentiment_label": "negative",
+            "sentiment_score": -0.42,
+            "emotion": "neutral",
+            "topic": "Price",
+            "narrative": "Trust concern",
+            "impact_score": 0.74,
+            "evidence_confidence": 0.89
+          },
+          {
+            "record_id": "m8",
+            "platform": "news",
+            "author": "NEWS 24/7",
+            "origin_group": "media",
+            "content_type": "article",
+            "date": "2026-08-06",
+            "url": "https://example.com/m8",
+            "excerpt": "Το Eurojackpot διατηρεί υψηλή προβολή στα ελληνικά μέσα ενόψει της μεγάλης κλήρωσης.",
+            "sentiment_label": "neutral",
+            "sentiment_score": 0.05,
+            "emotion": "neutral",
+            "topic": "Draw",
+            "narrative": "Draw coverage",
+            "impact_score": 0.81,
+            "evidence_confidence": 0.93
+          }
+        ]
+      }
+    ],
+    "headline_metrics": {
+      "step5_warnings": [
+        "Not all selected sources returned usable data."
+      ],
+      "top_mentions": [
+        {
+          "record_id": "m1",
+          "platform": "news",
+          "author": "SKAI.gr",
+          "origin_group": "media",
+          "content_type": "article",
+          "date": "2026-08-02",
+          "url": "https://example.com/m1",
+          "excerpt": "Το μεγάλο έπαθλο του Eurojackpot ενισχύει το ενδιαφέρον των Ελλήνων παικτών, με την επόμενη κλήρωση να συγκεντρώνει αυξημένη προσοχή.",
+          "sentiment_label": "positive",
+          "sentiment_score": 0.72,
+          "emotion": "joy",
+          "topic": "Jackpot",
+          "narrative": "Winning dream",
+          "impact_score": 0.91,
+          "evidence_confidence": 0.96
+        },
+        {
+          "record_id": "m2",
+          "platform": "x",
+          "author": "user_gr_1",
+          "origin_group": "person",
+          "content_type": "post",
+          "date": "2026-08-03",
+          "url": "https://example.com/m2",
+          "excerpt": "Αν το κέρδιζα θα έκλεινα όλα τα χρέη και θα έφευγα ταξίδι. Μόνο που το σκέφτεσαι χαμογελάς.",
+          "sentiment_label": "positive",
+          "sentiment_score": 0.86,
+          "emotion": "joy",
+          "topic": "Winning fantasy",
+          "narrative": "Winning dream",
+          "impact_score": 0.72,
+          "evidence_confidence": 0.91
+        },
+        {
+          "record_id": "m3",
+          "platform": "tiktok",
+          "author": "creator_gr",
+          "origin_group": "person",
+          "content_type": "video",
+          "date": "2026-08-04",
+          "url": "https://example.com/m3",
+          "excerpt": "Eurojackpot στην Ελλάδα και όλοι συζητάνε τι θα έκαναν με το jackpot.",
+          "sentiment_label": "positive",
+          "sentiment_score": 0.64,
+          "emotion": "surprise",
+          "topic": "Jackpot",
+          "narrative": "Winning dream",
+          "impact_score": 0.88,
+          "evidence_confidence": 0.9
+        },
+        {
+          "record_id": "m4",
+          "platform": "x",
+          "author": "user_gr_2",
+          "origin_group": "person",
+          "content_type": "post",
+          "date": "2026-08-08",
+          "url": "https://example.com/m4",
+          "excerpt": "Με τέτοιες πιθανότητες και τέτοια τιμή, δύσκολα το βλέπω να αξίζει.",
+          "sentiment_label": "negative",
+          "sentiment_score": -0.78,
+          "emotion": "anger",
+          "topic": "Price",
+          "narrative": "Trust concern",
+          "impact_score": 0.83,
+          "evidence_confidence": 0.94
+        },
+        {
+          "record_id": "m5",
+          "platform": "x",
+          "author": "user_gr_3",
+          "origin_group": "person",
+          "content_type": "post",
+          "date": "2026-08-08",
+          "url": "https://example.com/m5",
+          "excerpt": "Πάλι jackpot; Ο κόσμος αρχίζει να αναρωτιέται πόσο πιθανό είναι πραγματικά να κερδίσεις.",
+          "sentiment_label": "negative",
+          "sentiment_score": -0.71,
+          "emotion": "anger",
+          "topic": "Odds",
+          "narrative": "Trust concern",
+          "impact_score": 0.79,
+          "evidence_confidence": 0.92
+        },
+        {
+          "record_id": "m6",
+          "platform": "news",
+          "author": "NewsIt",
+          "origin_group": "media",
+          "content_type": "article",
+          "date": "2026-08-05",
+          "url": "https://example.com/m6",
+          "excerpt": "Η επιτυχία ελληνικού δελτίου επαναφέρει το Eurojackpot στο επίκεντρο και αυξάνει το ενδιαφέρον για την επόμενη κλήρωση.",
+          "sentiment_label": "positive",
+          "sentiment_score": 0.58,
+          "emotion": "joy",
+          "topic": "Greek winner",
+          "narrative": "Local winner momentum",
+          "impact_score": 0.87,
+          "evidence_confidence": 0.95
+        },
+        {
+          "record_id": "m7",
+          "platform": "news",
+          "author": "iefimerida",
+          "origin_group": "media",
+          "content_type": "article",
+          "date": "2026-08-08",
+          "url": "https://example.com/m7",
+          "excerpt": "Στα social media καταγράφονται και επιφυλάξεις γύρω από το κόστος συμμετοχής και τις πιθανότητες επιτυχίας.",
+          "sentiment_label": "negative",
+          "sentiment_score": -0.42,
+          "emotion": "neutral",
+          "topic": "Price",
+          "narrative": "Trust concern",
+          "impact_score": 0.74,
+          "evidence_confidence": 0.89
+        },
+        {
+          "record_id": "m8",
+          "platform": "news",
+          "author": "NEWS 24/7",
+          "origin_group": "media",
+          "content_type": "article",
+          "date": "2026-08-06",
+          "url": "https://example.com/m8",
+          "excerpt": "Το Eurojackpot διατηρεί υψηλή προβολή στα ελληνικά μέσα ενόψει της μεγάλης κλήρωσης.",
+          "sentiment_label": "neutral",
+          "sentiment_score": 0.05,
+          "emotion": "neutral",
+          "topic": "Draw",
+          "narrative": "Draw coverage",
+          "impact_score": 0.81,
+          "evidence_confidence": 0.93
+        }
+      ],
+      "media_influence": [
+        {
+          "author": "SKAI.gr",
+          "records": 7,
+          "attention_score_sum": 6.8,
+          "weighted_sentiment": 0.44
+        },
+        {
+          "author": "NewsIt",
+          "records": 6,
+          "attention_score_sum": 5.9,
+          "weighted_sentiment": 0.21
+        },
+        {
+          "author": "iefimerida",
+          "records": 5,
+          "attention_score_sum": 4.8,
+          "weighted_sentiment": -0.1
+        },
+        {
+          "author": "NEWS 24/7",
+          "records": 4,
+          "attention_score_sum": 3.9,
+          "weighted_sentiment": 0.08
+        }
+      ],
+      "people_influence": [
+        {
+          "author": "creator_gr",
+          "records": 4,
+          "attention_score_sum": 4.3,
+          "weighted_sentiment": 0.62
+        },
+        {
+          "author": "user_gr_2",
+          "records": 3,
+          "attention_score_sum": 2.7,
+          "weighted_sentiment": -0.71
+        },
+        {
+          "author": "user_gr_1",
+          "records": 2,
+          "attention_score_sum": 2.1,
+          "weighted_sentiment": 0.8
+        }
+      ],
+      "time_trends": {
+        "daily_points": 10,
+        "daily": [
+          {
+            "date": "2026-08-01",
+            "records": 18,
+            "brand_reputation_index": 63,
+            "negative_weight_share": 0.2,
+            "anger_opinion_weight_share": 0.18,
+            "joy_opinion_weight_share": 0.42,
+            "surprise_opinion_weight_share": 0.11,
+            "sadness_opinion_weight_share": 0.08,
+            "fear_opinion_weight_share": 0.05,
+            "disgust_opinion_weight_share": 0.03,
+            "neutral_opinion_weight_share": 0.13,
+            "attention_score_sum": 11.16
+          },
+          {
+            "date": "2026-08-02",
+            "records": 20,
+            "brand_reputation_index": 64,
+            "negative_weight_share": 0.18,
+            "anger_opinion_weight_share": 0.17,
+            "joy_opinion_weight_share": 0.44,
+            "surprise_opinion_weight_share": 0.1,
+            "sadness_opinion_weight_share": 0.07,
+            "fear_opinion_weight_share": 0.05,
+            "disgust_opinion_weight_share": 0.03,
+            "neutral_opinion_weight_share": 0.14,
+            "attention_score_sum": 12.4
+          },
+          {
+            "date": "2026-08-03",
+            "records": 22,
+            "brand_reputation_index": 62,
+            "negative_weight_share": 0.22,
+            "anger_opinion_weight_share": 0.2,
+            "joy_opinion_weight_share": 0.4,
+            "surprise_opinion_weight_share": 0.12,
+            "sadness_opinion_weight_share": 0.08,
+            "fear_opinion_weight_share": 0.05,
+            "disgust_opinion_weight_share": 0.03,
+            "neutral_opinion_weight_share": 0.12,
+            "attention_score_sum": 13.64
+          },
+          {
+            "date": "2026-08-04",
+            "records": 19,
+            "brand_reputation_index": 61,
+            "negative_weight_share": 0.24,
+            "anger_opinion_weight_share": 0.21,
+            "joy_opinion_weight_share": 0.39,
+            "surprise_opinion_weight_share": 0.13,
+            "sadness_opinion_weight_share": 0.09,
+            "fear_opinion_weight_share": 0.05,
+            "disgust_opinion_weight_share": 0.03,
+            "neutral_opinion_weight_share": 0.1,
+            "attention_score_sum": 11.78
+          },
+          {
+            "date": "2026-08-05",
+            "records": 24,
+            "brand_reputation_index": 60,
+            "negative_weight_share": 0.25,
+            "anger_opinion_weight_share": 0.22,
+            "joy_opinion_weight_share": 0.38,
+            "surprise_opinion_weight_share": 0.12,
+            "sadness_opinion_weight_share": 0.1,
+            "fear_opinion_weight_share": 0.06,
+            "disgust_opinion_weight_share": 0.03,
+            "neutral_opinion_weight_share": 0.09,
+            "attention_score_sum": 14.88
+          },
+          {
+            "date": "2026-08-06",
+            "records": 28,
+            "brand_reputation_index": 58,
+            "negative_weight_share": 0.28,
+            "anger_opinion_weight_share": 0.25,
+            "joy_opinion_weight_share": 0.35,
+            "surprise_opinion_weight_share": 0.11,
+            "sadness_opinion_weight_share": 0.1,
+            "fear_opinion_weight_share": 0.06,
+            "disgust_opinion_weight_share": 0.04,
+            "neutral_opinion_weight_share": 0.09,
+            "attention_score_sum": 17.36
+          },
+          {
+            "date": "2026-08-07",
+            "records": 30,
+            "brand_reputation_index": 57,
+            "negative_weight_share": 0.3,
+            "anger_opinion_weight_share": 0.27,
+            "joy_opinion_weight_share": 0.34,
+            "surprise_opinion_weight_share": 0.1,
+            "sadness_opinion_weight_share": 0.11,
+            "fear_opinion_weight_share": 0.06,
+            "disgust_opinion_weight_share": 0.04,
+            "neutral_opinion_weight_share": 0.08,
+            "attention_score_sum": 18.6
+          },
+          {
+            "date": "2026-08-08",
+            "records": 62,
+            "brand_reputation_index": 49,
+            "negative_weight_share": 0.57,
+            "anger_opinion_weight_share": 0.52,
+            "joy_opinion_weight_share": 0.22,
+            "surprise_opinion_weight_share": 0.08,
+            "sadness_opinion_weight_share": 0.1,
+            "fear_opinion_weight_share": 0.04,
+            "disgust_opinion_weight_share": 0.02,
+            "neutral_opinion_weight_share": 0.02,
+            "attention_score_sum": 38.44
+          },
+          {
+            "date": "2026-08-09",
+            "records": 38,
+            "brand_reputation_index": 52,
+            "negative_weight_share": 0.4,
+            "anger_opinion_weight_share": 0.35,
+            "joy_opinion_weight_share": 0.28,
+            "surprise_opinion_weight_share": 0.1,
+            "sadness_opinion_weight_share": 0.09,
+            "fear_opinion_weight_share": 0.05,
+            "disgust_opinion_weight_share": 0.03,
+            "neutral_opinion_weight_share": 0.1,
+            "attention_score_sum": 23.56
+          },
+          {
+            "date": "2026-08-10",
+            "records": 31,
+            "brand_reputation_index": 55,
+            "negative_weight_share": 0.34,
+            "anger_opinion_weight_share": 0.29,
+            "joy_opinion_weight_share": 0.32,
+            "surprise_opinion_weight_share": 0.11,
+            "sadness_opinion_weight_share": 0.08,
+            "fear_opinion_weight_share": 0.05,
+            "disgust_opinion_weight_share": 0.03,
+            "neutral_opinion_weight_share": 0.12,
+            "attention_score_sum": 19.22
+          }
+        ]
+      },
+      "numeric_anomalies": [
+        {
+          "date": "2026-08-08",
+          "flags": [
+            "volume_spike",
+            "negative_share_spike",
+            "anger_share_spike"
+          ],
+          "volume_robust_z": 6.1,
+          "negative_robust_z": 4.8,
+          "anger_robust_z": 5.4,
+          "joy_robust_z": -3.0,
+          "sadness_robust_z": 0.8,
+          "fear_robust_z": -0.3,
+          "disgust_robust_z": -0.2,
+          "surprise_robust_z": -0.5,
+          "neutral_robust_z": -2.1
+        }
+      ]
+    },
+    "investigations": [
+      {
+        "investigation_id": "gold-i1",
+        "type": "reputation_daily_change",
+        "question": {
+          "en": "What was associated with the sharp Reputation drop on 8 August?",
+          "el": "Τι συνδέθηκε με την απότομη πτώση του Reputation στις 8 Αυγούστου;"
+        },
+        "finding": {
+          "en": "The drop coincided with a higher share of critical price/odds discussion and a sharp rise in anger. The evidence supports an association, not external causality.",
+          "el": "Η πτώση συνέπεσε με μεγαλύτερο μερίδιο κριτικής γύρω από τιμή/πιθανότητες και απότομη άνοδο του θυμού. Το evidence υποστηρίζει συσχέτιση, όχι εξωτερική αιτιότητα."
+        },
+        "confidence": {
+          "score": 0.91
+        },
+        "presentation": {
+          "candidate": true,
+          "priority_score": 96
+        },
+        "causal_status": "not_proven",
+        "indicator_ids": [
+          "brand_reputation",
+          "time_trends",
+          "emotions",
+          "negative_narrative_drivers"
+        ],
+        "evidence_record_ids": [
+          "m4",
+          "m5",
+          "m7"
+        ],
+        "metrics": {
+          "reputation_delta": -8.0,
+          "anger_share": 0.52,
+          "negative_share": 0.57
+        },
+        "conclusion_type": "observed_association"
+      },
+      {
+        "investigation_id": "gold-i2",
+        "type": "positive_narrative_driver",
+        "question": {
+          "en": "What sustained the strongest positive signal?",
+          "el": "Τι διατήρησε το ισχυρότερο θετικό σήμα;"
+        },
+        "finding": {
+          "en": "Winning-dream and local-winner narratives carried the strongest positive Reputation contribution, supported by high-impact media and organic people evidence.",
+          "el": "Τα narratives του ονείρου της νίκης και του Έλληνα νικητή είχαν την ισχυρότερη θετική συμβολή στο Reputation, με evidence από media υψηλού impact και organic άτομα."
+        },
+        "confidence": {
+          "score": 0.89
+        },
+        "presentation": {
+          "candidate": true,
+          "priority_score": 83
+        },
+        "causal_status": "not_proven",
+        "indicator_ids": [
+          "positive_narrative_drivers",
+          "media_influence",
+          "people_influence"
+        ],
+        "evidence_record_ids": [
+          "m1",
+          "m2",
+          "m6"
+        ],
+        "metrics": {
+          "reputation_contribution": 8.4
+        },
+        "conclusion_type": "deterministic_contribution"
+      },
+      {
+        "investigation_id": "gold-i3",
+        "type": "media_people_divergence",
+        "question": {
+          "en": "Are media and people shaping the conversation differently?",
+          "el": "Διαμορφώνουν διαφορετικά τη συζήτηση τα media και τα άτομα;"
+        },
+        "finding": {
+          "en": "Media carried a larger share of attention, while organic people contributed more critical price/odds discussion. Treat this as a channel-level difference in observed evidence, not a causal media effect.",
+          "el": "Τα media συγκέντρωσαν μεγαλύτερο μερίδιο προσοχής, ενώ τα organic άτομα συνεισέφεραν περισσότερη κριτική γύρω από τιμή/πιθανότητες. Πρόκειται για διαφορά καναλιών στο παρατηρούμενο evidence, όχι για αποδεδειγμένη αιτιώδη επίδραση των media."
+        },
+        "confidence": {
+          "score": 0.86
+        },
+        "presentation": {
+          "candidate": true,
+          "priority_score": 78
+        },
+        "causal_status": "not_proven",
+        "indicator_ids": [
+          "origin_breakdown",
+          "media_influence",
+          "people_influence",
+          "source_breakdown"
+        ],
+        "evidence_record_ids": [
+          "m4",
+          "m5",
+          "m1",
+          "m6"
+        ],
+        "metrics": {
+          "media_attention_share": 55.0,
+          "people_record_share": 58.3
+        },
+        "conclusion_type": "descriptive_difference"
+      }
+    ],
+    "presentation_guardrails": {
+      "must_review_all_indicators": true,
+      "must_preserve_quality_warnings": true,
+      "must_not_present_association_as_causation": true,
+      "must_attach_evidence_to_material_claims": true
+    }
+  },
+  "visual_pack": {
+    "contract_version": "signalyth-visual-pack-v1.2",
+    "research_context": {
+      "client": "OPAP",
+      "topic": "Eurojackpot",
+      "market": "Greece",
+      "date_from": "2026-08-01",
+      "date_to": "2026-08-31"
+    },
+    "indicator_review": [
+      {
+        "indicator_id": "sample_volume",
+        "label": "Sample volume / usable evidence",
+        "role": "quality",
+        "examined": true,
+        "available": true,
+        "visual_status": "visualized",
+        "chart_ids": [
+          "sample_overview"
+        ],
+        "omission_reason": null
+      },
+      {
+        "indicator_id": "market_relevance",
+        "label": "Target-market relevance",
+        "role": "quality",
+        "examined": true,
+        "available": true,
+        "visual_status": "visualized",
+        "chart_ids": [
+          "market_relevance"
+        ],
+        "omission_reason": null
+      },
+      {
+        "indicator_id": "brand_reputation",
+        "label": "Brand Reputation",
+        "role": "core",
+        "examined": true,
+        "available": true,
+        "visual_status": "visualized",
+        "chart_ids": [
+          "brand_reputation",
+          "time_trends"
+        ],
+        "omission_reason": null
+      },
+      {
+        "indicator_id": "evidence_confidence",
+        "label": "Evidence confidence",
+        "role": "quality",
+        "examined": true,
+        "available": true,
+        "visual_status": "visualized",
+        "chart_ids": [
+          "evidence_confidence"
+        ],
+        "omission_reason": null
+      },
+      {
+        "indicator_id": "sentiment",
+        "label": "Sentiment",
+        "role": "core",
+        "examined": true,
+        "available": true,
+        "visual_status": "visualized",
+        "chart_ids": [
+          "sentiment_distribution"
+        ],
+        "omission_reason": null
+      },
+      {
+        "indicator_id": "emotions",
+        "label": "Emotions",
+        "role": "core",
+        "examined": true,
+        "available": true,
+        "visual_status": "visualized",
+        "chart_ids": [
+          "emotion_distribution",
+          "emotion_trends"
+        ],
+        "omission_reason": null
+      },
+      {
+        "indicator_id": "stance",
+        "label": "Target stance",
+        "role": "core",
+        "examined": true,
+        "available": true,
+        "visual_status": "visualized",
+        "chart_ids": [
+          "stance_distribution"
+        ],
+        "omission_reason": null
+      },
+      {
+        "indicator_id": "impact_attention",
+        "label": "Impact / attention",
+        "role": "core",
+        "examined": true,
+        "available": true,
+        "visual_status": "visualized",
+        "chart_ids": [
+          "impact_coverage"
+        ],
+        "omission_reason": null
+      },
+      {
+        "indicator_id": "effective_independent_voices",
+        "label": "Effective independent voices",
+        "role": "quality",
+        "examined": true,
+        "available": true,
+        "visual_status": "visualized",
+        "chart_ids": [
+          "sample_overview"
+        ],
+        "omission_reason": null
+      },
+      {
+        "indicator_id": "origin_breakdown",
+        "label": "Media / people / owned / organization",
+        "role": "core",
+        "examined": true,
+        "available": true,
+        "visual_status": "visualized",
+        "chart_ids": [
+          "origin_breakdown"
+        ],
+        "omission_reason": null
+      },
+      {
+        "indicator_id": "source_breakdown",
+        "label": "Source breakdown",
+        "role": "core",
+        "examined": true,
+        "available": true,
+        "visual_status": "visualized",
+        "chart_ids": [
+          "source_comparison"
+        ],
+        "omission_reason": null
+      },
+      {
+        "indicator_id": "positive_narrative_drivers",
+        "label": "Positive narrative drivers",
+        "role": "core",
+        "examined": true,
+        "available": true,
+        "visual_status": "visualized",
+        "chart_ids": [
+          "narrative_drivers"
+        ],
+        "omission_reason": null
+      },
+      {
+        "indicator_id": "negative_narrative_drivers",
+        "label": "Negative narrative drivers",
+        "role": "core",
+        "examined": true,
+        "available": true,
+        "visual_status": "visualized",
+        "chart_ids": [
+          "narrative_drivers"
+        ],
+        "omission_reason": null
+      },
+      {
+        "indicator_id": "topic_drivers",
+        "label": "Topic drivers",
+        "role": "core",
+        "examined": true,
+        "available": true,
+        "visual_status": "visualized",
+        "chart_ids": [
+          "topic_drivers"
+        ],
+        "omission_reason": null
+      },
+      {
+        "indicator_id": "media_influence",
+        "label": "Media influence",
+        "role": "core",
+        "examined": true,
+        "available": true,
+        "visual_status": "visualized",
+        "chart_ids": [
+          "media_influence"
+        ],
+        "omission_reason": null
+      },
+      {
+        "indicator_id": "people_influence",
+        "label": "People / creator influence",
+        "role": "core",
+        "examined": true,
+        "available": true,
+        "visual_status": "visualized",
+        "chart_ids": [
+          "people_influence"
+        ],
+        "omission_reason": null
+      },
+      {
+        "indicator_id": "time_trends",
+        "label": "Time trends",
+        "role": "core",
+        "examined": true,
+        "available": true,
+        "visual_status": "visualized",
+        "chart_ids": [
+          "time_trends",
+          "emotion_trends"
+        ],
+        "omission_reason": null
+      },
+      {
+        "indicator_id": "numeric_anomalies",
+        "label": "Numeric anomalies",
+        "role": "core",
+        "examined": true,
+        "available": true,
+        "visual_status": "visualized",
+        "chart_ids": [
+          "anomalies"
+        ],
+        "omission_reason": null
+      },
+      {
+        "indicator_id": "data_quality",
+        "label": "Data quality",
+        "role": "quality",
+        "examined": true,
+        "available": true,
+        "visual_status": "visualized",
+        "chart_ids": [
+          "quality_matrix"
+        ],
+        "omission_reason": null
+      },
+      {
+        "indicator_id": "source_coverage",
+        "label": "Source coverage",
+        "role": "quality",
+        "examined": true,
+        "available": true,
+        "visual_status": "visualized",
+        "chart_ids": [
+          "quality_matrix"
+        ],
+        "omission_reason": null
+      },
+      {
+        "indicator_id": "sample_achievement",
+        "label": "Sample achievement",
+        "role": "quality",
+        "examined": true,
+        "available": true,
+        "visual_status": "visualized",
+        "chart_ids": [
+          "quality_matrix"
+        ],
+        "omission_reason": null
+      },
+      {
+        "indicator_id": "authenticity_risk",
+        "label": "Authenticity / bot risk",
+        "role": "quality",
+        "examined": true,
+        "available": true,
+        "visual_status": "visualized",
+        "chart_ids": [
+          "authenticity_coordination"
+        ],
+        "omission_reason": null
+      },
+      {
+        "indicator_id": "coordination",
+        "label": "Coordinated behaviour",
+        "role": "quality",
+        "examined": true,
+        "available": true,
+        "visual_status": "visualized",
+        "chart_ids": [
+          "authenticity_coordination"
+        ],
+        "omission_reason": null
+      },
+      {
+        "indicator_id": "story_syndication",
+        "label": "Story syndication / replication",
+        "role": "context",
+        "examined": true,
+        "available": true,
+        "visual_status": "visualized",
+        "chart_ids": [
+          "story_syndication"
+        ],
+        "omission_reason": null
+      },
+      {
+        "indicator_id": "top_mentions",
+        "label": "Top evidence mentions",
+        "role": "core",
+        "examined": true,
+        "available": true,
+        "visual_status": "visualized",
+        "chart_ids": [
+          "top_mentions"
+        ],
+        "omission_reason": null
+      }
+    ],
+    "chart_specs": [
+      {
+        "chart_id": "sample_overview",
+        "chart_type": "kpi_group",
+        "title": {
+          "en": "Evidence base",
+          "el": "Βάση δεδομένων"
+        },
+        "subtitle": {
+          "en": "",
+          "el": ""
+        },
+        "indicator_ids": [
+          "sample_volume",
+          "effective_independent_voices"
+        ],
+        "data": {
+          "items": [
+            {
+              "key": "analysis_ready",
+              "label": {
+                "en": "Analysis-ready",
+                "el": "Έτοιμα για ανάλυση"
+              },
+              "value": 120
+            },
+            {
+              "key": "trusted",
+              "label": {
+                "en": "Trusted",
+                "el": "Αξιόπιστα"
+              },
+              "value": 120
+            },
+            {
+              "key": "reputation_eligible",
+              "label": {
+                "en": "Reputation-eligible",
+                "el": "Κατάλληλα για Reputation"
+              },
+              "value": 96
+            },
+            {
+              "key": "effective_voices",
+              "label": {
+                "en": "Effective voices",
+                "el": "Αποτελεσματικές φωνές"
+              },
+              "value": 91.5
+            }
+          ]
+        },
+        "unit": null,
+        "priority": 88,
+        "dashboard": {
+          "section": "overview",
+          "span": 2
+        },
+        "presentation": {
+          "candidate": true,
+          "native_editable_ready": true,
+          "preferred_role": "methodology_context",
+          "render_as_raster": false
+        },
+        "evidence_refs": [],
+        "warnings": [],
+        "notes": {}
+      },
+      {
+        "chart_id": "market_relevance",
+        "chart_type": "quality_kpi",
+        "title": {
+          "en": "Target-market relevance",
+          "el": "Συνάφεια με την αγορά-στόχο"
+        },
+        "subtitle": {
+          "en": "",
+          "el": ""
+        },
+        "indicator_ids": [
+          "market_relevance"
+        ],
+        "data": {
+          "market": "Greece",
+          "high_relevance_share_percent": 91.67,
+          "average_market_score_percent": 88.0,
+          "records_scored": 120
+        },
+        "unit": "percent",
+        "priority": 82,
+        "dashboard": {
+          "section": "quality",
+          "span": 1
+        },
+        "presentation": {
+          "candidate": true,
+          "native_editable_ready": true,
+          "preferred_role": "quality_guardrail",
+          "render_as_raster": false
+        },
+        "evidence_refs": [],
+        "warnings": [],
+        "notes": {}
+      },
+      {
+        "chart_id": "brand_reputation",
+        "chart_type": "gauge_kpi",
+        "title": {
+          "en": "Brand Reputation",
+          "el": "Brand Reputation"
+        },
+        "subtitle": {
+          "en": "",
+          "el": ""
+        },
+        "indicator_ids": [
+          "brand_reputation"
+        ],
+        "data": {
+          "value": 61.25,
+          "min": 0,
+          "max": 100,
+          "neutral_low": 45,
+          "neutral_high": 55,
+          "interpretation": "positive"
+        },
+        "unit": "index",
+        "priority": 100,
+        "dashboard": {
+          "section": "overview",
+          "span": 1
+        },
+        "presentation": {
+          "candidate": true,
+          "native_editable_ready": true,
+          "preferred_role": "headline",
+          "render_as_raster": false
+        },
+        "evidence_refs": [],
+        "warnings": [],
+        "notes": {}
+      },
+      {
+        "chart_id": "evidence_confidence",
+        "chart_type": "gauge_kpi",
+        "title": {
+          "en": "Evidence confidence",
+          "el": "Βεβαιότητα evidence"
+        },
+        "subtitle": {
+          "en": "",
+          "el": ""
+        },
+        "indicator_ids": [
+          "evidence_confidence"
+        ],
+        "data": {
+          "value": 83.2,
+          "min": 0,
+          "max": 100,
+          "label": "high",
+          "effective_sample_size": 76.1
+        },
+        "unit": "score",
+        "priority": 92,
+        "dashboard": {
+          "section": "overview",
+          "span": 1
+        },
+        "presentation": {
+          "candidate": true,
+          "native_editable_ready": true,
+          "preferred_role": "quality_guardrail",
+          "render_as_raster": false
+        },
+        "evidence_refs": [],
+        "warnings": [
+          "Evidence strength only."
+        ],
+        "notes": {}
+      },
+      {
+        "chart_id": "sentiment_distribution",
+        "chart_type": "distribution_bar",
+        "title": {
+          "en": "Weighted sentiment",
+          "el": "Σταθμισμένο sentiment"
+        },
+        "subtitle": {
+          "en": "",
+          "el": ""
+        },
+        "indicator_ids": [
+          "sentiment"
+        ],
+        "data": {
+          "categories": [
+            {
+              "label": "positive",
+              "value": 52.1
+            },
+            {
+              "label": "neutral",
+              "value": 12.7
+            },
+            {
+              "label": "mixed",
+              "value": 5.0
+            },
+            {
+              "label": "negative",
+              "value": 30.2
+            }
+          ],
+          "total_records": 96,
+          "basis": "weighted_percent"
+        },
+        "unit": "percent",
+        "priority": 96,
+        "dashboard": {
+          "section": "reputation",
+          "span": 1
+        },
+        "presentation": {
+          "candidate": true,
+          "native_editable_ready": true,
+          "preferred_role": "core_metric",
+          "render_as_raster": false
+        },
+        "evidence_refs": [],
+        "warnings": [],
+        "notes": {}
+      },
+      {
+        "chart_id": "emotion_distribution",
+        "chart_type": "distribution_bar",
+        "title": {
+          "en": "Emotions · organic people",
+          "el": "Συναισθήματα · organic άτομα"
+        },
+        "subtitle": {
+          "en": "",
+          "el": ""
+        },
+        "indicator_ids": [
+          "emotions"
+        ],
+        "data": {
+          "categories": [
+            {
+              "label": "joy",
+              "value": 36.0
+            },
+            {
+              "label": "anger",
+              "value": 29.0
+            },
+            {
+              "label": "sadness",
+              "value": 9.0
+            },
+            {
+              "label": "fear",
+              "value": 5.0
+            },
+            {
+              "label": "disgust",
+              "value": 2.0
+            },
+            {
+              "label": "surprise",
+              "value": 10.0
+            },
+            {
+              "label": "neutral",
+              "value": 9.0
+            }
+          ],
+          "total_records": 82,
+          "basis": "weighted_percent"
+        },
+        "unit": "percent",
+        "priority": 86,
+        "dashboard": {
+          "section": "reputation",
+          "span": 1
+        },
+        "presentation": {
+          "candidate": true,
+          "native_editable_ready": true,
+          "preferred_role": "core_metric",
+          "render_as_raster": false
+        },
+        "evidence_refs": [],
+        "warnings": [],
+        "notes": {}
+      },
+      {
+        "chart_id": "stance_distribution",
+        "chart_type": "distribution_bar",
+        "title": {
+          "en": "Target stance",
+          "el": "Στάση απέναντι στο target"
+        },
+        "subtitle": {
+          "en": "",
+          "el": ""
+        },
+        "indicator_ids": [
+          "stance"
+        ],
+        "data": {
+          "categories": [
+            {
+              "label": "supportive",
+              "value": 50.0
+            },
+            {
+              "label": "neutral",
+              "value": 13.0
+            },
+            {
+              "label": "mixed",
+              "value": 6.0
+            },
+            {
+              "label": "critical",
+              "value": 31.0
+            },
+            {
+              "label": "not_applicable",
+              "value": 0.0
+            }
+          ],
+          "total_records": 96,
+          "basis": "weighted_percent"
+        },
+        "unit": "percent",
+        "priority": 72,
+        "dashboard": {
+          "section": "reputation",
+          "span": 1
+        },
+        "presentation": {
+          "candidate": true,
+          "native_editable_ready": true,
+          "preferred_role": "core_metric",
+          "render_as_raster": false
+        },
+        "evidence_refs": [],
+        "warnings": [],
+        "notes": {}
+      },
+      {
+        "chart_id": "impact_coverage",
+        "chart_type": "quality_kpi",
+        "title": {
+          "en": "Public metrics coverage",
+          "el": "Κάλυψη δημόσιων metrics"
+        },
+        "subtitle": {
+          "en": "",
+          "el": ""
+        },
+        "indicator_ids": [
+          "impact_attention"
+        ],
+        "data": {
+          "known_metric_share_percent": 83.33,
+          "known_records": 100,
+          "records": 120
+        },
+        "unit": "percent",
+        "priority": 58,
+        "dashboard": {
+          "section": "quality",
+          "span": 1
+        },
+        "presentation": {
+          "candidate": true,
+          "native_editable_ready": true,
+          "preferred_role": "methodology_context",
+          "render_as_raster": false
+        },
+        "evidence_refs": [],
+        "warnings": [],
+        "notes": {}
+      },
+      {
+        "chart_id": "origin_breakdown",
+        "chart_type": "grouped_bar",
+        "title": {
+          "en": "Media, people & owned activity",
+          "el": "Media, άτομα & owned activity"
+        },
+        "subtitle": {
+          "en": "",
+          "el": ""
+        },
+        "indicator_ids": [
+          "origin_breakdown"
+        ],
+        "data": {
+          "rows": [
+            {
+              "name": "media",
+              "records": 40,
+              "record_share": 33.3,
+              "attention_share": 55.0,
+              "brand_reputation": 57.0
+            },
+            {
+              "name": "person",
+              "records": 70,
+              "record_share": 58.3,
+              "attention_share": 38.0,
+              "brand_reputation": 64.0
+            },
+            {
+              "name": "owned",
+              "records": 10,
+              "record_share": 8.4,
+              "attention_share": 7.0,
+              "brand_reputation": null
+            }
+          ]
+        },
+        "unit": "percent",
+        "priority": 78,
+        "dashboard": {
+          "section": "sources",
+          "span": 2
+        },
+        "presentation": {
+          "candidate": true,
+          "native_editable_ready": true,
+          "preferred_role": "context",
+          "render_as_raster": false
+        },
+        "evidence_refs": [],
+        "warnings": [],
+        "notes": {}
+      },
+      {
+        "chart_id": "source_comparison",
+        "chart_type": "source_matrix",
+        "title": {
+          "en": "Source comparison",
+          "el": "Σύγκριση πηγών"
+        },
+        "subtitle": {
+          "en": "",
+          "el": ""
+        },
+        "indicator_ids": [
+          "source_breakdown"
+        ],
+        "data": {
+          "rows": [
+            {
+              "source": "x",
+              "records": 45,
+              "reputation_eligible": 38,
+              "brand_reputation": 58.0,
+              "average_impact": 0.62,
+              "organic_opinions": 35
+            },
+            {
+              "source": "news",
+              "records": 40,
+              "reputation_eligible": 28,
+              "brand_reputation": 60.0,
+              "average_impact": 0.55,
+              "organic_opinions": 18
+            },
+            {
+              "source": "tiktok",
+              "records": 35,
+              "reputation_eligible": 30,
+              "brand_reputation": 66.0,
+              "average_impact": 0.77,
+              "organic_opinions": 29
+            }
+          ]
+        },
+        "unit": null,
+        "priority": 90,
+        "dashboard": {
+          "section": "sources",
+          "span": 2
+        },
+        "presentation": {
+          "candidate": true,
+          "native_editable_ready": true,
+          "preferred_role": "core_context",
+          "render_as_raster": false
+        },
+        "evidence_refs": [],
+        "warnings": [],
+        "notes": {}
+      },
+      {
+        "chart_id": "narrative_drivers",
+        "chart_type": "diverging_bar",
+        "title": {
+          "en": "What moves Brand Reputation",
+          "el": "Τι μετακινεί το Brand Reputation"
+        },
+        "subtitle": {
+          "en": "",
+          "el": ""
+        },
+        "indicator_ids": [
+          "positive_narrative_drivers",
+          "negative_narrative_drivers"
+        ],
+        "data": {
+          "rows": [
+            {
+              "name": "Winning dream",
+              "contribution": 8.4,
+              "mentions": 22,
+              "average_sentiment": 0.7,
+              "average_impact": 0.65
+            },
+            {
+              "name": "Trust concern",
+              "contribution": -5.1,
+              "mentions": 15,
+              "average_sentiment": -0.8,
+              "average_impact": 0.72
+            }
+          ],
+          "zero": 0
+        },
+        "unit": "reputation_points",
+        "priority": 100,
+        "dashboard": {
+          "section": "drivers",
+          "span": 2
+        },
+        "presentation": {
+          "candidate": true,
+          "native_editable_ready": true,
+          "preferred_role": "headline_driver",
+          "render_as_raster": false
+        },
+        "evidence_refs": [],
+        "warnings": [],
+        "notes": {}
+      },
+      {
+        "chart_id": "topic_drivers",
+        "chart_type": "diverging_bar",
+        "title": {
+          "en": "Topic contribution",
+          "el": "Συμβολή θεμάτων"
+        },
+        "subtitle": {
+          "en": "",
+          "el": ""
+        },
+        "indicator_ids": [
+          "topic_drivers"
+        ],
+        "data": {
+          "rows": [
+            {
+              "name": "Jackpot",
+              "contribution": 5.0,
+              "mentions": 30,
+              "average_sentiment": 0.5
+            },
+            {
+              "name": "Price",
+              "contribution": -3.0,
+              "mentions": 18,
+              "average_sentiment": -0.6
+            }
+          ]
+        },
+        "unit": "reputation_points",
+        "priority": 76,
+        "dashboard": {
+          "section": "drivers",
+          "span": 2
+        },
+        "presentation": {
+          "candidate": true,
+          "native_editable_ready": true,
+          "preferred_role": "supporting_driver",
+          "render_as_raster": false
+        },
+        "evidence_refs": [],
+        "warnings": [],
+        "notes": {}
+      },
+      {
+        "chart_id": "media_influence",
+        "chart_type": "ranking",
+        "title": {
+          "en": "Media influence",
+          "el": "Επιρροή media"
+        },
+        "subtitle": {
+          "en": "",
+          "el": ""
+        },
+        "indicator_ids": [
+          "media_influence"
+        ],
+        "data": {
+          "rows": [
+            {
+              "name": "SKAI.gr",
+              "records": 7,
+              "attention": 6.8,
+              "weighted_sentiment": 0.44
+            },
+            {
+              "name": "NewsIt",
+              "records": 6,
+              "attention": 5.9,
+              "weighted_sentiment": 0.21
+            },
+            {
+              "name": "iefimerida",
+              "records": 5,
+              "attention": 4.8,
+              "weighted_sentiment": -0.1
+            },
+            {
+              "name": "NEWS 24/7",
+              "records": 4,
+              "attention": 3.9,
+              "weighted_sentiment": 0.08
+            }
+          ]
+        },
+        "unit": null,
+        "priority": 74,
+        "dashboard": {
+          "section": "influence",
+          "span": 1
+        },
+        "presentation": {
+          "candidate": true,
+          "native_editable_ready": true,
+          "preferred_role": "ranking",
+          "render_as_raster": false
+        },
+        "evidence_refs": [],
+        "warnings": [],
+        "notes": {}
+      },
+      {
+        "chart_id": "people_influence",
+        "chart_type": "ranking",
+        "title": {
+          "en": "People / creator influence",
+          "el": "Επιρροή ατόμων / creators"
+        },
+        "subtitle": {
+          "en": "",
+          "el": ""
+        },
+        "indicator_ids": [
+          "people_influence"
+        ],
+        "data": {
+          "rows": [
+            {
+              "name": "creator_gr",
+              "records": 4,
+              "attention": 4.3,
+              "weighted_sentiment": 0.62
+            },
+            {
+              "name": "user_gr_2",
+              "records": 3,
+              "attention": 2.7,
+              "weighted_sentiment": -0.71
+            },
+            {
+              "name": "user_gr_1",
+              "records": 2,
+              "attention": 2.1,
+              "weighted_sentiment": 0.8
+            }
+          ]
+        },
+        "unit": null,
+        "priority": 74,
+        "dashboard": {
+          "section": "influence",
+          "span": 1
+        },
+        "presentation": {
+          "candidate": true,
+          "native_editable_ready": true,
+          "preferred_role": "ranking",
+          "render_as_raster": false
+        },
+        "evidence_refs": [],
+        "warnings": [],
+        "notes": {}
+      },
+      {
+        "chart_id": "time_trends",
+        "chart_type": "time_series",
+        "title": {
+          "en": "How the conversation evolved",
+          "el": "Πώς εξελίχθηκε η συζήτηση"
+        },
+        "subtitle": {
+          "en": "",
+          "el": ""
+        },
+        "indicator_ids": [
+          "time_trends",
+          "brand_reputation"
+        ],
+        "data": {
+          "rows": [
+            {
+              "date": "2026-08-01",
+              "records": 18,
+              "brand_reputation_index": 63,
+              "negative_weight_share": 0.2,
+              "anger_opinion_weight_share": 0.18,
+              "joy_opinion_weight_share": 0.42,
+              "surprise_opinion_weight_share": 0.11,
+              "sadness_opinion_weight_share": 0.08,
+              "fear_opinion_weight_share": 0.05,
+              "disgust_opinion_weight_share": 0.03,
+              "neutral_opinion_weight_share": 0.13,
+              "attention_score_sum": 11.16
+            },
+            {
+              "date": "2026-08-02",
+              "records": 20,
+              "brand_reputation_index": 64,
+              "negative_weight_share": 0.18,
+              "anger_opinion_weight_share": 0.17,
+              "joy_opinion_weight_share": 0.44,
+              "surprise_opinion_weight_share": 0.1,
+              "sadness_opinion_weight_share": 0.07,
+              "fear_opinion_weight_share": 0.05,
+              "disgust_opinion_weight_share": 0.03,
+              "neutral_opinion_weight_share": 0.14,
+              "attention_score_sum": 12.4
+            },
+            {
+              "date": "2026-08-03",
+              "records": 22,
+              "brand_reputation_index": 62,
+              "negative_weight_share": 0.22,
+              "anger_opinion_weight_share": 0.2,
+              "joy_opinion_weight_share": 0.4,
+              "surprise_opinion_weight_share": 0.12,
+              "sadness_opinion_weight_share": 0.08,
+              "fear_opinion_weight_share": 0.05,
+              "disgust_opinion_weight_share": 0.03,
+              "neutral_opinion_weight_share": 0.12,
+              "attention_score_sum": 13.64
+            },
+            {
+              "date": "2026-08-04",
+              "records": 19,
+              "brand_reputation_index": 61,
+              "negative_weight_share": 0.24,
+              "anger_opinion_weight_share": 0.21,
+              "joy_opinion_weight_share": 0.39,
+              "surprise_opinion_weight_share": 0.13,
+              "sadness_opinion_weight_share": 0.09,
+              "fear_opinion_weight_share": 0.05,
+              "disgust_opinion_weight_share": 0.03,
+              "neutral_opinion_weight_share": 0.1,
+              "attention_score_sum": 11.78
+            },
+            {
+              "date": "2026-08-05",
+              "records": 24,
+              "brand_reputation_index": 60,
+              "negative_weight_share": 0.25,
+              "anger_opinion_weight_share": 0.22,
+              "joy_opinion_weight_share": 0.38,
+              "surprise_opinion_weight_share": 0.12,
+              "sadness_opinion_weight_share": 0.1,
+              "fear_opinion_weight_share": 0.06,
+              "disgust_opinion_weight_share": 0.03,
+              "neutral_opinion_weight_share": 0.09,
+              "attention_score_sum": 14.88
+            },
+            {
+              "date": "2026-08-06",
+              "records": 28,
+              "brand_reputation_index": 58,
+              "negative_weight_share": 0.28,
+              "anger_opinion_weight_share": 0.25,
+              "joy_opinion_weight_share": 0.35,
+              "surprise_opinion_weight_share": 0.11,
+              "sadness_opinion_weight_share": 0.1,
+              "fear_opinion_weight_share": 0.06,
+              "disgust_opinion_weight_share": 0.04,
+              "neutral_opinion_weight_share": 0.09,
+              "attention_score_sum": 17.36
+            },
+            {
+              "date": "2026-08-07",
+              "records": 30,
+              "brand_reputation_index": 57,
+              "negative_weight_share": 0.3,
+              "anger_opinion_weight_share": 0.27,
+              "joy_opinion_weight_share": 0.34,
+              "surprise_opinion_weight_share": 0.1,
+              "sadness_opinion_weight_share": 0.11,
+              "fear_opinion_weight_share": 0.06,
+              "disgust_opinion_weight_share": 0.04,
+              "neutral_opinion_weight_share": 0.08,
+              "attention_score_sum": 18.6
+            },
+            {
+              "date": "2026-08-08",
+              "records": 62,
+              "brand_reputation_index": 49,
+              "negative_weight_share": 0.57,
+              "anger_opinion_weight_share": 0.52,
+              "joy_opinion_weight_share": 0.22,
+              "surprise_opinion_weight_share": 0.08,
+              "sadness_opinion_weight_share": 0.1,
+              "fear_opinion_weight_share": 0.04,
+              "disgust_opinion_weight_share": 0.02,
+              "neutral_opinion_weight_share": 0.02,
+              "attention_score_sum": 38.44
+            },
+            {
+              "date": "2026-08-09",
+              "records": 38,
+              "brand_reputation_index": 52,
+              "negative_weight_share": 0.4,
+              "anger_opinion_weight_share": 0.35,
+              "joy_opinion_weight_share": 0.28,
+              "surprise_opinion_weight_share": 0.1,
+              "sadness_opinion_weight_share": 0.09,
+              "fear_opinion_weight_share": 0.05,
+              "disgust_opinion_weight_share": 0.03,
+              "neutral_opinion_weight_share": 0.1,
+              "attention_score_sum": 23.56
+            },
+            {
+              "date": "2026-08-10",
+              "records": 31,
+              "brand_reputation_index": 55,
+              "negative_weight_share": 0.34,
+              "anger_opinion_weight_share": 0.29,
+              "joy_opinion_weight_share": 0.32,
+              "surprise_opinion_weight_share": 0.11,
+              "sadness_opinion_weight_share": 0.08,
+              "fear_opinion_weight_share": 0.05,
+              "disgust_opinion_weight_share": 0.03,
+              "neutral_opinion_weight_share": 0.12,
+              "attention_score_sum": 19.22
+            }
+          ],
+          "series": [
+            "brand_reputation_index",
+            "records",
+            "negative_weight_share",
+            "anger_opinion_weight_share",
+            "attention_score_sum"
+          ]
+        },
+        "unit": null,
+        "priority": 98,
+        "dashboard": {
+          "section": "trends",
+          "span": 2
+        },
+        "presentation": {
+          "candidate": true,
+          "native_editable_ready": true,
+          "preferred_role": "headline_trend",
+          "render_as_raster": false
+        },
+        "evidence_refs": [],
+        "warnings": [],
+        "notes": {}
+      },
+      {
+        "chart_id": "emotion_trends",
+        "chart_type": "time_series",
+        "title": {
+          "en": "Emotion evolution",
+          "el": "Εξέλιξη συναισθημάτων"
+        },
+        "subtitle": {
+          "en": "",
+          "el": ""
+        },
+        "indicator_ids": [
+          "time_trends",
+          "emotions"
+        ],
+        "data": {
+          "rows": [
+            {
+              "date": "2026-08-01",
+              "records": 18,
+              "brand_reputation_index": 63,
+              "negative_weight_share": 0.2,
+              "anger_opinion_weight_share": 0.18,
+              "joy_opinion_weight_share": 0.42,
+              "surprise_opinion_weight_share": 0.11,
+              "sadness_opinion_weight_share": 0.08,
+              "fear_opinion_weight_share": 0.05,
+              "disgust_opinion_weight_share": 0.03,
+              "neutral_opinion_weight_share": 0.13,
+              "attention_score_sum": 11.16
+            },
+            {
+              "date": "2026-08-02",
+              "records": 20,
+              "brand_reputation_index": 64,
+              "negative_weight_share": 0.18,
+              "anger_opinion_weight_share": 0.17,
+              "joy_opinion_weight_share": 0.44,
+              "surprise_opinion_weight_share": 0.1,
+              "sadness_opinion_weight_share": 0.07,
+              "fear_opinion_weight_share": 0.05,
+              "disgust_opinion_weight_share": 0.03,
+              "neutral_opinion_weight_share": 0.14,
+              "attention_score_sum": 12.4
+            },
+            {
+              "date": "2026-08-03",
+              "records": 22,
+              "brand_reputation_index": 62,
+              "negative_weight_share": 0.22,
+              "anger_opinion_weight_share": 0.2,
+              "joy_opinion_weight_share": 0.4,
+              "surprise_opinion_weight_share": 0.12,
+              "sadness_opinion_weight_share": 0.08,
+              "fear_opinion_weight_share": 0.05,
+              "disgust_opinion_weight_share": 0.03,
+              "neutral_opinion_weight_share": 0.12,
+              "attention_score_sum": 13.64
+            },
+            {
+              "date": "2026-08-04",
+              "records": 19,
+              "brand_reputation_index": 61,
+              "negative_weight_share": 0.24,
+              "anger_opinion_weight_share": 0.21,
+              "joy_opinion_weight_share": 0.39,
+              "surprise_opinion_weight_share": 0.13,
+              "sadness_opinion_weight_share": 0.09,
+              "fear_opinion_weight_share": 0.05,
+              "disgust_opinion_weight_share": 0.03,
+              "neutral_opinion_weight_share": 0.1,
+              "attention_score_sum": 11.78
+            },
+            {
+              "date": "2026-08-05",
+              "records": 24,
+              "brand_reputation_index": 60,
+              "negative_weight_share": 0.25,
+              "anger_opinion_weight_share": 0.22,
+              "joy_opinion_weight_share": 0.38,
+              "surprise_opinion_weight_share": 0.12,
+              "sadness_opinion_weight_share": 0.1,
+              "fear_opinion_weight_share": 0.06,
+              "disgust_opinion_weight_share": 0.03,
+              "neutral_opinion_weight_share": 0.09,
+              "attention_score_sum": 14.88
+            },
+            {
+              "date": "2026-08-06",
+              "records": 28,
+              "brand_reputation_index": 58,
+              "negative_weight_share": 0.28,
+              "anger_opinion_weight_share": 0.25,
+              "joy_opinion_weight_share": 0.35,
+              "surprise_opinion_weight_share": 0.11,
+              "sadness_opinion_weight_share": 0.1,
+              "fear_opinion_weight_share": 0.06,
+              "disgust_opinion_weight_share": 0.04,
+              "neutral_opinion_weight_share": 0.09,
+              "attention_score_sum": 17.36
+            },
+            {
+              "date": "2026-08-07",
+              "records": 30,
+              "brand_reputation_index": 57,
+              "negative_weight_share": 0.3,
+              "anger_opinion_weight_share": 0.27,
+              "joy_opinion_weight_share": 0.34,
+              "surprise_opinion_weight_share": 0.1,
+              "sadness_opinion_weight_share": 0.11,
+              "fear_opinion_weight_share": 0.06,
+              "disgust_opinion_weight_share": 0.04,
+              "neutral_opinion_weight_share": 0.08,
+              "attention_score_sum": 18.6
+            },
+            {
+              "date": "2026-08-08",
+              "records": 62,
+              "brand_reputation_index": 49,
+              "negative_weight_share": 0.57,
+              "anger_opinion_weight_share": 0.52,
+              "joy_opinion_weight_share": 0.22,
+              "surprise_opinion_weight_share": 0.08,
+              "sadness_opinion_weight_share": 0.1,
+              "fear_opinion_weight_share": 0.04,
+              "disgust_opinion_weight_share": 0.02,
+              "neutral_opinion_weight_share": 0.02,
+              "attention_score_sum": 38.44
+            },
+            {
+              "date": "2026-08-09",
+              "records": 38,
+              "brand_reputation_index": 52,
+              "negative_weight_share": 0.4,
+              "anger_opinion_weight_share": 0.35,
+              "joy_opinion_weight_share": 0.28,
+              "surprise_opinion_weight_share": 0.1,
+              "sadness_opinion_weight_share": 0.09,
+              "fear_opinion_weight_share": 0.05,
+              "disgust_opinion_weight_share": 0.03,
+              "neutral_opinion_weight_share": 0.1,
+              "attention_score_sum": 23.56
+            },
+            {
+              "date": "2026-08-10",
+              "records": 31,
+              "brand_reputation_index": 55,
+              "negative_weight_share": 0.34,
+              "anger_opinion_weight_share": 0.29,
+              "joy_opinion_weight_share": 0.32,
+              "surprise_opinion_weight_share": 0.11,
+              "sadness_opinion_weight_share": 0.08,
+              "fear_opinion_weight_share": 0.05,
+              "disgust_opinion_weight_share": 0.03,
+              "neutral_opinion_weight_share": 0.12,
+              "attention_score_sum": 19.22
+            }
+          ],
+          "series": [
+            "joy_opinion_weight_share",
+            "anger_opinion_weight_share",
+            "surprise_opinion_weight_share"
+          ],
+          "scale": "share_percent",
+          "series_labels": {
+            "joy_opinion_weight_share": "Joy",
+            "anger_opinion_weight_share": "Anger",
+            "surprise_opinion_weight_share": "Surprise"
+          }
+        },
+        "unit": "percent",
+        "priority": 86,
+        "dashboard": {
+          "section": "trends",
+          "span": 2
+        },
+        "presentation": {
+          "candidate": true,
+          "native_editable_ready": true,
+          "preferred_role": "emotion_drilldown",
+          "render_as_raster": false
+        },
+        "evidence_refs": [],
+        "warnings": [],
+        "notes": {}
+      },
+      {
+        "chart_id": "anomalies",
+        "chart_type": "event_timeline",
+        "title": {
+          "en": "Detected anomalies",
+          "el": "Εντοπισμένες ανωμαλίες"
+        },
+        "subtitle": {
+          "en": "",
+          "el": ""
+        },
+        "indicator_ids": [
+          "numeric_anomalies"
+        ],
+        "data": {
+          "events": [
+            {
+              "date": "2026-08-08",
+              "flags": [
+                "volume_spike",
+                "negative_share_spike",
+                "anger_share_spike"
+              ],
+              "volume_robust_z": 6.1,
+              "negative_robust_z": 4.8,
+              "anger_robust_z": 5.4,
+              "joy_robust_z": -3.0,
+              "sadness_robust_z": 0.8,
+              "fear_robust_z": -0.3,
+              "disgust_robust_z": -0.2,
+              "surprise_robust_z": -0.5,
+              "neutral_robust_z": -2.1
+            }
+          ]
+        },
+        "unit": null,
+        "priority": 88,
+        "dashboard": {
+          "section": "trends",
+          "span": 2
+        },
+        "presentation": {
+          "candidate": true,
+          "native_editable_ready": true,
+          "preferred_role": "investigation_trigger",
+          "render_as_raster": false
+        },
+        "evidence_refs": [],
+        "warnings": [],
+        "notes": {}
+      },
+      {
+        "chart_id": "quality_matrix",
+        "chart_type": "quality_matrix",
+        "title": {
+          "en": "Data quality & coverage",
+          "el": "Ποιότητα δεδομένων & κάλυψη"
+        },
+        "subtitle": {
+          "en": "",
+          "el": ""
+        },
+        "indicator_ids": [
+          "data_quality",
+          "source_coverage",
+          "sample_achievement"
+        ],
+        "data": {
+          "items": [
+            {
+              "key": "data_quality",
+              "value": 91,
+              "label": "high"
+            },
+            {
+              "key": "source_coverage",
+              "value": 83.0,
+              "source_count": 3
+            },
+            {
+              "key": "sample_achievement",
+              "value": 92.0,
+              "trusted_records": 120
+            }
+          ]
+        },
+        "unit": "score_or_percent",
+        "priority": 94,
+        "dashboard": {
+          "section": "quality",
+          "span": 2
+        },
+        "presentation": {
+          "candidate": true,
+          "native_editable_ready": true,
+          "preferred_role": "quality_guardrail",
+          "render_as_raster": false
+        },
+        "evidence_refs": [],
+        "warnings": [],
+        "notes": {}
+      },
+      {
+        "chart_id": "authenticity_coordination",
+        "chart_type": "risk_panel",
+        "title": {
+          "en": "Authenticity & coordination",
+          "el": "Αυθεντικότητα & συντονισμός"
+        },
+        "subtitle": {
+          "en": "",
+          "el": ""
+        },
+        "indicator_ids": [
+          "authenticity_risk",
+          "coordination"
+        ],
+        "data": {
+          "low_authenticity_records": 4,
+          "low_authenticity_share_percent": 3.33,
+          "coordination_clusters": [
+            {
+              "cluster_id": "coord-1",
+              "records": 9,
+              "accounts": 7,
+              "risk": "suspicious"
+            }
+          ]
+        },
+        "unit": null,
+        "priority": 82,
+        "dashboard": {
+          "section": "quality",
+          "span": 2
+        },
+        "presentation": {
+          "candidate": true,
+          "native_editable_ready": true,
+          "preferred_role": "quality_guardrail",
+          "render_as_raster": false
+        },
+        "evidence_refs": [],
+        "warnings": [],
+        "notes": {}
+      },
+      {
+        "chart_id": "story_syndication",
+        "chart_type": "cluster_table",
+        "title": {
+          "en": "Story replication",
+          "el": "Αναπαραγωγή ιστοριών"
+        },
+        "subtitle": {
+          "en": "",
+          "el": ""
+        },
+        "indicator_ids": [
+          "story_syndication"
+        ],
+        "data": {
+          "rows": [
+            {
+              "cluster_id": "story-1",
+              "records": 12,
+              "sources": [
+                "news"
+              ],
+              "representative_excerpt": "Same story"
+            }
+          ]
+        },
+        "unit": null,
+        "priority": 64,
+        "dashboard": {
+          "section": "quality",
+          "span": 2
+        },
+        "presentation": {
+          "candidate": true,
+          "native_editable_ready": true,
+          "preferred_role": "context",
+          "render_as_raster": false
+        },
+        "evidence_refs": [],
+        "warnings": [],
+        "notes": {}
+      },
+      {
+        "chart_id": "top_mentions",
+        "chart_type": "evidence_table",
+        "title": {
+          "en": "Top evidence mentions",
+          "el": "Κορυφαία evidence mentions"
+        },
+        "subtitle": {
+          "en": "",
+          "el": ""
+        },
+        "indicator_ids": [
+          "top_mentions"
+        ],
+        "data": {
+          "rows": [
+            {
+              "record_id": "m1",
+              "platform": "news",
+              "author": "SKAI.gr",
+              "origin_group": "media",
+              "content_type": "article",
+              "date": "2026-08-02",
+              "url": "https://example.com/m1",
+              "excerpt": "Το μεγάλο έπαθλο του Eurojackpot ενισχύει το ενδιαφέρον των Ελλήνων παικτών, με την επόμενη κλήρωση να συγκεντρώνει αυξημένη προσοχή.",
+              "sentiment_label": "positive",
+              "sentiment_score": 0.72,
+              "emotion": "joy",
+              "topic": "Jackpot",
+              "narrative": "Winning dream",
+              "impact_score": 0.91,
+              "evidence_confidence": 0.96
+            },
+            {
+              "record_id": "m2",
+              "platform": "x",
+              "author": "user_gr_1",
+              "origin_group": "person",
+              "content_type": "post",
+              "date": "2026-08-03",
+              "url": "https://example.com/m2",
+              "excerpt": "Αν το κέρδιζα θα έκλεινα όλα τα χρέη και θα έφευγα ταξίδι. Μόνο που το σκέφτεσαι χαμογελάς.",
+              "sentiment_label": "positive",
+              "sentiment_score": 0.86,
+              "emotion": "joy",
+              "topic": "Winning fantasy",
+              "narrative": "Winning dream",
+              "impact_score": 0.72,
+              "evidence_confidence": 0.91
+            },
+            {
+              "record_id": "m3",
+              "platform": "tiktok",
+              "author": "creator_gr",
+              "origin_group": "person",
+              "content_type": "video",
+              "date": "2026-08-04",
+              "url": "https://example.com/m3",
+              "excerpt": "Eurojackpot στην Ελλάδα και όλοι συζητάνε τι θα έκαναν με το jackpot.",
+              "sentiment_label": "positive",
+              "sentiment_score": 0.64,
+              "emotion": "surprise",
+              "topic": "Jackpot",
+              "narrative": "Winning dream",
+              "impact_score": 0.88,
+              "evidence_confidence": 0.9
+            },
+            {
+              "record_id": "m4",
+              "platform": "x",
+              "author": "user_gr_2",
+              "origin_group": "person",
+              "content_type": "post",
+              "date": "2026-08-08",
+              "url": "https://example.com/m4",
+              "excerpt": "Με τέτοιες πιθανότητες και τέτοια τιμή, δύσκολα το βλέπω να αξίζει.",
+              "sentiment_label": "negative",
+              "sentiment_score": -0.78,
+              "emotion": "anger",
+              "topic": "Price",
+              "narrative": "Trust concern",
+              "impact_score": 0.83,
+              "evidence_confidence": 0.94
+            },
+            {
+              "record_id": "m5",
+              "platform": "x",
+              "author": "user_gr_3",
+              "origin_group": "person",
+              "content_type": "post",
+              "date": "2026-08-08",
+              "url": "https://example.com/m5",
+              "excerpt": "Πάλι jackpot; Ο κόσμος αρχίζει να αναρωτιέται πόσο πιθανό είναι πραγματικά να κερδίσεις.",
+              "sentiment_label": "negative",
+              "sentiment_score": -0.71,
+              "emotion": "anger",
+              "topic": "Odds",
+              "narrative": "Trust concern",
+              "impact_score": 0.79,
+              "evidence_confidence": 0.92
+            },
+            {
+              "record_id": "m6",
+              "platform": "news",
+              "author": "NewsIt",
+              "origin_group": "media",
+              "content_type": "article",
+              "date": "2026-08-05",
+              "url": "https://example.com/m6",
+              "excerpt": "Η επιτυχία ελληνικού δελτίου επαναφέρει το Eurojackpot στο επίκεντρο και αυξάνει το ενδιαφέρον για την επόμενη κλήρωση.",
+              "sentiment_label": "positive",
+              "sentiment_score": 0.58,
+              "emotion": "joy",
+              "topic": "Greek winner",
+              "narrative": "Local winner momentum",
+              "impact_score": 0.87,
+              "evidence_confidence": 0.95
+            },
+            {
+              "record_id": "m7",
+              "platform": "news",
+              "author": "iefimerida",
+              "origin_group": "media",
+              "content_type": "article",
+              "date": "2026-08-08",
+              "url": "https://example.com/m7",
+              "excerpt": "Στα social media καταγράφονται και επιφυλάξεις γύρω από το κόστος συμμετοχής και τις πιθανότητες επιτυχίας.",
+              "sentiment_label": "negative",
+              "sentiment_score": -0.42,
+              "emotion": "neutral",
+              "topic": "Price",
+              "narrative": "Trust concern",
+              "impact_score": 0.74,
+              "evidence_confidence": 0.89
+            },
+            {
+              "record_id": "m8",
+              "platform": "news",
+              "author": "NEWS 24/7",
+              "origin_group": "media",
+              "content_type": "article",
+              "date": "2026-08-06",
+              "url": "https://example.com/m8",
+              "excerpt": "Το Eurojackpot διατηρεί υψηλή προβολή στα ελληνικά μέσα ενόψει της μεγάλης κλήρωσης.",
+              "sentiment_label": "neutral",
+              "sentiment_score": 0.05,
+              "emotion": "neutral",
+              "topic": "Draw",
+              "narrative": "Draw coverage",
+              "impact_score": 0.81,
+              "evidence_confidence": 0.93
+            }
+          ]
+        },
+        "unit": null,
+        "priority": 90,
+        "dashboard": {
+          "section": "evidence",
+          "span": 2
+        },
+        "presentation": {
+          "candidate": true,
+          "native_editable_ready": true,
+          "preferred_role": "evidence",
+          "render_as_raster": false
+        },
+        "evidence_refs": [
+          "m1",
+          "m2",
+          "m3",
+          "m4",
+          "m5",
+          "m6",
+          "m7",
+          "m8"
+        ],
+        "warnings": [],
+        "notes": {}
+      }
+    ],
+    "presentation_chart_order": [
+      "brand_reputation",
+      "narrative_drivers",
+      "time_trends",
+      "sentiment_distribution",
+      "quality_matrix",
+      "evidence_confidence",
+      "source_comparison",
+      "top_mentions",
+      "sample_overview",
+      "anomalies",
+      "emotion_distribution",
+      "emotion_trends",
+      "market_relevance",
+      "authenticity_coordination",
+      "origin_breakdown",
+      "topic_drivers",
+      "media_influence",
+      "people_influence",
+      "stance_distribution",
+      "story_syndication",
+      "impact_coverage"
+    ],
+    "investigation_candidates": [
+      {
+        "investigation_id": "gold-i1",
+        "type": "reputation_daily_change",
+        "question": {
+          "en": "What was associated with the sharp Reputation drop on 8 August?",
+          "el": "Τι συνδέθηκε με την απότομη πτώση του Reputation στις 8 Αυγούστου;"
+        },
+        "finding": {
+          "en": "The drop coincided with a higher share of critical price/odds discussion and a sharp rise in anger. The evidence supports an association, not external causality.",
+          "el": "Η πτώση συνέπεσε με μεγαλύτερο μερίδιο κριτικής γύρω από τιμή/πιθανότητες και απότομη άνοδο του θυμού. Το evidence υποστηρίζει συσχέτιση, όχι εξωτερική αιτιότητα."
+        },
+        "confidence": {
+          "score": 0.91
+        },
+        "presentation": {
+          "candidate": true,
+          "priority_score": 96
+        },
+        "causal_status": "not_proven",
+        "indicator_ids": [
+          "brand_reputation",
+          "time_trends",
+          "emotions",
+          "negative_narrative_drivers"
+        ],
+        "evidence_record_ids": [
+          "m4",
+          "m5",
+          "m7"
+        ],
+        "metrics": {
+          "reputation_delta": -8.0,
+          "anger_share": 0.52,
+          "negative_share": 0.57
+        },
+        "conclusion_type": "observed_association"
+      },
+      {
+        "investigation_id": "gold-i2",
+        "type": "positive_narrative_driver",
+        "question": {
+          "en": "What sustained the strongest positive signal?",
+          "el": "Τι διατήρησε το ισχυρότερο θετικό σήμα;"
+        },
+        "finding": {
+          "en": "Winning-dream and local-winner narratives carried the strongest positive Reputation contribution, supported by high-impact media and organic people evidence.",
+          "el": "Τα narratives του ονείρου της νίκης και του Έλληνα νικητή είχαν την ισχυρότερη θετική συμβολή στο Reputation, με evidence από media υψηλού impact και organic άτομα."
+        },
+        "confidence": {
+          "score": 0.89
+        },
+        "presentation": {
+          "candidate": true,
+          "priority_score": 83
+        },
+        "causal_status": "not_proven",
+        "indicator_ids": [
+          "positive_narrative_drivers",
+          "media_influence",
+          "people_influence"
+        ],
+        "evidence_record_ids": [
+          "m1",
+          "m2",
+          "m6"
+        ],
+        "metrics": {
+          "reputation_contribution": 8.4
+        },
+        "conclusion_type": "deterministic_contribution"
+      },
+      {
+        "investigation_id": "gold-i3",
+        "type": "media_people_divergence",
+        "question": {
+          "en": "Are media and people shaping the conversation differently?",
+          "el": "Διαμορφώνουν διαφορετικά τη συζήτηση τα media και τα άτομα;"
+        },
+        "finding": {
+          "en": "Media carried a larger share of attention, while organic people contributed more critical price/odds discussion. Treat this as a channel-level difference in observed evidence, not a causal media effect.",
+          "el": "Τα media συγκέντρωσαν μεγαλύτερο μερίδιο προσοχής, ενώ τα organic άτομα συνεισέφεραν περισσότερη κριτική γύρω από τιμή/πιθανότητες. Πρόκειται για διαφορά καναλιών στο παρατηρούμενο evidence, όχι για αποδεδειγμένη αιτιώδη επίδραση των media."
+        },
+        "confidence": {
+          "score": 0.86
+        },
+        "presentation": {
+          "candidate": true,
+          "priority_score": 78
+        },
+        "causal_status": "not_proven",
+        "indicator_ids": [
+          "origin_breakdown",
+          "media_influence",
+          "people_influence",
+          "source_breakdown"
+        ],
+        "evidence_record_ids": [
+          "m4",
+          "m5",
+          "m1",
+          "m6"
+        ],
+        "metrics": {
+          "media_attention_share": 55.0,
+          "people_record_share": 58.3
+        },
+        "conclusion_type": "descriptive_difference"
+      }
+    ],
+    "warnings": [
+      "Not all selected sources returned usable data.",
+      "Association ≠ proven causality."
+    ],
+    "guardrails": {
+      "must_review_all_indicators": true,
+      "native_editable_charts_required": true,
+      "chart_data_must_come_from_evidence_pack": true,
+      "must_preserve_quality_warnings": true,
+      "must_not_present_association_as_causation": true,
+      "may_omit_uninteresting_visual": true,
+      "omission_requires_review_record": true
+    }
+  }
+}

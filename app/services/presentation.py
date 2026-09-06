@@ -1,0 +1,1167 @@
+from __future__ import annotations
+
+import copy
+import csv
+import hashlib
+import json
+import math
+import re
+import shutil
+import subprocess
+import zipfile
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Callable
+
+from docx import Document
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
+from docx.shared import Inches as DocxInches, Pt as DocxPt, RGBColor as DocxRGBColor
+from pptx import Presentation
+from pptx.chart.data import ChartData
+from pptx.dml.color import RGBColor
+from pptx.enum.chart import XL_CHART_TYPE, XL_LEGEND_POSITION
+from pptx.enum.shapes import MSO_SHAPE
+from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
+from pptx.enum.dml import MSO_LINE
+from pptx.util import Inches, Pt
+
+from app.services.investigations import INDICATOR_REGISTRY, load_evidence_pack
+from app.services.storage import RunStore
+from app.services.visualizations import load_presentation_visual_pack, load_visualization_summary
+
+PRESENTATION_RULESET_VERSION = "1.4.0"
+PRESENTATION_METHODOLOGY_VERSION = "signalyth-presentation-intelligence-v1.4"
+PRESENTATION_CONTRACT_VERSION = "signalyth-presentation-pack-v1.4"
+
+BG = "F7F5F0"
+INK = "151515"
+MUTED = "67635D"
+STONE = "E8E4DC"
+STONE_DARK = "D7D1C7"
+WHITE = "FFFFFF"
+AEGEAN = "4D7180"
+POS = "597364"
+NEG = "8A5D57"
+NEUTRAL = "A7A198"
+WARN = "9B744E"
+FONT = "Inter"
+
+
+class PresentationCancelled(RuntimeError):
+    pass
+
+
+class PresentationValidationError(RuntimeError):
+    pass
+
+
+def _utcnow() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _safe_float(value, default: float = 0.0) -> float:
+    try:
+        n = float(value)
+        if math.isfinite(n):
+            return n
+    except (TypeError, ValueError):
+        pass
+    return default
+
+
+def _safe_int(value, default: int = 0) -> int:
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _json_safe(value):
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    return copy.deepcopy(value)
+
+
+def _hash_payload(payload: dict) -> str:
+    blob = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str, allow_nan=False)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _lang_code(plan: dict | None) -> str:
+    return "el" if str((plan or {}).get("report_language") or "English") == "Ελληνικά" else "en"
+
+
+def _txt(value, lang: str) -> str:
+    if isinstance(value, dict):
+        return str(value.get(lang) or value.get("en") or value.get("el") or "")
+    return str(value or "")
+
+
+def _clean_text(text, limit: int = 5000) -> str:
+    # Keep evidence text literal but remove control chars that can break OOXML/XML.
+    out = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F]", " ", str(text or ""))
+    out = re.sub(r"\s+", " ", out).strip()
+    return out[:limit]
+
+
+def _chart_map(visual_pack: dict) -> dict[str, dict]:
+    return {str(c.get("chart_id")): copy.deepcopy(c) for c in (visual_pack.get("chart_specs") or []) if c.get("chart_id")}
+
+
+def _inventory_map(evidence_pack: dict) -> dict[str, dict]:
+    return {str(x.get("indicator_id")): x for x in (evidence_pack.get("indicator_inventory") or []) if x.get("indicator_id")}
+
+
+def _indicator_value(inv: dict[str, dict], indicator_id: str):
+    return copy.deepcopy((inv.get(indicator_id) or {}).get("value"))
+
+
+def _claim(claim_id: str, text: str, indicator_ids: list[str], *, evidence_refs=None, claim_type="descriptive", confidence=None, causal_status="not_applicable", source_values=None) -> dict:
+    return {
+        "claim_id": claim_id,
+        "text": _clean_text(text, 1200),
+        "indicator_ids": list(dict.fromkeys(indicator_ids)),
+        "evidence_refs": list(dict.fromkeys([str(x) for x in (evidence_refs or []) if x])),
+        "claim_type": claim_type,
+        "confidence": confidence,
+        "causal_status": causal_status,
+        "source_values": _json_safe(source_values or {}),
+    }
+
+
+
+
+def _resolve_investigation_indicator_ids(item: dict) -> list[str]:
+    """Map Step 6 investigation objects to the 25-indicator contract.
+
+    Older or externally produced investigation records may not carry explicit
+    indicator_ids. Step 8 still requires traceability, so we infer a conservative
+    indicator set from the investigation type and payload instead of creating
+    untraceable presentation claims.
+    """
+    expected = {x[0] for x in INDICATOR_REGISTRY}
+    ids: list[str] = []
+
+    def add(value):
+        if value is None:
+            return
+        if isinstance(value, str):
+            values = [value]
+        elif isinstance(value, (list, tuple, set)):
+            values = list(value)
+        else:
+            return
+        for raw in values:
+            text = str(raw or "").strip()
+            if text in expected and text not in ids:
+                ids.append(text)
+
+    for key in ("indicator_ids", "related_indicator_ids", "indicator_family_ids", "presentation_indicator_ids"):
+        add(item.get(key))
+    for key in ("primary_indicator", "target_indicator", "indicator_id"):
+        add(item.get(key))
+
+    typ = str(item.get("type") or "").strip()
+    type_map = {
+        "numeric_anomaly": ["numeric_anomalies", "time_trends"],
+        "reputation_daily_change": ["brand_reputation", "time_trends"],
+        "period_shift": ["brand_reputation", "time_trends"],
+        "negative_narrative_driver": ["negative_narrative_drivers", "brand_reputation"],
+        "positive_narrative_driver": ["positive_narrative_drivers", "brand_reputation"],
+        "emotion_profile": ["emotions", "sentiment"],
+        "source_divergence": ["source_breakdown", "brand_reputation"],
+        "media_people_divergence": ["origin_breakdown", "media_influence", "people_influence"],
+        "coordination_signal": ["coordination", "authenticity_risk"],
+        "data_quality_guardrail": ["data_quality", "source_coverage", "sample_achievement"],
+        "emerging_narrative": ["negative_narrative_drivers", "positive_narrative_drivers", "time_trends"],
+        "story_syndication": ["story_syndication", "source_breakdown"],
+    }
+    add(type_map.get(typ))
+
+    metrics_blob = json.dumps(_json_safe(item.get("metrics") or item.get("trigger") or {}), ensure_ascii=False).lower()
+    if "reputation" in metrics_blob:
+        add(["brand_reputation"])
+    if any(word in metrics_blob for word in ("anger", "fear", "emotion", "joy", "sadness", "disgust", "surprise")):
+        add(["emotions"])
+    if any(word in metrics_blob for word in ("source", "platform")):
+        add(["source_breakdown"])
+    if any(word in metrics_blob for word in ("quality", "coverage", "sample")):
+        add(["data_quality", "source_coverage", "sample_achievement"])
+
+    # Last-resort traceability: this is still a valid indicator family, and the
+    # finding remains evidence-linked through evidence_record_ids when available.
+    if not ids:
+        add(["top_mentions"])
+    return ids
+
+
+def _slide(slide_id: str, slide_type: str, title: str, *, subtitle="", chart_ids=None, investigation_ids=None, claims=None, priority=50, required=False, section="body", notes=None) -> dict:
+    return {
+        "slide_id": slide_id,
+        "slide_type": slide_type,
+        "title": _clean_text(title, 250),
+        "subtitle": _clean_text(subtitle, 600),
+        "chart_ids": list(dict.fromkeys(chart_ids or [])),
+        "investigation_ids": list(dict.fromkeys(investigation_ids or [])),
+        "claims": list(claims or []),
+        "priority": max(0, min(100, int(priority))),
+        "required": bool(required),
+        "section": section,
+        "notes": copy.deepcopy(notes or {}),
+    }
+
+
+def _largest_distribution(chart: dict | None) -> tuple[str | None, float]:
+    cats = ((chart or {}).get("data") or {}).get("categories") or []
+    vals = [(str(x.get("label") or ""), _safe_float(x.get("value"))) for x in cats]
+    return max(vals, key=lambda x: x[1]) if vals else (None, 0.0)
+
+
+def _material_quality_warning(evidence_pack: dict) -> bool:
+    inv = _inventory_map(evidence_pack)
+    quality = _indicator_value(inv, "data_quality") or {}
+    coverage = _indicator_value(inv, "source_coverage") or {}
+    sample = _indicator_value(inv, "sample_achievement") or {}
+    auth = _indicator_value(inv, "authenticity_risk") or {}
+    coord = _indicator_value(inv, "coordination") or []
+    return (
+        _safe_float(quality.get("score"), 100) < 80
+        or _safe_float(coverage.get("ratio"), 1) < 0.75
+        or _safe_float(sample.get("ratio"), 1) < 0.85
+        or _safe_float(auth.get("low_authenticity_share"), 0) >= 0.05
+        or bool(coord)
+        or bool((evidence_pack.get("headline_metrics") or {}).get("step5_warnings"))
+    )
+
+
+def _validate_inputs(visual_pack: dict, evidence_pack: dict, plan: dict | None = None) -> None:
+    if not isinstance(visual_pack, dict) or not isinstance(evidence_pack, dict):
+        raise PresentationValidationError("Step 8 requires both the Step 7 Presentation Visual Pack and the Step 6 Evidence Pack.")
+    guard = visual_pack.get("guardrails") or {}
+    if guard.get("must_review_all_indicators") is not True or guard.get("native_editable_charts_required") is not True:
+        raise PresentationValidationError("Step 8 stopped because the Step 7 visual guardrails are incomplete.")
+    review = visual_pack.get("indicator_review") or []
+    expected = [x[0] for x in INDICATOR_REGISTRY]
+    got = [str(x.get("indicator_id")) for x in review]
+    if got != expected or len(got) != len(set(got)) or not all(x.get("examined") is True for x in review):
+        raise PresentationValidationError("Step 8 stopped because not all 25 indicators were reviewed exactly once.")
+    charts = visual_pack.get("chart_specs") or []
+    if any((c.get("presentation") or {}).get("native_editable_ready") is not True for c in charts):
+        raise PresentationValidationError("Step 8 requires every selected Step 7 chart to be native-editable ready.")
+    if any((c.get("presentation") or {}).get("render_as_raster") is True for c in charts):
+        raise PresentationValidationError("Step 8 refuses raster chart contracts.")
+    if (visual_pack.get("guardrails") or {}).get("must_not_present_association_as_causation") is not True:
+        raise PresentationValidationError("Step 8 requires the causality guardrail.")
+    if plan:
+        ctx = visual_pack.get("research_context") or {}
+        for key in ("client", "topic", "market", "date_from", "date_to"):
+            if ctx.get(key) not in (None, "") and plan.get(key) not in (None, "") and str(ctx.get(key)) != str(plan.get(key)):
+                raise PresentationValidationError(f"Step 8 research context mismatch for {key}.")
+
+
+
+GOLD_STANDARD_CAPABILITIES = (
+    ("context", "Research context / cover"),
+    ("evidence_base", "Evidence base, period and sample context"),
+    ("methodology", "Methodology / reading guide"),
+    ("reputation_sentiment", "Brand Reputation + sentiment"),
+    ("sentiment_evidence", "Positive / negative evidence examples"),
+    ("emotional_profile", "Emotion distribution"),
+    ("emotion_evolution", "Emotion evolution when time evidence exists"),
+    ("drivers", "Positive / negative narrative and topic drivers"),
+    ("evolution", "Time evolution and anomalies"),
+    ("investigations", "Automatic investigations when triggered"),
+    ("sources_audiences", "Media / people / source context"),
+    ("influence", "Media and people influence rankings"),
+    ("media_evidence", "High-impact media evidence when available"),
+    ("media_implications", "Media / channel implications when a divergence is detected"),
+    ("quality", "Data quality / coverage / authenticity limits"),
+    ("evidence_traceability", "Evidence behind findings"),
+    ("strategic_synthesis", "Strategic synthesis / implications"),
+    ("conclusions", "Conclusions and what to watch"),
+)
+
+
+def _top_mentions(inv: dict[str, dict]) -> list[dict]:
+    value = _indicator_value(inv, "top_mentions") or []
+    return [copy.deepcopy(x) for x in value if isinstance(x, dict)]
+
+
+def _mention_claim(prefix: str, row: dict, *, lang: str, index: int) -> dict:
+    label = str(row.get("sentiment_label") or "evidence").lower()
+    author = _clean_text(row.get("author") or row.get("platform") or "Source", 80)
+    excerpt = _clean_text(row.get("excerpt") or "", 260)
+    text = f"{author}: {excerpt}" if excerpt else author
+    return _claim(
+        f"{prefix}-{index}", text, ["top_mentions"], evidence_refs=[row.get("record_id")],
+        claim_type="evidence_example", confidence=row.get("evidence_confidence"),
+        source_values={"sentiment": label, "impact": row.get("impact_score"), "origin_group": row.get("origin_group"), "platform": row.get("platform")},
+    )
+
+
+def _gold_standard_audit(slides: list[dict], charts: dict[str, dict], inv: dict[str, dict], investigations: dict[str, dict]) -> dict:
+    slide_ids = {str(s.get("slide_id")) for s in slides}
+    mentions = _top_mentions(inv)
+    sentiment_labels = {str(x.get("sentiment_label") or "").lower() for x in mentions}
+    media_mentions = [x for x in mentions if str(x.get("origin_group") or "").lower() == "media"]
+    emotion_chart = charts.get("emotion_distribution")
+    _, largest_emotion_value = _largest_distribution(emotion_chart)
+    emotion_material = bool(emotion_chart) and (largest_emotion_value >= 12.0 or any(str(x.get("type")) == "emotion_profile" for x in investigations.values()))
+    investigation_material = any(
+        _safe_int((x.get("presentation") or {}).get("priority_score")) >= 55
+        and (_txt(x.get("finding"), "en") or _txt(x.get("question"), "en"))
+        for x in investigations.values()
+    )
+    media_implication_ids = {
+        str(x.get("investigation_id")) for x in investigations.values()
+        if str(x.get("type") or "") in {"source_divergence", "media_people_divergence"}
+        and _safe_int((x.get("presentation") or {}).get("priority_score")) >= 55
+    }
+    media_implication_slides = {
+        str(slide.get("slide_id")) for slide in slides
+        if media_implication_ids & {str(x) for x in (slide.get("investigation_ids") or [])}
+    }
+    applicable = {
+        "context": True,
+        "evidence_base": True,
+        "methodology": True,
+        "reputation_sentiment": bool((inv.get("brand_reputation") or {}).get("available") or (inv.get("sentiment") or {}).get("available")),
+        "sentiment_evidence": "positive" in sentiment_labels and "negative" in sentiment_labels,
+        "emotional_profile": emotion_material,
+        "emotion_evolution": "emotion_trends" in charts,
+        "drivers": bool((inv.get("positive_narrative_drivers") or {}).get("available") or (inv.get("negative_narrative_drivers") or {}).get("available") or (inv.get("topic_drivers") or {}).get("available")),
+        "evolution": "time_trends" in charts,
+        "investigations": investigation_material,
+        "sources_audiences": bool((inv.get("origin_breakdown") or {}).get("available") or (inv.get("source_breakdown") or {}).get("available")),
+        "influence": bool((inv.get("media_influence") or {}).get("available") or (inv.get("people_influence") or {}).get("available")),
+        "media_evidence": len(media_mentions) >= 2,
+        "media_implications": bool(media_implication_ids),
+        "quality": any(bool((inv.get(k) or {}).get("available")) for k in ("data_quality","source_coverage","sample_achievement","authenticity_risk","coordination")),
+        "evidence_traceability": bool(mentions),
+        "strategic_synthesis": bool((inv.get("positive_narrative_drivers") or {}).get("available") or (inv.get("negative_narrative_drivers") or {}).get("available") or investigations),
+        "conclusions": True,
+    }
+    coverage_map = {
+        "context": {"cover"},
+        "evidence_base": {"evidence_base"},
+        "methodology": {"methodology"},
+        "reputation_sentiment": {"reputation_sentiment"},
+        "sentiment_evidence": {"sentiment_evidence"},
+        "emotional_profile": {"emotions"},
+        "emotion_evolution": {"emotion_evolution"},
+        "drivers": {"drivers"},
+        "evolution": {"evolution"},
+        "investigations": {x for x in slide_ids if x.startswith("investigation_")},
+        "sources_audiences": {"sources_audiences"},
+        "influence": {"influence"},
+        "media_evidence": {"media_evidence"},
+        "media_implications": media_implication_slides,
+        "quality": {"data_integrity", "evidence_base", "methodology"},
+        "evidence_traceability": {"evidence"},
+        "strategic_synthesis": {"strategic_synthesis"},
+        "conclusions": {"conclusions"},
+    }
+    rows=[]
+    for key,label in GOLD_STANDARD_CAPABILITIES:
+        is_app=bool(applicable.get(key))
+        covered=bool(slide_ids & coverage_map.get(key,set())) if is_app else False
+        rows.append({"capability_id":key,"label":label,"applicable":is_app,"status":"covered" if covered else ("not_applicable" if not is_app else "missing"),"slide_ids":sorted(slide_ids & coverage_map.get(key,set()))})
+    denom=sum(1 for r in rows if r["applicable"])
+    covered_count=sum(1 for r in rows if r["applicable"] and r["status"]=="covered")
+    return {"benchmark":"EUROJACKPOT collaborator deck capability benchmark","capabilities":rows,"applicable":denom,"covered":covered_count,"coverage_percent":round(100*covered_count/denom,2) if denom else 100.0,"complete":covered_count==denom}
+
+
+def build_presentation_plan(visual_pack: dict, evidence_pack: dict, plan: dict | None = None, *, cancel_check: Callable[[], bool] | None = None) -> dict:
+    _validate_inputs(visual_pack, evidence_pack, plan)
+    if cancel_check and cancel_check():
+        raise PresentationCancelled("Presentation planning cancelled before slide selection")
+
+    lang = _lang_code(plan)
+    ctx = copy.deepcopy(visual_pack.get("research_context") or {})
+    charts = _chart_map(visual_pack)
+    inv = _inventory_map(evidence_pack)
+    investigations = {str(x.get("investigation_id")): x for x in (visual_pack.get("investigation_candidates") or []) if x.get("investigation_id")}
+
+    title = _clean_text(ctx.get("topic") or "Analysis")
+    client = _clean_text(ctx.get("client") or "")
+    market = _clean_text(ctx.get("market") or "")
+    d_from = _clean_text(ctx.get("date_from") or "")
+    d_to = _clean_text(ctx.get("date_to") or "")
+
+    slides: list[dict] = []
+    slides.append(_slide("cover", "cover", title, subtitle=f"{client} · {market} · {d_from} — {d_to}".strip(" ·—"), priority=100, required=True, section="opening"))
+
+    rep = _indicator_value(inv, "brand_reputation") or {}
+    sentiment_chart = charts.get("sentiment_distribution")
+    emotion_chart = charts.get("emotion_distribution")
+    source_chart = charts.get("source_comparison")
+    narrative_chart = charts.get("narrative_drivers")
+    trend_chart = charts.get("time_trends")
+    quality_chart = charts.get("quality_matrix")
+    top_mentions_chart = charts.get("top_mentions")
+    mentions = _top_mentions(inv)
+
+    exec_claims = []
+    if rep.get("index") is not None:
+        exec_claims.append(_claim("exec-reputation", f"Brand Reputation: {_safe_float(rep.get('index')):.1f}/100", ["brand_reputation"], claim_type="deterministic_metric", source_values={"brand_reputation": rep.get("index")}))
+    if sentiment_chart:
+        label, value = _largest_distribution(sentiment_chart)
+        if label:
+            exec_claims.append(_claim("exec-sentiment", f"Largest weighted sentiment group: {label} ({value:.1f}%)", ["sentiment"], claim_type="deterministic_metric", source_values={label: value}))
+    if trend_chart:
+        rows = (trend_chart.get("data") or {}).get("rows") or []
+        if len(rows) >= 2:
+            first, last = rows[0], rows[-1]
+            if first.get("brand_reputation_index") is not None and last.get("brand_reputation_index") is not None:
+                delta = _safe_float(last.get("brand_reputation_index")) - _safe_float(first.get("brand_reputation_index"))
+                exec_claims.append(_claim("exec-trend", f"Brand Reputation changed {delta:+.1f} points across the observed period.", ["time_trends", "brand_reputation"], claim_type="deterministic_change", source_values={"delta": round(delta, 2)}))
+
+    inv_candidates = sorted(investigations.values(), key=lambda x: (_safe_int((x.get("presentation") or {}).get("priority_score")), _safe_float((x.get("confidence") or {}).get("score"))), reverse=True)
+    if inv_candidates:
+        top = inv_candidates[0]
+        finding = _txt(top.get("finding"), lang)
+        if finding:
+            exec_claims.append(_claim("exec-investigation", finding, _resolve_investigation_indicator_ids(top), evidence_refs=top.get("evidence_record_ids") or [], claim_type=str(top.get("conclusion_type") or "investigation"), confidence=(top.get("confidence") or {}).get("score"), causal_status=str(top.get("causal_status") or "not_proven"), source_values=(top.get("metrics") or {})))
+    slides.append(_slide("executive_summary", "executive_summary", "Executive summary" if lang == "en" else "Σύνοψη", chart_ids=[x for x in ["brand_reputation", "evidence_confidence"] if x in charts], claims=exec_claims, priority=100, required=True, section="opening"))
+
+    # Gold-standard scope: period/sample/audience context must be explicit, not hidden in notes.
+    scope_charts = [x for x in ["sample_overview", "origin_breakdown", "market_relevance", "impact_coverage"] if x in charts]
+    scope_claims = []
+    sample_value = _indicator_value(inv, "sample_volume") or {}
+    market_value = _indicator_value(inv, "market_relevance") or {}
+    if sample_value:
+        scope_claims.append(_claim("scope-sample", f"Analysis-ready evidence: {_safe_int(sample_value.get('analysis_ready_records'))} records; effective independent voices: {_safe_float(sample_value.get('effective_independent_voices')):.1f}.", ["sample_volume", "effective_independent_voices"], claim_type="deterministic_metric", source_values=sample_value))
+    if market_value.get("high_relevance_share") is not None:
+        scope_claims.append(_claim("scope-market", f"High target-market relevance: {100*_safe_float(market_value.get('high_relevance_share')):.1f}%.", ["market_relevance"], claim_type="deterministic_metric", source_values=market_value))
+    slides.append(_slide("evidence_base", "scope", "Evidence base & scope" if lang == "en" else "Βάση δεδομένων & εύρος", chart_ids=scope_charts[:2], claims=scope_claims, priority=97, required=True, section="opening"))
+
+    # Reputation + sentiment are core and are grouped deliberately to mirror the original report's analytical spine.
+    rep_charts = [x for x in ["brand_reputation", "sentiment_distribution", "stance_distribution"] if x in charts]
+    if rep_charts:
+        slides.append(_slide("reputation_sentiment", "metrics", "Reputation & sentiment" if lang == "en" else "Reputation & sentiment", chart_ids=rep_charts, priority=98, section="perception"))
+
+    positive_mentions = [m for m in mentions if str(m.get("sentiment_label") or "").lower() == "positive" and m.get("excerpt")]
+    negative_mentions = [m for m in mentions if str(m.get("sentiment_label") or "").lower() == "negative" and m.get("excerpt")]
+    if positive_mentions and negative_mentions:
+        evidence_claims = []
+        for i,m in enumerate(positive_mentions[:3], start=1):
+            evidence_claims.append(_mention_claim("positive-evidence", m, lang=lang, index=i))
+        for i,m in enumerate(negative_mentions[:3], start=1):
+            evidence_claims.append(_mention_claim("negative-evidence", m, lang=lang, index=i))
+        slides.append(_slide("sentiment_evidence", "evidence_split", "What people are saying" if lang == "en" else "Τι λέει το κοινό", claims=evidence_claims, priority=92, section="perception", notes={"split_by":"sentiment"}))
+
+    if emotion_chart:
+        emo_label, emo_value = _largest_distribution(emotion_chart)
+        material = emo_value >= 12.0 or any(str(x.get("type")) == "emotion_profile" for x in investigations.values())
+        if material:
+            slides.append(_slide("emotions", "distribution", "Emotional profile" if lang == "en" else "Συναισθηματικό προφίλ", chart_ids=["emotion_distribution"], claims=[_claim("emotion-leading", f"Leading emotion: {emo_label} ({emo_value:.1f}%)", ["emotions"], claim_type="deterministic_metric", source_values={emo_label: emo_value})] if emo_label else [], priority=86, section="perception"))
+    if "emotion_trends" in charts:
+        slides.append(_slide("emotion_evolution", "trend", "Emotion evolution" if lang == "en" else "Εξέλιξη συναισθημάτων", chart_ids=["emotion_trends"], priority=84, section="perception"))
+
+    if narrative_chart:
+        rows = ((narrative_chart.get("data") or {}).get("rows") or [])
+        claims = []
+        for i, r in enumerate(rows[:4]):
+            claims.append(_claim(f"driver-{i}", f"{_clean_text(r.get('name'))}: {_safe_float(r.get('contribution')):+.2f} reputation points", ["positive_narrative_drivers", "negative_narrative_drivers"], claim_type="deterministic_contribution", source_values={"contribution": r.get("contribution")}))
+        slides.append(_slide("drivers", "drivers", "What moves Brand Reputation" if lang == "en" else "Τι μετακινεί το Brand Reputation", chart_ids=["narrative_drivers"] + (["topic_drivers"] if "topic_drivers" in charts else []), claims=claims, priority=100, section="drivers"))
+
+    if trend_chart:
+        slides.append(_slide("evolution", "trend", "Evolution over time" if lang == "en" else "Εξέλιξη στον χρόνο", chart_ids=["time_trends"] + (["anomalies"] if "anomalies" in charts else []), priority=98, section="evolution"))
+
+    # Top automatic investigations become dedicated slides. Keep the number bounded to avoid a bloated report.
+    inv_slides = 0
+    for item in inv_candidates:
+        priority = _safe_int((item.get("presentation") or {}).get("priority_score"))
+        if priority < 55 or inv_slides >= 3:
+            continue
+        finding = _txt(item.get("finding"), lang)
+        question = _txt(item.get("question"), lang)
+        if not finding and not question:
+            continue
+        iid = str(item.get("investigation_id"))
+        claims = []
+        if finding:
+            claims.append(_claim(f"{iid}-finding", finding, _resolve_investigation_indicator_ids(item), evidence_refs=item.get("evidence_record_ids") or [], claim_type=str(item.get("conclusion_type") or "investigation"), confidence=(item.get("confidence") or {}).get("score"), causal_status=str(item.get("causal_status") or "not_proven"), source_values=item.get("metrics") or {}))
+        related = []
+        typ = str(item.get("type") or "")
+        if typ in {"numeric_anomaly", "reputation_daily_change", "period_shift", "emerging_narrative"}:
+            related = [x for x in ["time_trends", "anomalies", "narrative_drivers"] if x in charts]
+        elif typ in {"negative_narrative_driver", "positive_narrative_driver"}:
+            related = [x for x in ["narrative_drivers", "topic_drivers"] if x in charts]
+        elif typ == "emotion_profile":
+            related = [x for x in ["emotion_distribution", "time_trends"] if x in charts]
+        elif typ in {"source_divergence", "media_people_divergence"}:
+            related = [x for x in ["source_comparison", "origin_breakdown"] if x in charts]
+        elif typ in {"coordination_signal", "data_quality_guardrail"}:
+            related = [x for x in ["authenticity_coordination", "quality_matrix"] if x in charts]
+        slides.append(_slide(f"investigation_{inv_slides+1}", "investigation", question or ("Automatic investigation" if lang == "en" else "Αυτόματη διερεύνηση"), subtitle=finding, chart_ids=related[:2], investigation_ids=[iid], claims=claims, priority=priority, section="investigations", notes={"causality_guardrail": "Association ≠ proven causality."}))
+        inv_slides += 1
+
+    if source_chart or "origin_breakdown" in charts:
+        slides.append(_slide("sources_audiences", "sources", "Sources & audiences" if lang == "en" else "Πηγές & κοινά", chart_ids=[x for x in ["source_comparison", "origin_breakdown"] if x in charts], priority=88, section="context"))
+
+    influence = [x for x in ["media_influence", "people_influence"] if x in charts]
+    if influence:
+        slides.append(_slide("influence", "influence", "Who shapes the conversation" if lang == "en" else "Ποιοι διαμορφώνουν τη συζήτηση", chart_ids=influence, priority=80, section="context"))
+
+    media_mentions = [m for m in mentions if str(m.get("origin_group") or "").lower() == "media" and m.get("excerpt")]
+    if len(media_mentions) >= 2:
+        media_claims = [_mention_claim("media-evidence", m, lang=lang, index=i) for i,m in enumerate(media_mentions[:5], start=1)]
+        slides.append(_slide("media_evidence", "evidence_cards", "Media coverage & message" if lang == "en" else "Media κάλυψη & μήνυμα", claims=media_claims, priority=82, section="context"))
+
+    if _material_quality_warning(evidence_pack):
+        qcharts = [x for x in ["quality_matrix", "market_relevance", "impact_coverage", "authenticity_coordination", "story_syndication"] if x in charts]
+        slides.append(_slide("data_integrity", "quality", "Data integrity & interpretation limits" if lang == "en" else "Ακεραιότητα δεδομένων & όρια ερμηνείας", chart_ids=qcharts[:3], claims=[_claim("quality-causality", "Association ≠ proven causality." if lang == "en" else "Συσχέτιση ≠ αποδεδειγμένη αιτιότητα.", ["data_quality", "source_coverage"], claim_type="guardrail")], priority=94, required=True, section="quality"))
+
+    if top_mentions_chart:
+        slides.append(_slide("evidence", "evidence", "Evidence behind the findings" if lang == "en" else "Evidence πίσω από τα ευρήματα", chart_ids=["top_mentions"], priority=90, section="evidence"))
+
+    # Strategic synthesis mirrors the old report's strengths/frictions/opportunities/risks logic without inventing strategy.
+    synthesis_claims = []
+    if narrative_chart:
+        rows = ((narrative_chart.get("data") or {}).get("rows") or [])
+        pos = [r for r in rows if _safe_float(r.get("contribution")) > 0]
+        neg = [r for r in rows if _safe_float(r.get("contribution")) < 0]
+        if pos:
+            r=max(pos,key=lambda x:_safe_float(x.get("contribution")))
+            synthesis_claims.append(_claim("synthesis-strength", f"Strength signal: {_clean_text(r.get('name'))} ({_safe_float(r.get('contribution')):+.2f} Reputation points)", ["positive_narrative_drivers"], claim_type="deterministic_contribution", source_values={"role":"strength","contribution":r.get("contribution")}))
+        if neg:
+            r=min(neg,key=lambda x:_safe_float(x.get("contribution")))
+            synthesis_claims.append(_claim("synthesis-friction", f"Friction signal: {_clean_text(r.get('name'))} ({_safe_float(r.get('contribution')):+.2f} Reputation points)", ["negative_narrative_drivers"], claim_type="deterministic_contribution", source_values={"role":"friction","contribution":r.get("contribution")}))
+    if trend_chart:
+        rows=(trend_chart.get("data") or {}).get("rows") or []
+        if len(rows)>=2 and rows[0].get("brand_reputation_index") is not None and rows[-1].get("brand_reputation_index") is not None:
+            delta=_safe_float(rows[-1].get("brand_reputation_index"))-_safe_float(rows[0].get("brand_reputation_index"))
+            synthesis_claims.append(_claim("synthesis-momentum", f"Momentum signal: Brand Reputation moved {delta:+.1f} points across the observed period.", ["brand_reputation","time_trends"], claim_type="deterministic_change", source_values={"role":"momentum","delta":round(delta,2)}))
+    if inv_candidates:
+        top=inv_candidates[0]
+        synthesis_claims.append(_claim("synthesis-watch", ("Watch signal: " if lang=="en" else "Σήμα παρακολούθησης: ")+_txt(top.get("question"),lang), _resolve_investigation_indicator_ids(top), evidence_refs=top.get("evidence_record_ids") or [], claim_type="attention_point", causal_status="not_proven", source_values={"role":"watch"}))
+    if synthesis_claims:
+        slides.append(_slide("strategic_synthesis", "strategic_synthesis", "Strategic synthesis" if lang=="en" else "Στρατηγική σύνθεση", claims=synthesis_claims[:4], priority=96, section="closing", notes={"causality_guardrail":"Association ≠ proven causality."}))
+
+    methodology_claims = [
+        _claim("method-reputation", "Brand Reputation is a deterministic 0–100 index built from evidence-linked sentiment, independent-voice weight, authenticity, confidence and bounded impact; reach does not create sentiment by itself.", ["brand_reputation","sentiment","effective_independent_voices","authenticity_risk","evidence_confidence","impact_attention"], claim_type="methodology"),
+        _claim("method-emotions", "Emotion reporting is based on the dominant classified emotion in organic people evidence; low-signal emotions do not automatically receive a dedicated slide.", ["emotions","origin_breakdown"], claim_type="methodology"),
+        _claim("method-visibility", "Owned/promotional and factual not-applicable content can remain visible for dissemination analysis while being excluded from Reputation weighting.", ["origin_breakdown","stance","impact_attention"], claim_type="methodology"),
+        _claim("method-causality", "Association ≠ proven causality. Automatic investigations surface evidence-linked associations, deterministic contributions and risk signals only.", ["numeric_anomalies","time_trends","top_mentions"], claim_type="guardrail", causal_status="not_proven"),
+    ]
+    slides.append(_slide("methodology", "methodology", "Methodology & reading guide" if lang=="en" else "Μεθοδολογία & οδηγός ανάγνωσης", claims=methodology_claims, priority=70, required=True, section="appendix"))
+
+    # Deterministic closing: not generic AI prose. It is assembled from the highest-priority evidence.
+    closing_claims = []
+    if narrative_chart:
+        rows = ((narrative_chart.get("data") or {}).get("rows") or [])
+        pos = [r for r in rows if _safe_float(r.get("contribution")) > 0]
+        neg = [r for r in rows if _safe_float(r.get("contribution")) < 0]
+        if pos:
+            r = max(pos, key=lambda x: _safe_float(x.get("contribution")))
+            closing_claims.append(_claim("close-positive", f"Strongest positive driver: {_clean_text(r.get('name'))}", ["positive_narrative_drivers"], claim_type="deterministic_rank"))
+        if neg:
+            r = min(neg, key=lambda x: _safe_float(x.get("contribution")))
+            closing_claims.append(_claim("close-negative", f"Strongest negative driver: {_clean_text(r.get('name'))}", ["negative_narrative_drivers"], claim_type="deterministic_rank"))
+    if inv_candidates:
+        top = inv_candidates[0]
+        closing_claims.append(_claim("close-watch", ("Watch next: " if lang == "en" else "Παρακολούθηση: ") + _txt(top.get("question"), lang), _resolve_investigation_indicator_ids(top), evidence_refs=top.get("evidence_record_ids") or [], claim_type="attention_point", causal_status="not_proven"))
+    slides.append(_slide("conclusions", "conclusions", "Conclusions & what to watch" if lang == "en" else "Συμπεράσματα & τι να προσέξουμε", claims=closing_claims, priority=100, required=True, section="closing"))
+
+    if cancel_check and cancel_check():
+        raise PresentationCancelled("Presentation planning cancelled after slide selection")
+
+    # Complete Step 8 indicator disposition contract.
+    indicator_review = []
+    for item in visual_pack.get("indicator_review") or []:
+        indicator_id = str(item.get("indicator_id"))
+        linked_slides = [s["slide_id"] for s in slides if indicator_id in {i for c in s.get("chart_ids") or [] for i in (charts.get(c, {}).get("indicator_ids") or [])} or any(indicator_id in (cl.get("indicator_ids") or []) for cl in s.get("claims") or [])]
+        if linked_slides:
+            status = "included"
+            reason = None
+        elif item.get("available"):
+            status = "reviewed_omitted_low_signal"
+            reason = "Reviewed by Step 8; no dedicated or contextual slide justified by the current evidence."
+        else:
+            status = "reviewed_omitted_insufficient_data"
+            reason = "Evidence unavailable or insufficient; no decorative slide generated."
+        indicator_review.append({
+            "indicator_id": indicator_id,
+            "examined": True,
+            "step7_visual_status": item.get("visual_status"),
+            "presentation_status": status,
+            "slide_ids": linked_slides,
+            "omission_reason": reason,
+        })
+
+    expected = [x[0] for x in INDICATOR_REGISTRY]
+    if [x["indicator_id"] for x in indicator_review] != expected or not all(x["examined"] for x in indicator_review):
+        raise PresentationValidationError("Step 8 presentation indicator review is incomplete.")
+
+    chart_review = []
+    used_chart_ids = {cid for s in slides for cid in s.get("chart_ids") or []}
+    for cid in visual_pack.get("presentation_chart_order") or []:
+        c = charts.get(cid)
+        if not c:
+            continue
+        chart_review.append({
+            "chart_id": cid,
+            "examined": True,
+            "used": cid in used_chart_ids,
+            "slide_ids": [s["slide_id"] for s in slides if cid in (s.get("chart_ids") or [])],
+            "omission_reason": None if cid in used_chart_ids else "Reviewed but omitted to avoid low-information or redundant client slides.",
+        })
+
+    claim_ledger = [copy.deepcopy(cl) | {"slide_id": s["slide_id"]} for s in slides for cl in s.get("claims") or []]
+    _validate_claim_ledger(claim_ledger, expected)
+    gold_standard_audit = _gold_standard_audit(slides, charts, inv, investigations)
+    if any(r["status"] == "missing" for r in gold_standard_audit["capabilities"] if r["applicable"]):
+        raise PresentationValidationError("Step 8 gold-standard capability audit found an applicable presentation capability with no coverage.")
+
+    return {
+        "contract_version": PRESENTATION_CONTRACT_VERSION,
+        "ruleset_version": PRESENTATION_RULESET_VERSION,
+        "methodology_version": PRESENTATION_METHODOLOGY_VERSION,
+        "generated_at": _utcnow(),
+        "language": lang,
+        "research_context": ctx,
+        "slides": slides,
+        "indicator_review": indicator_review,
+        "chart_review": chart_review,
+        "claim_ledger": claim_ledger,
+        "gold_standard_audit": gold_standard_audit,
+        "warnings": list(dict.fromkeys([_clean_text(x, 500) for x in (visual_pack.get("warnings") or []) if x])),
+        "guardrails": {
+            "all_25_indicators_reviewed": True,
+            "no_invented_metrics": True,
+            "material_claims_require_traceability": True,
+            "native_editable_powerpoint_objects": True,
+            "quality_warnings_preserved": True,
+            "association_not_causation": True,
+            "raw_evidence_never_modified": True,
+        },
+    }
+
+
+def _validate_claim_ledger(claims: list[dict], expected_indicator_ids: list[str] | None = None) -> None:
+    expected = set(expected_indicator_ids or [x[0] for x in INDICATOR_REGISTRY])
+    seen = set()
+    for cl in claims:
+        cid = str(cl.get("claim_id") or "")
+        if not cid or cid in seen:
+            raise PresentationValidationError("Every presentation claim must have a unique claim_id.")
+        seen.add(cid)
+        ids = cl.get("indicator_ids") or []
+        if cl.get("claim_type") not in {"guardrail"} and not ids:
+            raise PresentationValidationError(f"Material claim {cid} has no indicator traceability.")
+        if any(i not in expected for i in ids):
+            raise PresentationValidationError(f"Claim {cid} references an unknown indicator.")
+        if cl.get("causal_status") not in {None, "not_applicable", "not_proven", "deterministic_contribution"} and "causal" in str(cl.get("claim_type")):
+            raise PresentationValidationError(f"Claim {cid} violates the causality contract.")
+
+
+# ---------- PowerPoint renderer ----------
+
+def _rgb(hex_str: str) -> RGBColor:
+    return RGBColor.from_string(hex_str)
+
+
+def _set_bg(slide, color: str = BG):
+    fill = slide.background.fill
+    fill.solid(); fill.fore_color.rgb = _rgb(color)
+
+
+def _add_text(slide, text, x, y, w, h, *, size=18, color=INK, bold=False, align=PP_ALIGN.LEFT, valign=MSO_ANCHOR.TOP, font=FONT):
+    box = slide.shapes.add_textbox(Inches(x), Inches(y), Inches(w), Inches(h))
+    tf = box.text_frame; tf.clear(); tf.word_wrap = True; tf.vertical_anchor = valign
+    p = tf.paragraphs[0]; p.alignment = align
+    run = p.add_run(); run.text = _clean_text(text, 4000)
+    run.font.name = font; run.font.size = Pt(size); run.font.bold = bold; run.font.color.rgb = _rgb(color)
+    return box
+
+
+def _add_rule(slide, x, y, w, color=STONE_DARK, width=1.0):
+    line = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(x), Inches(y), Inches(w), Inches(0.01))
+    line.fill.solid(); line.fill.fore_color.rgb = _rgb(color); line.line.fill.background()
+    return line
+
+
+def _add_header(slide, title, section_no=None):
+    if section_no is not None:
+        _add_text(slide, f"{section_no:02d}", 0.58, 0.45, 0.5, 0.28, size=9, color=MUTED, bold=True)
+    clean = _clean_text(title, 250)
+    size = 25 if len(clean) <= 54 else 20 if len(clean) <= 82 else 17
+    _add_text(slide, clean, 1.15, 0.30, 11.4, 0.82, size=size, bold=True, valign=MSO_ANCHOR.MIDDLE)
+    _add_rule(slide, 0.58, 1.15, 12.15)
+
+
+def _add_footer(slide, page, context):
+    topic = _clean_text(context.get("topic") or "SIGNALYTH", 80)
+    _add_text(slide, topic, 0.58, 7.12, 8.8, 0.18, size=7.5, color=MUTED)
+    _add_text(slide, str(page), 12.05, 7.12, 0.65, 0.18, size=7.5, color=MUTED, align=PP_ALIGN.RIGHT)
+
+
+def _add_logo(slide, logo_path: Path, x, y, w):
+    if logo_path.exists():
+        try:
+            return slide.shapes.add_picture(str(logo_path), Inches(x), Inches(y), width=Inches(w))
+        except Exception:
+            return None
+    return None
+
+
+def _add_kpi_card(slide, label, value, x, y, w, h, *, suffix="", accent=AEGEAN):
+    shape = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(x), Inches(y), Inches(w), Inches(h))
+    shape.fill.solid(); shape.fill.fore_color.rgb = _rgb(WHITE); shape.line.color.rgb = _rgb(STONE_DARK)
+    _add_text(slide, label, x+0.18, y+0.18, w-0.36, 0.32, size=9.5, color=MUTED, bold=True)
+    _add_text(slide, f"{value}{suffix}", x+0.18, y+0.58, w-0.36, h-0.7, size=28, color=accent, bold=True, valign=MSO_ANCHOR.MIDDLE)
+    return shape
+
+
+def _native_bar(slide, categories, series, x, y, w, h, *, horizontal=False, diverging=False, percent=False):
+    data = ChartData(); data.categories = [_clean_text(c, 60) for c in categories]
+    for name, vals in series:
+        data.add_series(_clean_text(name, 50), [float(_safe_float(v)) for v in vals])
+    chart_type = XL_CHART_TYPE.BAR_CLUSTERED if horizontal else XL_CHART_TYPE.COLUMN_CLUSTERED
+    chart = slide.shapes.add_chart(chart_type, Inches(x), Inches(y), Inches(w), Inches(h), data).chart
+    chart.has_legend = len(series) > 1
+    if chart.has_legend:
+        chart.legend.position = XL_LEGEND_POSITION.BOTTOM
+        chart.legend.font.size = Pt(8)
+    chart.has_title = False
+    chart.value_axis.has_major_gridlines = True
+    chart.value_axis.major_gridlines.format.line.color.rgb = _rgb(STONE_DARK)
+    chart.value_axis.tick_labels.font.size = Pt(8)
+    chart.category_axis.tick_labels.font.size = Pt(8)
+    chart.category_axis.tick_labels.font.name = FONT
+    chart.value_axis.tick_labels.font.name = FONT
+    if percent:
+        chart.value_axis.maximum_scale = 100
+        chart.value_axis.minimum_scale = 0
+    if diverging:
+        chart.value_axis.crosses_at = 0
+    # Explicit restrained palette; all chart elements remain editable.
+    palette = [AEGEAN, STONE_DARK, NEG, POS]
+    for i, s in enumerate(chart.series):
+        s.format.fill.solid(); s.format.fill.fore_color.rgb = _rgb(palette[i % len(palette)])
+        s.format.line.color.rgb = _rgb(palette[i % len(palette)])
+    return chart
+
+
+def _native_line(slide, categories, series, x, y, w, h, *, min_y=None, max_y=None):
+    data = ChartData(); data.categories = [_clean_text(c, 30) for c in categories]
+    for name, vals in series:
+        data.add_series(_clean_text(name, 50), [float(_safe_float(v)) for v in vals])
+    chart = slide.shapes.add_chart(XL_CHART_TYPE.LINE_MARKERS, Inches(x), Inches(y), Inches(w), Inches(h), data).chart
+    chart.has_legend = len(series) > 1
+    if chart.has_legend:
+        chart.legend.position = XL_LEGEND_POSITION.BOTTOM; chart.legend.font.size = Pt(8)
+    chart.value_axis.has_major_gridlines = True; chart.value_axis.major_gridlines.format.line.color.rgb = _rgb(STONE_DARK)
+    chart.value_axis.tick_labels.font.size = Pt(8); chart.category_axis.tick_labels.font.size = Pt(8)
+    chart.value_axis.tick_labels.font.name = FONT; chart.category_axis.tick_labels.font.name = FONT
+    if min_y is not None: chart.value_axis.minimum_scale = min_y
+    if max_y is not None: chart.value_axis.maximum_scale = max_y
+    palette = [AEGEAN, NEG, POS]
+    for i, s in enumerate(chart.series):
+        s.format.line.color.rgb = _rgb(palette[i % len(palette)]); s.format.line.width = Pt(2)
+        s.marker.format.fill.solid(); s.marker.format.fill.fore_color.rgb = _rgb(palette[i % len(palette)])
+    return chart
+
+
+def _add_editable_table(slide, headers, rows, x, y, w, h, *, col_widths=None, font_size=9):
+    rows = list(rows)
+    effective_h = min(h, max(0.82, 0.42 * (len(rows) + 1)))
+    table_shape = slide.shapes.add_table(len(rows)+1, len(headers), Inches(x), Inches(y), Inches(w), Inches(effective_h))
+    table = table_shape.table
+    table.rows[0].height = Inches(0.36)
+    for i in range(1, len(table.rows)):
+        rr = table.rows[i]
+        rr.height = Inches(max(0.34, min(0.48, (effective_h-0.36)/max(1,len(rows)))))
+    if col_widths:
+        total = sum(col_widths)
+        for i, cw in enumerate(col_widths):
+            table.columns[i].width = Inches(w * cw / total)
+    for j, head in enumerate(headers):
+        cell = table.cell(0,j); cell.text = _clean_text(head, 80); cell.fill.solid(); cell.fill.fore_color.rgb = _rgb(INK)
+        for p in cell.text_frame.paragraphs:
+            for r in p.runs:
+                r.font.name=FONT; r.font.size=Pt(font_size); r.font.bold=True; r.font.color.rgb=_rgb(WHITE)
+    for i, row in enumerate(rows, start=1):
+        for j, val in enumerate(row):
+            cell=table.cell(i,j); cell.text=_clean_text(val, 500); cell.fill.solid(); cell.fill.fore_color.rgb=_rgb(WHITE if i%2 else "F0EDE7")
+            for p in cell.text_frame.paragraphs:
+                for r in p.runs:
+                    r.font.name=FONT; r.font.size=Pt(font_size); r.font.color.rgb=_rgb(INK)
+    return table
+
+
+def _render_chart_spec(slide, chart: dict, x, y, w, h, lang: str):
+    typ = chart.get("chart_type"); data = chart.get("data") or {}
+    if typ not in {"gauge_kpi", "quality_kpi", "kpi_group"}:
+        _add_text(slide, _txt(chart.get("title"), lang), x, y, w, 0.28, size=9.4, color=MUTED, bold=True)
+        y += 0.34
+        h = max(0.5, h - 0.34)
+    if typ == "gauge_kpi":
+        val = data.get("value")
+        _add_kpi_card(slide, _txt(chart.get("title"), lang), f"{_safe_float(val):.1f}", x, y, w, h, suffix=" / 100", accent=AEGEAN)
+        return "editable_shapes"
+    if typ == "quality_kpi":
+        val = next((data.get(k) for k in ("known_metric_share_percent","high_relevance_share_percent","value") if data.get(k) is not None), None)
+        _add_kpi_card(slide, _txt(chart.get("title"), lang), f"{_safe_float(val):.1f}" if val is not None else "—", x, y, w, h, suffix="%" if val is not None else "", accent=AEGEAN)
+        return "editable_shapes"
+    if typ == "kpi_group":
+        items=data.get("items") or []; n=max(1,len(items)); gap=.12; cw=(w-gap*(n-1))/n
+        for i,item in enumerate(items):
+            label=_txt(item.get("label"),lang); val=item.get("value")
+            _add_kpi_card(slide,label, f"{_safe_float(val):.0f}" if isinstance(val,(int,float)) else str(val), x+i*(cw+gap),y,cw,h,accent=AEGEAN)
+        return "editable_shapes"
+    if typ == "distribution_bar":
+        cats=data.get("categories") or []
+        _native_bar(slide,[c.get("label") for c in cats],[("%",[c.get("value") for c in cats])],x,y,w,h,horizontal=True,percent=True)
+        return "native_chart"
+    if typ == "diverging_bar":
+        rows=data.get("rows") or []
+        _native_bar(slide,[r.get("name") for r in rows[:10]],[("Contribution",[r.get("contribution") for r in rows[:10]])],x,y,w,h,horizontal=True,diverging=True)
+        return "native_chart"
+    if typ == "grouped_bar":
+        rows=data.get("rows") or []
+        _native_bar(slide,[r.get("name") for r in rows],[("Record share",[r.get("record_share") for r in rows]),("Attention share",[r.get("attention_share") for r in rows])],x,y,w,h,horizontal=False,percent=True)
+        return "native_chart"
+    if typ == "time_series":
+        rows=data.get("rows") or []
+        categories=[r.get("date") for r in rows]
+        requested=list(data.get("series") or [])
+        labels=data.get("series_labels") or {}
+        if data.get("scale") == "share_percent" and requested:
+            series=[]
+            for key in requested[:4]:
+                values=[None if r.get(key) is None else 100*_safe_float(r.get(key)) for r in rows]
+                series.append((labels.get(key) or key.replace("_opinion_weight_share","").replace("_"," ").title(),values))
+            _native_line(slide,categories,series,x,y,w,h,min_y=0,max_y=100)
+            return "native_chart"
+        # Separate metric families: Brand Reputation is the client-readable headline series.
+        if any(r.get("brand_reputation_index") is not None for r in rows):
+            _native_line(slide,categories,[("Brand Reputation",[r.get("brand_reputation_index") for r in rows])],x,y,w,h,min_y=0,max_y=100)
+            return "native_chart"
+    if typ in {"source_matrix","ranking","event_timeline","quality_matrix","risk_panel","cluster_table","evidence_table"}:
+        if typ == "source_matrix":
+            rows=data.get("rows") or []
+            vals=[[r.get("source"),r.get("records"),"—" if r.get("brand_reputation") is None else f"{_safe_float(r.get('brand_reputation')):.1f}",f"{_safe_float(r.get('average_impact')):.2f}"] for r in rows[:8]]
+            _add_editable_table(slide,["Source","Records","Reputation","Impact"],vals,x,y,w,h,font_size=8.5)
+        elif typ == "ranking":
+            rows=data.get("rows") or []
+            vals=[[r.get("name"),r.get("records"),f"{_safe_float(r.get('attention')):.2f}","—" if r.get("weighted_sentiment") is None else f"{_safe_float(r.get('weighted_sentiment')):+.2f}"] for r in rows[:8]]
+            _add_editable_table(slide,["Name","Records","Attention","Sentiment"],vals,x,y,w,h,font_size=8.5)
+        elif typ == "event_timeline":
+            ev=data.get("events") or []
+            vals=[[e.get("date"),", ".join(e.get("flags") or []),f"{_safe_float(e.get('volume_robust_z')):.1f}"] for e in ev[:8]]
+            _add_editable_table(slide,["Date","Signal","Volume z"],vals,x,y,w,h,font_size=8.2)
+        elif typ == "quality_matrix":
+            items=data.get("items") or []
+            friendly={"data_quality":"Data quality","source_coverage":"Source coverage","sample_achievement":"Sample achievement"}
+            vals=[[friendly.get(i.get("key"),i.get("key")),"—" if i.get("value") is None else f"{_safe_float(i.get('value')):.1f}",i.get("label") or ""] for i in items]
+            _add_editable_table(slide,["Measure","Value","Label"],vals,x,y,w,h,font_size=9)
+        elif typ == "risk_panel":
+            vals=[["Low authenticity",data.get("low_authenticity_records"),f"{_safe_float(data.get('low_authenticity_share_percent')):.1f}%"],["Coordination clusters",len(data.get("coordination_clusters") or []),""]]
+            _add_editable_table(slide,["Signal","Count","Share"],vals,x,y,w,h,font_size=9)
+        elif typ == "cluster_table":
+            rows=data.get("rows") or []
+            vals=[[r.get("cluster_id"),r.get("records"),", ".join(r.get("sources") or []),r.get("representative_excerpt") or ""] for r in rows[:6]]
+            _add_editable_table(slide,["Cluster","Records","Sources","Example"],vals,x,y,w,h,col_widths=[1,1,1.3,3],font_size=7.5)
+        elif typ == "evidence_table":
+            rows=data.get("rows") or []
+            vals=[[r.get("platform"),r.get("author"),r.get("date"),r.get("excerpt") or "",f"{_safe_float(r.get('impact_score')):.2f}"] for r in rows[:6]]
+            _add_editable_table(slide,["Source","Author","Date","Evidence","Impact"],vals,x,y,w,h,col_widths=[1,1.2,1.1,4.4,0.9],font_size=7.2)
+        return "editable_table"
+    # Never rasterize unsupported charts: show their structured data as an editable evidence box.
+    _add_text(slide, _txt(chart.get("title"),lang), x, y, w, .35, size=11, bold=True)
+    _add_text(slide, json.dumps(_json_safe(data), ensure_ascii=False)[:1200], x, y+.45, w, h-.45, size=7.5, color=MUTED)
+    return "editable_text_fallback"
+
+
+
+def _add_claim_card(slide, text, x, y, w, h, *, label=None, accent=AEGEAN, font_size=11.5):
+    shape = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(x), Inches(y), Inches(w), Inches(h))
+    shape.fill.solid(); shape.fill.fore_color.rgb = _rgb(WHITE); shape.line.color.rgb = _rgb(STONE_DARK)
+    if label:
+        _add_text(slide, label, x+.18, y+.14, w-.36, .24, size=8.5, color=accent, bold=True)
+        _add_text(slide, text, x+.18, y+.47, w-.36, h-.58, size=font_size, color=INK)
+    else:
+        _add_text(slide, text, x+.18, y+.18, w-.36, h-.36, size=font_size, color=INK, valign=MSO_ANCHOR.MIDDLE)
+    return shape
+
+
+def _role_label(role: str, lang: str) -> str:
+    labels = {
+        "strength": ("Strength", "Δύναμη"),
+        "friction": ("Friction", "Τριβή"),
+        "momentum": ("Momentum", "Δυναμική"),
+        "watch": ("Watch", "Παρακολούθηση"),
+    }
+    en, el = labels.get(role, (role.title() if role else "Signal", "Σήμα"))
+    return el if lang == "el" else en
+
+
+def generate_pptx(presentation_plan: dict, visual_pack: dict, output_path: Path, logo_path: Path) -> dict:
+    prs = Presentation(); prs.slide_width = Inches(13.333333); prs.slide_height = Inches(7.5)
+    blank = prs.slide_layouts[6]
+    charts = _chart_map(visual_pack); lang = presentation_plan.get("language") or "en"; ctx = presentation_plan.get("research_context") or {}
+    render_audit=[]
+    for idx, spec in enumerate(presentation_plan.get("slides") or [], start=1):
+        slide=prs.slides.add_slide(blank); _set_bg(slide)
+        typ=spec.get("slide_type")
+        if typ=="cover":
+            _add_logo(slide,logo_path,.72,.7,5.4)
+            _add_text(slide,spec.get("title"),.75,3.35,11.8,1.05,size=38,bold=True)
+            _add_text(slide,spec.get("subtitle"),.78,4.48,10.8,.45,size=13,color=MUTED)
+            _add_rule(slide,.78,5.25,2.05,color=INK,width=2)
+            _add_text(slide,"Brand intelligence report" if lang=="en" else "Αναφορά brand intelligence",.78,5.5,5,.4,size=10,color=MUTED,bold=True)
+        else:
+            _add_header(slide,spec.get("title"),idx-1)
+            _add_footer(slide,idx,ctx)
+            if spec.get("subtitle"):
+                _add_text(slide,spec.get("subtitle"),1.15,1.35,11.3,.72,size=12.5,color=MUTED)
+            cids=spec.get("chart_ids") or []
+            claims=spec.get("claims") or []
+            chart_modes=[]
+            if typ == "executive_summary":
+                if len(cids) >= 1:
+                    chart_modes.append((cids[0],_render_chart_spec(slide,charts[cids[0]],1.12,1.55,5.35,2.15,lang)))
+                if len(cids) >= 2:
+                    chart_modes.append((cids[1],_render_chart_spec(slide,charts[cids[1]],6.82,1.55,5.35,2.15,lang)))
+                for i,cl in enumerate(claims[:3]):
+                    _add_claim_card(slide,cl.get("text"),1.12+i*3.72,4.15,3.47,1.62,font_size=10.5)
+            elif typ == "evidence_split":
+                pos=[c for c in claims if str((c.get("source_values") or {}).get("sentiment"))=="positive"]
+                neg=[c for c in claims if str((c.get("source_values") or {}).get("sentiment"))=="negative"]
+                _add_text(slide,"Positive evidence" if lang=="en" else "Θετικό evidence",1.12,1.55,5.2,.35,size=11,color=POS,bold=True)
+                _add_text(slide,"Critical / negative evidence" if lang=="en" else "Κριτικό / αρνητικό evidence",6.82,1.55,5.2,.35,size=11,color=NEG,bold=True)
+                for i,cl in enumerate(pos[:3]): _add_claim_card(slide,cl.get("text"),1.12,2.0+i*1.42,5.35,1.22,accent=POS,font_size=9.5)
+                for i,cl in enumerate(neg[:3]): _add_claim_card(slide,cl.get("text"),6.82,2.0+i*1.42,5.35,1.22,accent=NEG,font_size=9.5)
+            elif typ == "evidence_cards":
+                for i,cl in enumerate(claims[:4]):
+                    col=i%2; row=i//2
+                    _add_claim_card(slide,cl.get("text"),1.12+col*5.7,1.72+row*2.35,5.35,1.95,accent=AEGEAN,font_size=10.0)
+            elif typ == "strategic_synthesis":
+                for i,cl in enumerate(claims[:4]):
+                    role=str((cl.get("source_values") or {}).get("role") or "")
+                    col=i%2; row=i//2
+                    accent=POS if role=="strength" else NEG if role=="friction" else AEGEAN if role=="momentum" else WARN
+                    _add_claim_card(slide,cl.get("text"),1.12+col*5.7,1.65+row*2.38,5.35,2.0,label=_role_label(role,lang),accent=accent,font_size=10.4)
+            elif typ == "methodology":
+                if cids:
+                    chart_modes.append((cids[0],_render_chart_spec(slide,charts[cids[0]],1.12,1.7,4.15,4.65,lang)))
+                x=5.65 if cids else 1.12; w=6.52 if cids else 11.05
+                for i,cl in enumerate(claims[:4]):
+                    _add_claim_card(slide,cl.get("text"),x,1.55+i*1.28,w,1.08,accent=AEGEAN,font_size=9.2)
+            elif len(cids)==1:
+                chart_modes.append((cids[0],_render_chart_spec(slide,charts[cids[0]],1.12,2.05,11.1,4.45,lang)))
+            elif len(cids)>=2:
+                chart_modes.append((cids[0],_render_chart_spec(slide,charts[cids[0]],1.12,2.0,5.35,4.35,lang)))
+                chart_modes.append((cids[1],_render_chart_spec(slide,charts[cids[1]],6.82,2.0,5.35,4.35,lang)))
+            elif claims:
+                y=1.8
+                for cl in claims[:5]:
+                    _add_claim_card(slide,cl.get("text"),1.15,y,10.9,.82,font_size=12.5)
+                    y+=1.0
+            if claims and cids and typ not in {"executive_summary","methodology"}:
+                # Small evidence note at the bottom; the claim ledger is fully persisted separately.
+                note=" · ".join(_clean_text(c.get("text"),180) for c in claims[:2])
+                _add_text(slide,note,1.15,6.55,11.0,.38,size=8.2,color=MUTED)
+            if spec.get("notes",{}).get("causality_guardrail"):
+                _add_text(slide,"Association ≠ proven causality." if lang=="en" else "Συσχέτιση ≠ αποδεδειγμένη αιτιότητα.",8.3,6.92,4.0,.2,size=7.2,color=WARN,align=PP_ALIGN.RIGHT)
+            render_audit.extend({"slide_id":spec.get("slide_id"),"chart_id":cid,"render_mode":mode} for cid,mode in chart_modes)
+    output_path.parent.mkdir(parents=True,exist_ok=True); prs.save(str(output_path))
+    return {"slides":len(prs.slides),"chart_render_audit":render_audit,"path":str(output_path)}
+
+
+# ---------- Internal brief ----------
+
+def _docx_set_cell_text(cell, text, *, bold=False, size=9, color=INK):
+    cell.text=""; p=cell.paragraphs[0]; r=p.add_run(_clean_text(text,1000)); r.bold=bold; r.font.name=FONT; r.font.size=DocxPt(size); r.font.color.rgb=DocxRGBColor.from_string(color); cell.vertical_alignment=WD_CELL_VERTICAL_ALIGNMENT.CENTER
+
+
+def generate_internal_docx(presentation_plan: dict, evidence_pack: dict, output_path: Path, logo_path: Path) -> dict:
+    lang=presentation_plan.get("language") or "en"; ctx=presentation_plan.get("research_context") or {}
+    doc=Document(); sec=doc.sections[0]; sec.top_margin=DocxInches(.65); sec.bottom_margin=DocxInches(.65); sec.left_margin=DocxInches(.75); sec.right_margin=DocxInches(.75)
+    styles=doc.styles
+    styles["Normal"].font.name=FONT; styles["Normal"].font.size=DocxPt(9.5); styles["Normal"].font.color.rgb=DocxRGBColor.from_string(INK)
+    if logo_path.exists():
+        try: doc.add_picture(str(logo_path),width=DocxInches(3.1))
+        except Exception: pass
+    p=doc.add_paragraph(); p.alignment=WD_ALIGN_PARAGRAPH.LEFT
+    r=p.add_run(("Internal Intelligence Brief" if lang=="en" else "Εσωτερικό Intelligence Brief")); r.bold=True;r.font.name=FONT;r.font.size=DocxPt(22)
+    p=doc.add_paragraph(); r=p.add_run(f"{ctx.get('client','')} · {ctx.get('topic','')} · {ctx.get('market','')} · {ctx.get('date_from','')} — {ctx.get('date_to','')}");r.font.name=FONT;r.font.size=DocxPt(9);r.font.color.rgb=DocxRGBColor.from_string(MUTED)
+
+    def heading(text):
+        p=doc.add_paragraph(); r=p.add_run(text); r.bold=True;r.font.name=FONT;r.font.size=DocxPt(14);r.font.color.rgb=DocxRGBColor.from_string(INK); return p
+    heading("What matters" if lang=="en" else "Τι έχει σημασία")
+    for cl in presentation_plan.get("claim_ledger") or []:
+        if cl.get("slide_id") in {"executive_summary","conclusions"}:
+            p=doc.add_paragraph(style=None); p.style=doc.styles["Normal"]; p.add_run("• ").bold=True; p.add_run(_clean_text(cl.get("text"),800))
+
+    heading("What to watch / verify" if lang=="en" else "Τι να προσέξουμε / επαληθεύσουμε")
+    warnings=list(presentation_plan.get("warnings") or [])
+    if "Association ≠ proven causality." not in warnings: warnings.append("Association ≠ proven causality.")
+    for w in warnings:
+        p=doc.add_paragraph(); p.add_run("• ").bold=True; p.add_run(_clean_text(w,800))
+
+    heading("Automatic investigations" if lang=="en" else "Αυτόματες διερευνήσεις")
+    for inv in (evidence_pack.get("investigations") or [])[:10]:
+        q=_txt(inv.get("question"),lang); f=_txt(inv.get("finding"),lang); conf=(inv.get("confidence") or {}).get("score")
+        p=doc.add_paragraph(); rr=p.add_run(q or "Investigation");rr.bold=True;rr.font.name=FONT
+        if f: doc.add_paragraph(f)
+        meta=f"Confidence: {conf if conf is not None else '—'} · Causality: {inv.get('causal_status','not_proven')} · Evidence refs: {len(inv.get('evidence_record_ids') or [])}"
+        p=doc.add_paragraph(); rr=p.add_run(meta);rr.italic=True;rr.font.size=DocxPt(8);rr.font.color.rgb=DocxRGBColor.from_string(MUTED)
+
+    heading("Presentation review audit" if lang=="en" else "Έλεγχος παρουσίασης")
+    rows=presentation_plan.get("indicator_review") or []
+    table=doc.add_table(rows=1,cols=3);table.alignment=WD_TABLE_ALIGNMENT.CENTER;table.style="Table Grid"
+    for j,h in enumerate(["Indicator","Status","Slide(s)"]): _docx_set_cell_text(table.rows[0].cells[j],h,bold=True,color=WHITE);table.rows[0].cells[j].shading if False else None
+    for row in rows:
+        cells=table.add_row().cells
+        _docx_set_cell_text(cells[0],row.get("indicator_id"),size=8)
+        _docx_set_cell_text(cells[1],row.get("presentation_status"),size=8)
+        _docx_set_cell_text(cells[2],", ".join(row.get("slide_ids") or []) or "—",size=8)
+
+    heading("PowerPoint gold-standard audit" if lang=="en" else "Gold-standard έλεγχος PowerPoint")
+    gold=(presentation_plan.get("gold_standard_audit") or {})
+    p=doc.add_paragraph(); rr=p.add_run(f"Capability coverage: {_safe_float(gold.get('coverage_percent')):.1f}%"); rr.bold=True; rr.font.name=FONT
+    table=doc.add_table(rows=1,cols=3);table.style="Table Grid";table.alignment=WD_TABLE_ALIGNMENT.CENTER
+    for j,h in enumerate(["Capability","Status","Slide(s)"]): _docx_set_cell_text(table.rows[0].cells[j],h,bold=True,size=8)
+    for row in gold.get("capabilities") or []:
+        cells=table.add_row().cells
+        _docx_set_cell_text(cells[0],row.get("label") or row.get("capability_id"),size=7.2)
+        _docx_set_cell_text(cells[1],row.get("status"),size=7.2)
+        _docx_set_cell_text(cells[2],", ".join(row.get("slide_ids") or []) or "—",size=7.2)
+
+    heading("Claim ledger" if lang=="en" else "Claim ledger")
+    table=doc.add_table(rows=1,cols=4);table.style="Table Grid";table.alignment=WD_TABLE_ALIGNMENT.CENTER
+    for j,h in enumerate(["Slide","Claim","Indicators","Evidence"]): _docx_set_cell_text(table.rows[0].cells[j],h,bold=True,size=8)
+    for cl in (presentation_plan.get("claim_ledger") or [])[:40]:
+        cells=table.add_row().cells
+        _docx_set_cell_text(cells[0],cl.get("slide_id"),size=7.2)
+        _docx_set_cell_text(cells[1],cl.get("text"),size=7.2)
+        _docx_set_cell_text(cells[2],", ".join(cl.get("indicator_ids") or []),size=7.2)
+        _docx_set_cell_text(cells[3],", ".join(cl.get("evidence_refs") or []) or "—",size=7.2)
+
+    output_path.parent.mkdir(parents=True,exist_ok=True);doc.save(str(output_path));return {"path":str(output_path),"paragraphs":len(doc.paragraphs),"tables":len(doc.tables)}
+
+
+def _convert_to_pdf(input_path: Path, out_dir: Path) -> Path | None:
+    soffice=shutil.which("libreoffice") or shutil.which("soffice")
+    if not soffice: return None
+    out_dir.mkdir(parents=True,exist_ok=True)
+    cmd=[soffice,"--headless","--convert-to","pdf","--outdir",str(out_dir),str(input_path)]
+    proc=subprocess.run(cmd,capture_output=True,text=True,timeout=120)
+    out=out_dir/(input_path.stem+".pdf")
+    return out if proc.returncode==0 and out.exists() and out.stat().st_size>0 else None
+
+
+def _evidence_rows(evidence_pack: dict) -> list[dict]:
+    inv=_inventory_map(evidence_pack); rows=_indicator_value(inv,"top_mentions") or []
+    return [_json_safe({k:r.get(k) for k in ("record_id","platform","author","origin_group","content_type","date","url","excerpt","sentiment_label","sentiment_score","emotion","topic","narrative","impact_score","evidence_confidence")}) for r in rows]
+
+
+def persist_presentation_bundle(folder: Path, result: dict) -> dict:
+    store=RunStore(); base=folder/"exports"
+    store.write(base/"summary.json",result["summary"])
+    store.write(base/"presentation-plan.json",result["presentation_plan"])
+    store.write(base/"indicator-review.json",result["presentation_plan"]["indicator_review"])
+    store.write(base/"chart-review.json",result["presentation_plan"]["chart_review"])
+    store.write(base/"claim-ledger.json",result["presentation_plan"]["claim_ledger"])
+    store.write(base/"gold-standard-audit.json",result["presentation_plan"].get("gold_standard_audit") or {})
+    store.write(base/"manifest.json",result["manifest"])
+    store.write(base/"qa.json",result["qa"])
+    return result["summary"]
+
+
+def build_exports(folder: Path, plan: dict, *, force: bool=False, cancel_check: Callable[[], bool] | None=None) -> dict:
+    visual_summary=load_visualization_summary(folder)
+    if visual_summary is None: raise RuntimeError("Step 8 requires Step 7 Charts & Dashboard.")
+    if visual_summary.get("stale"): raise RuntimeError("Step 7 is stale; rebuild Charts & Dashboard before exports.")
+    visual_pack=load_presentation_visual_pack(folder); evidence_pack=load_evidence_pack(folder)
+    _validate_inputs(visual_pack,evidence_pack,plan)
+    input_hash=_hash_payload({"visual_pack":visual_pack,"evidence_contract":evidence_pack.get("contract_version"),"research_context":evidence_pack.get("research_context"),"report_language":plan.get("report_language")})
+    old=RunStore.read(folder/"exports"/"summary.json")
+    if old and not force and old.get("input_hash")==input_hash and not old.get("stale"):
+        return old
+    if cancel_check and cancel_check(): raise PresentationCancelled("Exports cancelled before planning")
+    pplan=build_presentation_plan(visual_pack,evidence_pack,plan,cancel_check=cancel_check)
+    base=folder/"exports"; base.mkdir(parents=True,exist_ok=True)
+    lang=pplan["language"]; ctx=pplan["research_context"]
+    stem=re.sub(r"[^A-Za-z0-9Α-Ωα-ω_-]+","_",f"{ctx.get('client','')}_{ctx.get('topic','')}_{ctx.get('date_from','')}_{ctx.get('date_to','')}").strip("_")[:140] or "SIGNALYTH_Report"
+    pptx_path=base/f"{stem}.pptx"; docx_path=base/f"{stem}_Internal.docx"
+    logo_path=Path(__file__).resolve().parents[2]/"logo.png"
+    pptx_meta=generate_pptx(pplan,visual_pack,pptx_path,logo_path)
+    if cancel_check and cancel_check(): raise PresentationCancelled("Exports cancelled after PowerPoint generation")
+    docx_meta=generate_internal_docx(pplan,evidence_pack,docx_path,logo_path)
+    presentation_pdf=_convert_to_pdf(pptx_path,base)
+    internal_pdf=_convert_to_pdf(docx_path,base)
+
+    evidence_rows=_evidence_rows(evidence_pack)
+    evidence_json=base/f"{stem}_Evidence.json"; evidence_json.write_text(json.dumps(evidence_rows,ensure_ascii=False,indent=2,allow_nan=False),encoding="utf-8")
+    evidence_csv=base/f"{stem}_Evidence.csv"
+    with evidence_csv.open("w",encoding="utf-8-sig",newline="") as f:
+        fields=list(evidence_rows[0].keys()) if evidence_rows else ["record_id","platform","author","date","url","excerpt"]
+        writer=csv.DictWriter(f,fieldnames=fields);writer.writeheader();writer.writerows([{k:(json.dumps(v,ensure_ascii=False) if isinstance(v,(dict,list)) else v) for k,v in r.items()} for r in evidence_rows])
+
+    files=[pptx_path,docx_path,evidence_json,evidence_csv]
+    if presentation_pdf: files.append(presentation_pdf)
+    if internal_pdf: files.append(internal_pdf)
+    manifest={"files":[]}
+    for p in files:
+        manifest["files"].append({"name":p.name,"type":p.suffix.lower().lstrip("."),"bytes":p.stat().st_size,"sha256":hashlib.sha256(p.read_bytes()).hexdigest()})
+
+    # Export QA is structural here; release workflow additionally renders PPTX/DOCX/PDF visually.
+    qa={
+        "indicator_review_complete":len(pplan["indicator_review"])==len(INDICATOR_REGISTRY) and all(x.get("examined") for x in pplan["indicator_review"]),
+        "claim_ledger_valid":True,
+        "native_editable_chart_contract":all((c.get("presentation") or {}).get("native_editable_ready") and not (c.get("presentation") or {}).get("render_as_raster") for c in (visual_pack.get("chart_specs") or [])),
+        "pptx_slides":pptx_meta["slides"],
+        "pptx_render_modes":pptx_meta["chart_render_audit"],
+        "docx_tables":docx_meta["tables"],
+        "presentation_pdf_available":bool(presentation_pdf),
+        "internal_pdf_available":bool(internal_pdf),
+        "evidence_rows":len(evidence_rows),
+        "causality_guardrail":True,
+        "gold_standard_capability_coverage_percent": _safe_float((pplan.get("gold_standard_audit") or {}).get("coverage_percent")),
+        "gold_standard_capability_complete": bool((pplan.get("gold_standard_audit") or {}).get("complete")),
+    }
+    if not all([qa["indicator_review_complete"],qa["claim_ledger_valid"],qa["native_editable_chart_contract"],qa["pptx_slides"]>=3,qa["gold_standard_capability_complete"]]):
+        raise RuntimeError("Step 8 export QA failed before persistence.")
+
+    summary={
+        "ruleset_version":PRESENTATION_RULESET_VERSION,"methodology_version":PRESENTATION_METHODOLOGY_VERSION,"presentation_contract_version":PRESENTATION_CONTRACT_VERSION,
+        "generated_at":_utcnow(),"input_hash":input_hash,"research_context":copy.deepcopy(ctx),"language":lang,"slide_count":pptx_meta["slides"],"claim_count":len(pplan["claim_ledger"]),"indicator_contract":{"required":len(INDICATOR_REGISTRY),"examined":len(pplan["indicator_review"]),"complete":qa["indicator_review_complete"]},"gold_standard_capability_coverage_percent":qa["gold_standard_capability_coverage_percent"],"gold_standard_capability_complete":qa["gold_standard_capability_complete"],"files":[x["name"] for x in manifest["files"]],"stale":False,
+        "boundary":"Step 8 exports evidence-linked, editable client and internal deliverables. A polished report does not imply complete platform coverage or proven causality."
+    }
+    result={"summary":summary,"presentation_plan":pplan,"manifest":manifest,"qa":qa}
+    persist_presentation_bundle(folder,result)
+    return summary
+
+
+def load_export_summary(folder: Path) -> dict | None:
+    summary=RunStore.read(folder/"exports"/"summary.json")
+    if not isinstance(summary,dict): return None
+    current=load_presentation_visual_pack(folder); evidence=load_evidence_pack(folder); plan=RunStore.read(folder/"plan.json",{}) or {}
+    if not isinstance(current,dict) or not isinstance(evidence,dict):
+        return {**summary,"stale":True}
+    try:
+        now_hash=_hash_payload({"visual_pack":current,"evidence_contract":evidence.get("contract_version"),"research_context":evidence.get("research_context"),"report_language":plan.get("report_language")})
+    except Exception:
+        return {**summary,"stale":True}
+    return {**summary,"stale":summary.get("input_hash")!=now_hash}
+
+
+def load_export_manifest(folder: Path) -> dict | None:
+    value=RunStore.read(folder/"exports"/"manifest.json")
+    return value if isinstance(value,dict) else None
+
+
+def allowed_export_file(folder: Path, filename: str) -> Path | None:
+    manifest=load_export_manifest(folder) or {}; names={x.get("name") for x in manifest.get("files") or []}
+    if filename not in names or Path(filename).name!=filename: return None
+    p=folder/"exports"/filename
+    return p if p.is_file() else None

@@ -1,0 +1,213 @@
+{
+  "case": "Allwyn / Greece / X / 2026-08-15..2026-08-31",
+  "broad_discovery_observed": {
+    "rows": 69,
+    "author_concentration": {
+      "top_author": "sport24",
+      "top_author_count": 28,
+      "top_author_share": 0.4058,
+      "distinct_authors": 28
+    },
+    "dominant_context_collisions": [
+      {
+        "compound": "Allwyn arena",
+        "exclude_term": "arena",
+        "count": 45,
+        "share_of_core_mentions": 0.6716,
+        "distinct_authors": 12,
+        "classification": "dominant_context_collision",
+        "action": "split_and_cap_not_delete"
+      }
+    ]
+  },
+  "smart_collection_v2_first_wave": {
+    "strategy_version": "smart-collection-v2",
+    "target_semantics": "requested_analyzable_evidence",
+    "actor_input": {
+      "mode": "search",
+      "searchTerms": [
+        "Allwyn (Greece OR Ελλάδα OR Ellada) -filter:nativeretweets",
+        "Allwyn (OPAP OR ΟΠΑΠ) -filter:nativeretweets",
+        "Allwyn (γνώμη OR εμπειρία OR κριτική OR παράπονο OR σχόλιο OR διαφήμιση OR λογότυπο OR αλλαγή OR χορηγία OR χορηγός OR opinion OR review) -filter:nativeretweets",
+        "Allwyn (εταιρεία OR όμιλος OR έσοδα OR κέρδη OR αποτελέσματα OR μετοχή OR company OR group OR revenue OR profit OR results OR stock) -filter:nativeretweets",
+        "Allwyn (χορηγία OR χορηγός OR καμπάνια OR εκδήλωση OR sponsorship OR sponsor OR campaign OR activation OR event) -filter:nativeretweets",
+        "Allwyn lang:el -filter:nativeretweets"
+      ],
+      "maxItems": 500,
+      "maxItemsPerTarget": 84,
+      "includeSearchTerms": true,
+      "queryType": "Latest",
+      "since": "2026-08-15_00:00:00_UTC",
+      "until": "2026-09-01_00:00:00_UTC"
+    },
+    "intent_buckets": [
+      {
+        "bucket_id": "market_context",
+        "label": "Market context",
+        "query": "Allwyn (Greece OR Ελλάδα OR Ellada) -filter:nativeretweets",
+        "purpose": "Find market-explicit brand mentions",
+        "weight": 1.0
+      },
+      {
+        "bucket_id": "known_context",
+        "label": "Known context",
+        "query": "Allwyn (OPAP OR ΟΠΑΠ) -filter:nativeretweets",
+        "purpose": "Find mentions tied to known client/context entities",
+        "weight": 1.0
+      },
+      {
+        "bucket_id": "consumer_voice",
+        "label": "Consumer voice",
+        "query": "Allwyn (γνώμη OR εμπειρία OR κριτική OR παράπονο OR σχόλιο OR διαφήμιση OR λογότυπο OR αλλαγή OR χορηγία OR χορηγός OR opinion OR review) -filter:nativeretweets",
+        "purpose": "Find evaluative and experience-led discussion",
+        "weight": 1.2
+      },
+      {
+        "bucket_id": "corporate",
+        "label": "Corporate / investor",
+        "query": "Allwyn (εταιρεία OR όμιλος OR έσοδα OR κέρδη OR αποτελέσματα OR μετοχή OR company OR group OR revenue OR profit OR results OR stock) -filter:nativeretweets",
+        "purpose": "Separate corporate/investor signal from consumer opinion",
+        "weight": 0.7
+      },
+      {
+        "bucket_id": "sponsorship_activation",
+        "label": "Sponsorship / activation",
+        "query": "Allwyn (χορηγία OR χορηγός OR καμπάνια OR εκδήλωση OR sponsorship OR sponsor OR campaign OR activation OR event) -filter:nativeretweets",
+        "purpose": "Find sponsorship, campaign and event associations",
+        "weight": 0.8
+      },
+      {
+        "bucket_id": "greek_language_probe",
+        "label": "Greek-language recall probe",
+        "query": "Allwyn lang:el -filter:nativeretweets",
+        "purpose": "Catch Greek/Greeklish-adjacent mentions missed by explicit contexts",
+        "weight": 0.6
+      }
+    ],
+    "why": "Multiple bounded intent searches replace one uncapped broad keyword search."
+  },
+  "adaptive_refinement_after_wave_1": {
+    "dynamic_exclusions_for_non_property_buckets": [
+      "arena"
+    ],
+    "actor_input_preview": {
+      "mode": "search",
+      "searchTerms": [
+        "Allwyn (Greece OR Ελλάδα OR Ellada) -arena -filter:nativeretweets",
+        "Allwyn (OPAP OR ΟΠΑΠ) -arena -filter:nativeretweets",
+        "Allwyn (γνώμη OR εμπειρία OR κριτική OR παράπονο OR σχόλιο OR διαφήμιση OR λογότυπο OR αλλαγή OR χορηγία OR χορηγός OR opinion OR review) -arena -filter:nativeretweets",
+        "Allwyn (εταιρεία OR όμιλος OR έσοδα OR κέρδη OR αποτελέσματα OR μετοχή OR company OR group OR revenue OR profit OR results OR stock) -arena -filter:nativeretweets",
+        "Allwyn (χορηγία OR χορηγός OR καμπάνια OR εκδήλωση OR sponsorship OR sponsor OR campaign OR activation OR event) -arena -filter:nativeretweets",
+        "Allwyn lang:el -arena -filter:nativeretweets",
+        "Allwyn arena -filter:nativeretweets"
+      ],
+      "maxItems": 500,
+      "maxItemsPerTarget": 72,
+      "includeSearchTerms": true,
+      "queryType": "Latest"
+    },
+    "intent_buckets": [
+      {
+        "bucket_id": "market_context",
+        "label": "Market context",
+        "query": "Allwyn (Greece OR Ελλάδα OR Ellada) -arena -filter:nativeretweets",
+        "purpose": "Find market-explicit brand mentions",
+        "weight": 1.0
+      },
+      {
+        "bucket_id": "known_context",
+        "label": "Known context",
+        "query": "Allwyn (OPAP OR ΟΠΑΠ) -arena -filter:nativeretweets",
+        "purpose": "Find mentions tied to known client/context entities",
+        "weight": 1.0
+      },
+      {
+        "bucket_id": "consumer_voice",
+        "label": "Consumer voice",
+        "query": "Allwyn (γνώμη OR εμπειρία OR κριτική OR παράπονο OR σχόλιο OR διαφήμιση OR λογότυπο OR αλλαγή OR χορηγία OR χορηγός OR opinion OR review) -arena -filter:nativeretweets",
+        "purpose": "Find evaluative and experience-led discussion",
+        "weight": 1.2
+      },
+      {
+        "bucket_id": "corporate",
+        "label": "Corporate / investor",
+        "query": "Allwyn (εταιρεία OR όμιλος OR έσοδα OR κέρδη OR αποτελέσματα OR μετοχή OR company OR group OR revenue OR profit OR results OR stock) -arena -filter:nativeretweets",
+        "purpose": "Separate corporate/investor signal from consumer opinion",
+        "weight": 0.7
+      },
+      {
+        "bucket_id": "sponsorship_activation",
+        "label": "Sponsorship / activation",
+        "query": "Allwyn (χορηγία OR χορηγός OR καμπάνια OR εκδήλωση OR sponsorship OR sponsor OR campaign OR activation OR event) -arena -filter:nativeretweets",
+        "purpose": "Find sponsorship, campaign and event associations",
+        "weight": 0.8
+      },
+      {
+        "bucket_id": "greek_language_probe",
+        "label": "Greek-language recall probe",
+        "query": "Allwyn lang:el -arena -filter:nativeretweets",
+        "purpose": "Catch Greek/Greeklish-adjacent mentions missed by explicit contexts",
+        "weight": 0.6
+      },
+      {
+        "bucket_id": "context_collision_1",
+        "label": "Separated context: arena",
+        "query": "Allwyn arena -filter:nativeretweets",
+        "purpose": "Measure the dominant property/context separately instead of deleting it",
+        "weight": 0.35
+      }
+    ],
+    "rule": "Dominant context is split/capped, not erased from evidence."
+  },
+  "refined_manual_run_observed": {
+    "rows": 21,
+    "author_concentration": {
+      "top_author": "sport24",
+      "top_author_count": 3,
+      "top_author_share": 0.1429,
+      "distinct_authors": 17
+    }
+  },
+  "reply_deepening_preview": {
+    "available_seed_count_in_refined_sample": 3,
+    "seed_preview": [
+      {
+        "tweet_id": "2093684731091022305",
+        "reply_count": 1,
+        "score": 2.85,
+        "author": "VayaCou",
+        "url": "https://x.com/VayaCou/status/2093684731091022305"
+      },
+      {
+        "tweet_id": "2091845193691533428",
+        "reply_count": 1,
+        "score": 2.85,
+        "author": "KokkoRacing",
+        "url": "https://x.com/KokkoRacing/status/2091845193691533428"
+      },
+      {
+        "tweet_id": "2088557855519498729",
+        "reply_count": 1,
+        "score": 2.85,
+        "author": "matrixneo1979",
+        "url": "https://x.com/matrixneo1979/status/2088557855519498729"
+      }
+    ],
+    "actor_input_preview": {
+      "mode": "replies",
+      "replyTweetIds": [
+        "2093684731091022305",
+        "2091845193691533428",
+        "2088557855519498729"
+      ],
+      "maxItems": 479,
+      "maxItemsPerTarget": 160
+    },
+    "note": "This is a plan preview only. No paid reply run was executed by this simulation."
+  },
+  "acceptance_interpretation": {
+    "what_500_means": "Target up to 500 analyzable evidence units, not 500 literal keyword hits.",
+    "stop_rule": "Stop at the real relevant supply if the target cannot be reached without lowering relevance.",
+    "next_runtime_work": "Wire adaptive refinement + reply deepening into the collection lifecycle after cleaning, preserving the global budget guard and audit trail."
+  }
+}

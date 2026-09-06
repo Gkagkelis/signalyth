@@ -1,0 +1,87 @@
+{
+  "version": "1.7",
+  "scope": "STEP 8.3 - WOW Presentation + Decision Intelligence + Client Branding",
+  "builds_on": "v1.6 Evidence-Complete Presentation Engine",
+  "presentation_depth_modes": [
+    "Executive",
+    "Standard",
+    "Full"
+  ],
+  "branding": {
+    "client_profiles": true,
+    "client_logo_upload": true,
+    "agency_logo_setting": true,
+    "powered_by_signalyth_discreet": true,
+    "brand_accent_auto_detect_or_manual": true,
+    "cover_and_closing_logo_rule": true
+  },
+  "visual_system": {
+    "native_editable_pptx": true,
+    "available_visuals": [
+      "donut",
+      "pie",
+      "stacked_bar",
+      "timeline",
+      "calendar_heatmap",
+      "rankings",
+      "bubble_matrix",
+      "geographic_intensity_when_supported",
+      "evidence_wall",
+      "crisis_panel",
+      "recommendation_matrix"
+    ],
+    "no_decoration_without_data_reason": true
+  },
+  "event_detection": {
+    "negative": [
+      "Emerging Negative Signal",
+      "Crisis Watch",
+      "Sustained Reputation Pressure"
+    ],
+    "positive": [
+      "Positive Momentum",
+      "Opportunity Signal",
+      "Advocacy Spike"
+    ],
+    "guardrails": [
+      "volume_shift",
+      "sentiment_shift",
+      "emotion_shift",
+      "velocity",
+      "independent_voices",
+      "source_diversity",
+      "media_amplification",
+      "authenticity_risk",
+      "duration",
+      "evidence_count"
+    ],
+    "causality_guard": "Association is never presented as proven causation"
+  },
+  "recommendations": {
+    "generic_recommendations_forbidden": true,
+    "fields": [
+      "finding_id",
+      "evidence_ids",
+      "action",
+      "priority",
+      "timing",
+      "owner_hint",
+      "monitor_metrics",
+      "confidence"
+    ],
+    "buckets": [
+      "ACT NOW",
+      "FIX",
+      "KEEP",
+      "EXPLOIT",
+      "WATCH"
+    ]
+  },
+  "completeness": {
+    "must_evaluate_25_indicator_families": true,
+    "must_place_applicable_indicators_in_main_or_appendix": true,
+    "must_include_evidence_density_gate": true,
+    "bilingual_EN_EL_QA": true
+  },
+  "live_boundary": "Controlled benchmark only; final proof requires one live end-to-end run through Apify/OpenAI."
+}
