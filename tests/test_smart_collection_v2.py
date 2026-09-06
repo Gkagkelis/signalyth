@@ -30,7 +30,6 @@ def test_x_v2_uses_balanced_intents_and_current_actor_fields():
     plan = build_collection_plan(allwyn())
     sp = plan.sources[0]
     assert len(sp.subruns) >= 3
-    assert all(sr.purpose.startswith("balanced_intent_discovery_batch_") for sr in sp.subruns)
     assert sum(sr.target_items for sr in sp.subruns) == 500
     queries = []
     for sr in sp.subruns:
@@ -38,15 +37,16 @@ def test_x_v2_uses_balanced_intents_and_current_actor_fields():
         assert inp["mode"] == "search"
         assert inp["queryType"] == "Latest"
         assert inp["includeSearchTerms"] is True
-        assert 1 <= inp["maxItemsPerTarget"] <= inp["maxItems"]
+        # Master30 removes permanent per-query quotas. Safe batching remains, but
+        # the collector dynamically lets each route attempt the source shortfall.
+        assert "maxItemsPerTarget" not in inp
         assert len(inp["searchTerms"]) <= 2
         queries.extend(inp["searchTerms"])
-    # Broad Greek recall exists, but only as one bounded intent rather than the whole strategy.
     assert len(queries) >= 5
     assert sum("lang:el" in q for q in queries) == 1
     assert all("-filter:nativeretweets" in q for q in queries)
-    assert plan.search_strategy_version == "smart-collection-v2"
-    assert plan.target_semantics == "requested_analyzable_evidence"
+    assert plan.search_strategy_version == "master30-search-v1"
+    assert plan.target_semantics == "final_analyzable_unique_in_range_per_source"
 
 
 def test_allwyn_arena_like_collision_is_detected_not_deleted():
