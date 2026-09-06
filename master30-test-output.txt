@@ -8,10 +8,14 @@
 .............                                                            [100%]
 =================================== FAILURES ===================================
 ___________ test_x_v2_uses_balanced_intents_and_current_actor_fields ___________
-tests/test_smart_collection_v2.py:47: in test_x_v2_uses_balanced_intents_and_current_actor_fields
-    assert all("-filter:nativeretweets" in q for q in queries)
-E   assert False
-E    +  where False = all(<generator object test_x_v2_uses_balanced_intents_and_current_actor_fields.<locals>.<genexpr> at 0x7f75b20cae90>)
+tests/test_smart_collection_v2.py:49: in test_x_v2_uses_balanced_intents_and_current_actor_fields
+    assert plan.target_semantics == "final_analyzable_unique_in_range_per_source"
+E   AssertionError: assert 'requested_fi...ique_in_range' == 'final_analyz...ge_per_source'
+E     
+E     - final_analyzable_unique_in_range_per_source
+E     ?                                 -----------
+E     + requested_final_analyzable_unique_in_range
+E     ? ++++++++++
 =============================== warnings summary ===============================
 ../../../../../opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/site-packages/starlette/testclient.py:45
   /opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/site-packages/starlette/testclient.py:45: DeprecationWarning: The anyio.abc.BlockingPortal alias is deprecated, use anyio.from_thread.BlockingPortal instead.
@@ -19,6 +23,10 @@ E    +  where False = all(<generator object test_x_v2_uses_balanced_intents_and_
 
 -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
 =========================== short test summary info ============================
-FAILED tests/test_smart_collection_v2.py::test_x_v2_uses_balanced_intents_and_current_actor_fields - assert False
- +  where False = all(<generator object test_x_v2_uses_balanced_intents_and_current_actor_fields.<locals>.<genexpr> at 0x7f75b20cae90>)
-1 failed, 514 passed, 2 skipped, 1 warning in 49.06s
+FAILED tests/test_smart_collection_v2.py::test_x_v2_uses_balanced_intents_and_current_actor_fields - AssertionError: assert 'requested_fi...ique_in_range' == 'final_analyz...ge_per_source'
+  
+  - final_analyzable_unique_in_range_per_source
+  ?                                 -----------
+  + requested_final_analyzable_unique_in_range
+  ? ++++++++++
+1 failed, 514 passed, 2 skipped, 1 warning in 48.67s
