@@ -474,7 +474,7 @@ def make_source_plan(source: str, target: int, draft: AnalysisDraft, queries: li
         jobs = [(tag, mode) for tag in tags for mode in ("posts", "reels")]
         shares = split_target(target, len(jobs))
         for i, ((tag, mode), share) in enumerate(zip(jobs, shares)):
-            inp = {"directUrls": [f"https://www.instagram.com/explore/tags/{tag.lower()}/"], "resultsType": mode,
+            inp = {"search": f"#{tag}", "searchType": "hashtag", "searchLimit": 1, "resultsType": mode,
                    "resultsLimit": max(1, share), "onlyPostsNewerThan": draft.date_from.isoformat(), "addParentData": True}
             subruns.append(SubRunPlan(actor_id=cfg["actor_id"], input=inp, target_items=max(1, share),
                                       max_charge_usd=budget_for_subrun(source_budget, shares, i), exact_post_filter=True,
