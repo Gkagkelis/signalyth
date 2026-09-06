@@ -1,55 +1,17 @@
 ........................................................................ [ 13%]
-........................F............................................... [ 27%]
+........................................................................ [ 27%]
 ........................................................................ [ 41%]
-..................................................F..................... [ 55%]
+........................................................................ [ 55%]
 ....................................s....s.............................. [ 69%]
-.....FFFF..........F.................................................... [ 83%]
-................................F....................................... [ 97%]
+...................F.................................................... [ 83%]
+........................................................................ [ 97%]
 .............                                                            [100%]
 =================================== FAILURES ===================================
-________ test_1000_deterministic_random_plans_preserve_hard_invariants _________
-tests/test_collection_fuzz_v182.py:47: in test_1000_deterministic_random_plans_preserve_hard_invariants
-    assert plan.preflight_forecast["sample_rule"].startswith("never fill")
-E   AssertionError: assert False
-E    +  where False = <built-in method startswith of str object at 0x7fb4abfe2650>('never fill')
-E    +    where <built-in method startswith of str object at 0x7fb4abfe2650> = 'shared source target; every route can refill the same target until target, source exhaustion, relevance floor or budget'.startswith
-___________ test_topic_only_is_valid_and_facebook_uses_whole_target ____________
-tests/test_master30_contract.py:17: in test_topic_only_is_valid_and_facebook_uses_whole_target
-    assert len(fb.subruns)==1 and fb.subruns[0].target_items==50
-E   AssertionError: assert (2 == 1)
-E    +  where 2 = len([SubRunPlan(actor_id='scraper_one/facebook-posts-search', input={'query': 'Αλέξης Τσίπρας', 'resultsCount': 25, 'searc...one, post_filter_to=None, purpose='primary_context_2', resilience_policy='adaptive-isolation-v1', max_attempt_calls=2)])
-E    +    where [SubRunPlan(actor_id='scraper_one/facebook-posts-search', input={'query': 'Αλέξης Τσίπρας', 'resultsCount': 25, 'searc...one, post_filter_to=None, purpose='primary_context_2', resilience_policy='adaptive-isolation-v1', max_attempt_calls=2)] = SourcePlan(source='facebook', actor_id='scraper_one/facebook-posts-search', target_items=50, estimated_cost_usd=0.1245...09-04', 'strategy': 'topic_first'}], source_budget_usd=0.5418933623503809, source_contract_version='actor-contract-v3').subruns
-________ test_adaptive_refinement_splits_dominant_context_and_recleans _________
-tests/test_relevance_expansion_v2.py:75: in test_adaptive_refinement_splits_dominant_context_and_recleans
-    assert runner.calls and runner.calls[0][1]["mode"] == "search"
-E   assert ([])
-E    +  where [] = <test_relevance_expansion_v2.FakeRunner object at 0x7fb4a222edb0>.calls
-_________ test_reply_deepening_runs_when_comments_on_and_no_collision __________
-tests/test_relevance_expansion_v2.py:95: in test_reply_deepening_runs_when_comments_on_and_no_collision
-    assert runner.calls and runner.calls[0][1]["mode"] == "replies"
-E   assert ([])
-E    +  where [] = <test_relevance_expansion_v2.FakeRunner object at 0x7fb4a9fc8cb0>.calls
-____________ test_adaptive_expansion_never_exceeds_remaining_budget ____________
-tests/test_relevance_expansion_v2.py:110: in test_adaptive_expansion_never_exceeds_remaining_budget
-    assert runner.calls[0][2] <= 6
-           ^^^^^^^^^^^^^^^
-E   IndexError: list index out of range
-__________ test_reply_deepening_is_blocked_until_route_live_verified ___________
-tests/test_relevance_expansion_v2.py:120: in test_reply_deepening_is_blocked_until_route_live_verified
-    assert "reply_deepening_blocked_until_live_route_verification" in result["audit"]["warnings"]
-E   AssertionError: assert 'reply_deepening_blocked_until_live_route_verification' in []
 ___________ test_x_v2_uses_balanced_intents_and_current_actor_fields ___________
-tests/test_smart_collection_v2.py:33: in test_x_v2_uses_balanced_intents_and_current_actor_fields
-    assert all(sr.purpose.startswith("balanced_intent_discovery_batch_") for sr in sp.subruns)
+tests/test_smart_collection_v2.py:47: in test_x_v2_uses_balanced_intents_and_current_actor_fields
+    assert all("-filter:nativeretweets" in q for q in queries)
 E   assert False
-E    +  where False = all(<generator object test_x_v2_uses_balanced_intents_and_current_actor_fields.<locals>.<genexpr> at 0x7fb4a224e9b0>)
-_ test_provider_cost_cap_violation_stops_all_later_paid_sources_and_preserves_evidence _
-tests/test_v184_safety_final.py:123: in test_provider_cost_cap_violation_stops_all_later_paid_sources_and_preserves_evidence
-    assert status["status"] == "failed"
-E   AssertionError: assert 'succeeded' == 'failed'
-E     
-E     - failed
-E     + succeeded
+E    +  where False = all(<generator object test_x_v2_uses_balanced_intents_and_current_actor_fields.<locals>.<genexpr> at 0x7f75b20cae90>)
 =============================== warnings summary ===============================
 ../../../../../opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/site-packages/starlette/testclient.py:45
   /opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/site-packages/starlette/testclient.py:45: DeprecationWarning: The anyio.abc.BlockingPortal alias is deprecated, use anyio.from_thread.BlockingPortal instead.
@@ -57,22 +19,6 @@ E     + succeeded
 
 -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
 =========================== short test summary info ============================
-FAILED tests/test_collection_fuzz_v182.py::test_1000_deterministic_random_plans_preserve_hard_invariants - AssertionError: assert False
- +  where False = <built-in method startswith of str object at 0x7fb4abfe2650>('never fill')
- +    where <built-in method startswith of str object at 0x7fb4abfe2650> = 'shared source target; every route can refill the same target until target, source exhaustion, relevance floor or budget'.startswith
-FAILED tests/test_master30_contract.py::test_topic_only_is_valid_and_facebook_uses_whole_target - AssertionError: assert (2 == 1)
- +  where 2 = len([SubRunPlan(actor_id='scraper_one/facebook-posts-search', input={'query': 'Αλέξης Τσίπρας', 'resultsCount': 25, 'searc...one, post_filter_to=None, purpose='primary_context_2', resilience_policy='adaptive-isolation-v1', max_attempt_calls=2)])
- +    where [SubRunPlan(actor_id='scraper_one/facebook-posts-search', input={'query': 'Αλέξης Τσίπρας', 'resultsCount': 25, 'searc...one, post_filter_to=None, purpose='primary_context_2', resilience_policy='adaptive-isolation-v1', max_attempt_calls=2)] = SourcePlan(source='facebook', actor_id='scraper_one/facebook-posts-search', target_items=50, estimated_cost_usd=0.1245...09-04', 'strategy': 'topic_first'}], source_budget_usd=0.5418933623503809, source_contract_version='actor-contract-v3').subruns
-FAILED tests/test_relevance_expansion_v2.py::test_adaptive_refinement_splits_dominant_context_and_recleans - assert ([])
- +  where [] = <test_relevance_expansion_v2.FakeRunner object at 0x7fb4a222edb0>.calls
-FAILED tests/test_relevance_expansion_v2.py::test_reply_deepening_runs_when_comments_on_and_no_collision - assert ([])
- +  where [] = <test_relevance_expansion_v2.FakeRunner object at 0x7fb4a9fc8cb0>.calls
-FAILED tests/test_relevance_expansion_v2.py::test_adaptive_expansion_never_exceeds_remaining_budget - IndexError: list index out of range
-FAILED tests/test_relevance_expansion_v2.py::test_reply_deepening_is_blocked_until_route_live_verified - AssertionError: assert 'reply_deepening_blocked_until_live_route_verification' in []
 FAILED tests/test_smart_collection_v2.py::test_x_v2_uses_balanced_intents_and_current_actor_fields - assert False
- +  where False = all(<generator object test_x_v2_uses_balanced_intents_and_current_actor_fields.<locals>.<genexpr> at 0x7fb4a224e9b0>)
-FAILED tests/test_v184_safety_final.py::test_provider_cost_cap_violation_stops_all_later_paid_sources_and_preserves_evidence - AssertionError: assert 'succeeded' == 'failed'
-  
-  - failed
-  + succeeded
-8 failed, 507 passed, 2 skipped, 1 warning in 35.31s
+ +  where False = all(<generator object test_x_v2_uses_balanced_intents_and_current_actor_fields.<locals>.<genexpr> at 0x7f75b20cae90>)
+1 failed, 514 passed, 2 skipped, 1 warning in 49.06s
