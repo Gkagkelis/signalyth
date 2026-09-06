@@ -18,22 +18,8 @@ jobs:
 
       - name: Fix test dependency setup
         run: |
-          python - <<'PY'
-          from pathlib import Path
-          path = Path('.github/workflows/harden-actor-input-contracts.yml')
-          text = path.read_text(encoding='utf-8')
-          old = '''          python -m pip install -q -e .
-          python -m compileall -q app
-          python -m unittest tests.test_actor_input_contracts_v185
-'''
-          new = '''          python -m pip install -q "pydantic>=2.13,<3" "pydantic-settings>=2.12,<3"
-          python -m compileall -q app
-          python -m unittest discover -s tests -p 'test_actor_input_contracts_v185.py' -v
-'''
-          if old not in text:
-              raise SystemExit('Expected test block not found')
-          path.write_text(text.replace(old, new, 1), encoding='utf-8')
-          PY
+          sed -i 's#python -m pip install -q -e \.#python -m pip install -q "pydantic>=2.13,<3" "pydantic-settings>=2.12,<3"#' .github/workflows/harden-actor-input-contracts.yml
+          sed -i "s#python -m unittest tests.test_actor_input_contracts_v185#python -m unittest discover -s tests -p 'test_actor_input_contracts_v185.py' -v#" .github/workflows/harden-actor-input-contracts.yml
 
       - name: Commit fix and remove helper workflow
         run: |
