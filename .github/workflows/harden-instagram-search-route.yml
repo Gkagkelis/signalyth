@@ -19,56 +19,15 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Use Instagram Actor search fields for hashtag discovery
+      - name: Patch Instagram search fields
         run: |
-          python - <<'PY'
-          from pathlib import Path
-          path = Path('app/services/query_planner.py')
-          text = path.read_text(encoding='utf-8')
-          old = '''        for i, ((tag, mode), share) in enumerate(zip(jobs, shares)):
-            inp = {"directUrls": [f"https://www.instagram.com/explore/tags/{tag.lower()}/"], "resultsType": mode,
-                   "resultsLimit": max(1, share), "onlyPostsNewerThan": draft.date_from.isoformat(), "addParentData": True}
-'''
-          new = '''        for i, ((tag, mode), share) in enumerate(zip(jobs, shares)):
-            inp = {"search": f"#{tag}", "searchType": "hashtag", "searchLimit": 1, "resultsType": mode,
-                   "resultsLimit": max(1, share), "onlyPostsNewerThan": draft.date_from.isoformat(), "addParentData": True}
-'''
-          if old not in text:
-              raise SystemExit('Expected Instagram hashtag route not found')
-          path.write_text(text.replace(old, new, 1), encoding='utf-8')
-          PY
+          python -c 'from pathlib import Path; p=Path("app/services/query_planner.py"); t=p.read_text(encoding="utf-8"); old="        for i, ((tag, mode), share) in enumerate(zip(jobs, shares)):\n            inp = {\"directUrls\": [f\"https://www.instagram.com/explore/tags/{tag.lower()}/\"], \"resultsType\": mode,\n                   \"resultsLimit\": max(1, share), \"onlyPostsNewerThan\": draft.date_from.isoformat(), \"addParentData\": True}\n"; new="        for i, ((tag, mode), share) in enumerate(zip(jobs, shares)):\n            inp = {\"search\": f\"#{tag}\", \"searchType\": \"hashtag\", \"searchLimit\": 1, \"resultsType\": mode,\n                   \"resultsLimit\": max(1, share), \"onlyPostsNewerThan\": draft.date_from.isoformat(), \"addParentData\": True}\n"; assert old in t; p.write_text(t.replace(old,new,1), encoding="utf-8")'
 
       - name: Run no-network Instagram input test
         run: |
           python -m pip install -q "pydantic>=2.13,<3" "pydantic-settings>=2.12,<3"
           python -m compileall -q app
-          python - <<'PY'
-          from datetime import date, timedelta
-          from app.models import AnalysisDraft
-          from app.services.query_planner import build_collection_plan
-          today = date.today()
-          draft = AnalysisDraft(
-              client='TEST', topic='Αλέξης Τσίπρας', market='Greece',
-              date_from=today - timedelta(days=6), date_to=today,
-              keywords=['ΔΕΘ','Θεσσαλονίκη'], sources=['instagram'],
-              sample_mode='automatic', sample_target=40, comments=False,
-              max_budget_usd=1.0, smart_search=True, report_language='Ελληνικά',
-          )
-          plan = build_collection_plan(draft)
-          ig = plan.sources[0]
-          assert ig.source == 'instagram' and ig.subruns
-          for subrun in ig.subruns:
-              inp = subrun.input
-              assert isinstance(inp.get('search'), str) and inp['search'].startswith('#')
-              assert inp.get('searchType') == 'hashtag'
-              assert inp.get('searchLimit') == 1
-              assert inp.get('resultsType') in {'posts','reels'}
-              assert isinstance(inp.get('resultsLimit'), int) and inp['resultsLimit'] >= 1
-              assert inp.get('onlyPostsNewerThan') == draft.date_from.isoformat()
-              assert inp.get('addParentData') is True
-              assert 'directUrls' not in inp
-          print('PASS: Instagram uses explicit search/searchType hashtag fields with date and result limits')
-          PY
+          python -c 'from datetime import date,timedelta; from app.models import AnalysisDraft; from app.services.query_planner import build_collection_plan; d=AnalysisDraft(client="TEST",topic="Αλέξης Τσίπρας",market="Greece",date_from=date.today()-timedelta(days=6),date_to=date.today(),keywords=["ΔΕΘ","Θεσσαλονίκη"],sources=["instagram"],sample_mode="automatic",sample_target=40,comments=False,max_budget_usd=1.0,smart_search=True,report_language="Ελληνικά"); p=build_collection_plan(d); xs=[s.input for s in p.sources[0].subruns]; assert xs and all(isinstance(x.get("search"),str) and x["search"].startswith("#") and x.get("searchType")=="hashtag" and x.get("searchLimit")==1 and x.get("resultsType") in {"posts","reels"} and x.get("onlyPostsNewerThan")==d.date_from.isoformat() and "directUrls" not in x for x in xs); print("PASS Instagram search schema")'
 
       - name: Commit tested Instagram route
         run: |
