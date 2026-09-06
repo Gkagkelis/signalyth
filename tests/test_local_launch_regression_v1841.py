@@ -2,7 +2,7 @@ from pathlib import Path
 
 
 def test_home_template_uses_explicit_request_keyword():
-    text = Path('app/main.py').read_text(encoding='utf-8')
+    text = Path("app/main.py").read_text(encoding="utf-8")
     assert 'TemplateResponse(request=request, name="index.html", context={})' in text
     assert 'TemplateResponse("index.html", {"request": request})' not in text
 
