@@ -1,5 +1,5 @@
 name: Master 30 upgrade
-# regression gate refresh: master30-v3
+# regression gate refresh: master30-v4
 
 on:
   workflow_dispatch:
