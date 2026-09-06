@@ -2,7 +2,7 @@ from __future__ import annotations
 import math
 import re
 import copy
-from datetime import timedelta
+from datetime import date, timedelta
 from app.models import AnalysisDraft, CollectionPlan, SourcePlan, SubRunPlan
 from app.registry import load_registry
 from app.services.smart_collection import x_search_input, canonical_topic
@@ -173,6 +173,59 @@ def base_queries(core: list[str], context: list[str], glish: list[str]) -> list[
     out += [f"{primary} {c}" for c in context[:8] if c and c.casefold() != primary.casefold()]
     return uniq(out)[:12]
 
+
+def _prioritized_source_queries(draft: AnalysisDraft, queries: list[str], limit: int) -> list[str]:
+    """Put explicit user focus first on Actors with limited query slots."""
+    primary = canonical_topic(str(draft.topic or "").strip(), str(draft.market or ""))
+    primary_fold = primary.casefold()
+    focus_terms = uniq([*draft.keywords, *draft.additional_context])
+    focus_terms = [str(x).strip() for x in focus_terms if str(x).strip() and str(x).strip().casefold() != primary_fold and str(x).strip().casefold() not in primary_fold]
+    anchored = [f"{primary} {term}" for term in focus_terms]
+    ordered = ([anchored[0]] if anchored else []) + [primary] + anchored[1:] + list(queries)
+    return uniq(ordered)[:max(1, int(limit))]
+
+def _facebook_safe_query(value: str) -> str:
+    """Facebook Posts Search query is capped at 100 characters."""
+    value = re.sub(r"\s+", " ", str(value or "")).strip()
+    if len(value) <= 100:
+        return value
+    clipped = value[:100].rstrip()
+    return clipped.rsplit(" ", 1)[0].rstrip() if " " in clipped else clipped
+
+def _facebook_queries(draft: AnalysisDraft, queries: list[str], limit: int = 4) -> list[str]:
+    return uniq([_facebook_safe_query(q) for q in _prioritized_source_queries(draft, queries, limit) if q])[:limit]
+
+def _tiktok_date_range(draft: AnalysisDraft, today: date | None = None) -> str:
+    today = today or date.today()
+    if draft.date_from > today:
+        return "ALL_TIME"
+    age = max(0, (today - draft.date_from).days)
+    if age <= 1:
+        return "YESTERDAY"
+    if draft.date_from.isocalendar()[:2] == today.isocalendar()[:2]:
+        return "THIS_WEEK"
+    if draft.date_from.year == today.year and draft.date_from.month == today.month:
+        return "THIS_MONTH"
+    if age <= 90:
+        return "LAST_THREE_MONTHS"
+    if age <= 180:
+        return "LAST_SIX_MONTHS"
+    return "ALL_TIME"
+
+def _youtube_upload_date(draft: AnalysisDraft, today: date | None = None) -> str:
+    today = today or date.today()
+    if draft.date_from > today:
+        return "all"
+    age = max(0, (today - draft.date_from).days)
+    if age <= 1:
+        return "t"
+    if age <= 7:
+        return "w"
+    if age <= 31:
+        return "m"
+    if age <= 366:
+        return "y"
+    return "all"
 
 def news_queries_for_capacity(draft: AnalysisDraft, queries: list[str], target: int) -> list[str]:
     """Add only topic-anchored media-context variants when Google News needs more query capacity.
@@ -403,11 +456,12 @@ def make_source_plan(source: str, target: int, draft: AnalysisDraft, queries: li
             ))
 
     elif source == "tiktok":
-        batches = batched(queries[:8] or [draft.topic], safe_batch)
+        source_queries = _prioritized_source_queries(draft, queries, 8)
+        batches = batched(source_queries or [draft.topic], safe_batch)
         shares = split_target(target, len(batches))
         for i, (batch, share) in enumerate(zip(batches, shares)):
             inp = {"search": batch, "maxItems": max(1, share), "location": "GR" if draft.market.casefold()=="greece" else None,
-                   "dateRange": "ALL_TIME", "sortType": "RELEVANCE"}
+                   "dateRange": _tiktok_date_range(draft), "sortType": "RELEVANCE"}
             inp = {k:v for k,v in inp.items() if v is not None}
             subruns.append(SubRunPlan(
                 actor_id=cfg["actor_id"], input=inp, target_items=max(1, share),
@@ -427,7 +481,7 @@ def make_source_plan(source: str, target: int, draft: AnalysisDraft, queries: li
                                       post_filter_from=draft.date_from, post_filter_to=draft.date_to, purpose=mode))
 
     elif source == "facebook":
-        q = queries[:4] or [draft.topic]
+        q = _facebook_queries(draft, queries, 4) or [_facebook_safe_query(draft.topic)]
         shares = split_target(target, len(q))
         for i, (query, share) in enumerate(zip(q, shares)):
             inp = {"query": query, "resultsCount": max(1, share), "searchType": "latest",
@@ -436,17 +490,18 @@ def make_source_plan(source: str, target: int, draft: AnalysisDraft, queries: li
                                       max_charge_usd=budget_for_subrun(source_budget, shares, i), purpose=f"search_query_{i+1}"))
 
     elif source == "youtube":
-        batches = batched(queries[:10] or [draft.topic], safe_batch)
+        source_queries = _prioritized_source_queries(draft, queries, 10)
+        batches = batched(source_queries or [draft.topic], safe_batch)
         shares = split_target(target, len(batches))
         for i, (batch, share) in enumerate(zip(batches, shares)):
             inp = {"keywords": batch, "gl": "gr" if draft.market.casefold()=="greece" else "us",
-                   "hl": "el" if draft.market.casefold()=="greece" else "en", "uploadDate": "all", "sort": "r", "maxItems": max(1, share)}
+                   "hl": "el" if draft.market.casefold()=="greece" else "en", "uploadDate": _youtube_upload_date(draft), "sort": "r", "maxItems": max(1, share)}
             subruns.append(SubRunPlan(actor_id=cfg["actor_id"], input=inp, target_items=max(1, share),
                                       max_charge_usd=budget_for_subrun(source_budget, shares, i), exact_post_filter=True,
                                       post_filter_from=draft.date_from, post_filter_to=draft.date_to, purpose=f"keyword_batch_{i+1}"))
 
     elif source == "news":
-        news_queries = news_queries_for_capacity(draft, queries, target)
+        news_queries = news_queries_for_capacity(draft, _prioritized_source_queries(draft, queries, 8), target)
         batches = batched(news_queries[:8] or [draft.topic], safe_batch)
         shares = split_target(target, len(batches))
         for i, (batch, share) in enumerate(zip(batches, shares)):
