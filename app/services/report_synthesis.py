@@ -1,0 +1,140 @@
+from __future__ import annotations
+
+import copy
+import json
+import math
+import re
+from datetime import datetime, timezone
+from pathlib import Path
+
+from app.config import settings
+from app.services.storage import RunStore
+
+REPORT_SYNTHESIS_VERSION="signalyth-analyst-synthesis-v1"
+CONFIDENCE=("high","medium","low")
+MATERIALITY=("material","directional","weak_signal")
+
+
+def _utcnow(): return datetime.now(timezone.utc).isoformat()
+
+def _safe_text(v,limit=1000): return re.sub(r"\s+"," ",str(v or "")).strip()[:limit]
+
+def _inventory(evidence_pack): return {str(x.get("indicator_id")):x for x in (evidence_pack.get("indicator_inventory") or []) if x.get("indicator_id")}
+
+def _indicator_values(evidence_pack): return {k:copy.deepcopy(v.get("value")) for k,v in _inventory(evidence_pack).items() if v.get("available")}
+
+def _evidence_ids(evidence_pack):
+    inv=_inventory(evidence_pack); rows=(inv.get("top_mentions") or {}).get("value") or []
+    return {str(x.get("record_id")) for x in rows if isinstance(x,dict) and x.get("record_id")}
+
+def _lang(plan): return "el" if str(plan.get("report_language"))=="Ελληνικά" else "en"
+
+SCHEMA={
+ "type":"object","additionalProperties":False,
+ "properties":{
+   "executive_summary":{"type":"string"},
+   "findings":{"type":"array","maxItems":6,"items":{"type":"object","additionalProperties":False,"properties":{
+      "title":{"type":"string"},"finding":{"type":"string"},"interpretation":{"type":"string"},
+      "confidence":{"type":"string","enum":list(CONFIDENCE)},"materiality":{"type":"string","enum":list(MATERIALITY)},
+      "indicator_ids":{"type":"array","items":{"type":"string"}},"evidence_record_ids":{"type":"array","items":{"type":"string"}},
+      "causal_status":{"type":"string","enum":["not_applicable","not_proven","deterministic_contribution"]}},
+      "required":["title","finding","interpretation","confidence","materiality","indicator_ids","evidence_record_ids","causal_status"]}},
+   "recommendations":{"type":"array","maxItems":5,"items":{"type":"object","additionalProperties":False,"properties":{
+      "action":{"type":"string"},"rationale":{"type":"string"},"monitor":{"type":"string"},
+      "indicator_ids":{"type":"array","items":{"type":"string"}},"evidence_record_ids":{"type":"array","items":{"type":"string"}}},
+      "required":["action","rationale","monitor","indicator_ids","evidence_record_ids"]}},
+   "limitations":{"type":"array","maxItems":6,"items":{"type":"string"}},
+   "benchmark_summary":{"type":["string","null"]}
+ },"required":["executive_summary","findings","recommendations","limitations","benchmark_summary"]}
+
+
+def _deterministic_fallback(plan,evidence_pack):
+    inv=_indicator_values(evidence_pack); rep=inv.get("brand_reputation") or {}; pos=inv.get("positive_narrative_drivers") or []; neg=inv.get("negative_narrative_drivers") or []
+    lang=_lang(plan); idx=rep.get("index")
+    summary=(f"Η ανάλυση αποτυπώνει Brand Reputation {idx:.1f}/100 με evidence-linked drivers και ρητές δικλείδες ποιότητας." if lang=="el" and isinstance(idx,(int,float)) else
+             f"The analysis reports Brand Reputation {idx:.1f}/100 with evidence-linked drivers and explicit quality guardrails." if isinstance(idx,(int,float)) else
+             ("Η διαθέσιμη τεκμηρίωση δεν επαρκεί για ασφαλή συνολικό δείκτη Brand Reputation." if lang=="el" else "Available evidence is insufficient for a safe overall Brand Reputation index."))
+    findings=[]
+    for label,rows,mat in (("Positive driver",pos,"directional"),("Negative driver",neg,"directional")):
+        if isinstance(rows,list) and rows:
+            r=rows[0]; name=str(r.get("name") or "driver"); contrib=r.get("reputation_point_contribution")
+            text=f"{name}"+(f" ({float(contrib):+.2f} Reputation points)" if isinstance(contrib,(int,float)) else "")
+            findings.append({"title":label,"finding":text,"interpretation":"Evidence-linked deterministic contribution; not a standalone causal claim.","confidence":"medium","materiality":mat,"indicator_ids":["positive_narrative_drivers" if label.startswith("Positive") else "negative_narrative_drivers"],"evidence_record_ids":[],"causal_status":"deterministic_contribution"})
+    return {"executive_summary":summary,"findings":findings,"recommendations":[],"limitations":list(evidence_pack.get("warnings") or [])[:6],"benchmark_summary":None,
+            "provider":"deterministic_fallback","model":None}
+
+
+def _payload(plan,visual_pack,evidence_pack):
+    inv=_indicator_values(evidence_pack)
+    investigations=[]
+    for row in (evidence_pack.get("investigations") or [])[:12]:
+        investigations.append({k:copy.deepcopy(row.get(k)) for k in ("investigation_id","type","question","finding","confidence","causal_status","evidence_record_ids","indicator_ids","metrics")})
+    return {
+      "research_scope":{"client":plan.get("client"),"topic":plan.get("topic"),"market":plan.get("market"),"date_from":plan.get("date_from"),"date_to":plan.get("date_to"),
+                        "search_strategy":plan.get("search_strategy"),"keyword_roles":plan.get("keyword_roles"),"target_total":plan.get("target_total"),"benchmark":plan.get("benchmark")},
+      "deterministic_indicators":inv,
+      "investigations":investigations,
+      "quality_warnings":list(visual_pack.get("warnings") or []),
+    }
+
+
+def _validate(result,plan,evidence_pack):
+    allowed_ind=set(_inventory(evidence_pack)); allowed_ev=_evidence_ids(evidence_pack)
+    out=copy.deepcopy(result)
+    clean_find=[]
+    for f in out.get("findings") or []:
+        f["indicator_ids"]=[x for x in f.get("indicator_ids",[]) if x in allowed_ind]
+        f["evidence_record_ids"]=[x for x in f.get("evidence_record_ids",[]) if x in allowed_ev]
+        if not f["indicator_ids"]: continue
+        if f.get("causal_status") not in {"not_applicable","not_proven","deterministic_contribution"}: f["causal_status"]="not_proven"
+        clean_find.append(f)
+    out["findings"]=clean_find[:6]
+    clean_rec=[]
+    for r in out.get("recommendations") or []:
+        r["indicator_ids"]=[x for x in r.get("indicator_ids",[]) if x in allowed_ind]
+        r["evidence_record_ids"]=[x for x in r.get("evidence_record_ids",[]) if x in allowed_ev]
+        if r["indicator_ids"]: clean_rec.append(r)
+    out["recommendations"]=clean_rec[:5]
+    # Benchmark language is forbidden unless the research plan contains a real benchmark payload.
+    if not plan.get("benchmark"): out["benchmark_summary"]=None
+    return out
+
+
+def build_report_synthesis(folder:Path,plan:dict,visual_pack:dict,evidence_pack:dict)->dict:
+    base=_deterministic_fallback(plan,evidence_pack); payload=_payload(plan,visual_pack,evidence_pack)
+    if settings.signalyth_ai_enabled and settings.openai_api_key:
+        try:
+            from openai import OpenAI
+            client=OpenAI(api_key=settings.openai_api_key,max_retries=0,timeout=60.0)
+            lang="Greek" if _lang(plan)=="el" else "English"
+            response=client.responses.create(model=settings.signalyth_ai_reasoning_model,store=False,
+                instructions=(f"You are the senior analyst synthesis layer of SIGNALYTH. Write in {lang}. Use ONLY the supplied deterministic indicators, investigations and evidence references. "
+                              "Do not recompute metrics, invent facts, invent benchmarks, or present association as causation. Keep findings distinct from recommendations. "
+                              "Recommendations must be specific, evidence-linked and operational; if evidence does not justify an action, omit it. Confidence and materiality must reflect evidence strength. "
+                              "Do not introduce numerical claims unless that exact number is present in the supplied payload."),
+                input=json.dumps(payload,ensure_ascii=False,default=str),
+                text={"format":{"type":"json_schema","name":"signalyth_professional_report_synthesis","schema":SCHEMA,"strict":True}},max_output_tokens=3500)
+            decoded=json.loads(response.output_text or "{}"); decoded["provider"]="openai";decoded["model"]=str(getattr(response,"model",settings.signalyth_ai_reasoning_model));decoded["response_id"]=getattr(response,"id",None)
+            base=decoded
+        except Exception as exc:
+            base["provider_error"]=_safe_text(exc,500)
+    out=_validate(base,plan,evidence_pack);out.update({"ruleset_version":REPORT_SYNTHESIS_VERSION,"generated_at":_utcnow(),"research_scope":payload["research_scope"]})
+    RunStore().write(folder/"exports"/"analyst-synthesis.json",out)
+    return out
+
+
+def final_consistency_qa(presentation_plan:dict,evidence_pack:dict,visual_pack:dict,synthesis:dict,plan:dict)->dict:
+    allowed_ind=set(_inventory(evidence_pack));allowed_ev=_evidence_ids(evidence_pack)
+    claims=presentation_plan.get("claim_ledger") or []
+    unknown_ind=sorted({i for c in claims for i in (c.get("indicator_ids") or []) if i not in allowed_ind})
+    analyst_claims=[c for c in claims if str(c.get("claim_id") or "").startswith(("analyst-","recommendation-","benchmark-"))]
+    unsupported_evidence=sorted({e for c in analyst_claims for e in (c.get("evidence_refs") or []) if e not in allowed_ev})
+    causal_bad=[c.get("claim_id") for c in claims if c.get("causal_status") not in {None,"not_applicable","not_proven","deterministic_contribution"}]
+    ctx=presentation_plan.get("research_context") or {}
+    date_match=str(ctx.get("date_from"))==str(plan.get("date_from")) and str(ctx.get("date_to"))==str(plan.get("date_to"))
+    benchmark_ok=bool(plan.get("benchmark")) or not synthesis.get("benchmark_summary")
+    material_ai=[c for c in analyst_claims if c.get("claim_type") in {"analyst_finding","recommendation"}]
+    traceable=all(c.get("indicator_ids") and (c.get("evidence_refs") or c.get("claim_type")=="recommendation" or c.get("causal_status")=="deterministic_contribution") for c in material_ai)
+    checks={"unknown_indicator_refs":not unknown_ind,"unsupported_evidence_refs":not unsupported_evidence,"causality_contract":not causal_bad,
+            "research_dates_match":date_match,"benchmark_not_invented":benchmark_ok,"analyst_claims_traceable":traceable,"gold_standard_complete":bool((presentation_plan.get("gold_standard_audit") or {}).get("complete"))}
+    return {"contract":"final-report-consistency-qa-v1","checks":checks,"passed":all(checks.values()),"details":{"unknown_indicators":unknown_ind,"unsupported_evidence":unsupported_evidence,"bad_causal_claims":causal_bad},"generated_at":_utcnow()}

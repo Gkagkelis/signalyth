@@ -5,6 +5,8 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 SourceName = Literal["x", "tiktok", "instagram", "facebook", "youtube", "news"]
 SampleMode = Literal["automatic", "perSource"]
+SearchStrategy = Literal["topic_first", "context_first", "balanced_smart"]
+KeywordRole = Literal["context", "required_context", "alias", "exclude", "watch"]
 
 class AnalysisDraft(BaseModel):
     client: str = Field(min_length=1, max_length=120)
@@ -12,7 +14,7 @@ class AnalysisDraft(BaseModel):
     market: str = Field(min_length=1, max_length=80)
     date_from: date
     date_to: date
-    keywords: list[str] = Field(min_length=1, max_length=50)
+    keywords: list[str] = Field(default_factory=list, max_length=50)
     sources: list[SourceName] = Field(min_length=1)
     sample_mode: SampleMode = "automatic"
     sample_target: int = Field(default=1000, ge=1, le=100000)
@@ -23,6 +25,10 @@ class AnalysisDraft(BaseModel):
     report_language: Literal["English", "Ελληνικά"] = "English"
     additional_context: list[str] = Field(default_factory=list, max_length=50)
     exclusions: list[str] = Field(default_factory=list, max_length=50)
+    search_strategy: SearchStrategy = "balanced_smart"
+    keyword_roles: dict[str, KeywordRole] = Field(default_factory=dict)
+    query_overrides: dict[str, list[str]] = Field(default_factory=dict)
+    benchmark: dict[str, object] | None = None
 
     @field_validator("keywords", "additional_context", "exclusions")
     @classmethod
@@ -72,7 +78,12 @@ class SourcePlan(BaseModel):
     market_strategy: str
     queries: list[str]
     subruns: list[SubRunPlan]
+    topup_subruns: list[SubRunPlan] = Field(default_factory=list)
+    semantic_topup_subruns: list[SubRunPlan] = Field(default_factory=list)
     intent_buckets: list[dict] = Field(default_factory=list)
+    query_preview: list[dict] = Field(default_factory=list)
+    source_budget_usd: float = 0.0
+    source_contract_version: str = "actor-contract-v3"
 
 class CollectionPlan(BaseModel):
     client: str
@@ -97,6 +108,12 @@ class CollectionPlan(BaseModel):
     target_semantics: str = "requested_analyzable_evidence"
     resilience_policy_version: str = "multisource-resilience-v1.8.4"
     preflight_forecast: dict = Field(default_factory=dict)
+    search_strategy: SearchStrategy = "balanced_smart"
+    keyword_roles: dict[str, str] = Field(default_factory=dict)
+    query_preview: dict[str, list[dict]] = Field(default_factory=dict)
+    topup_policy: str = "shared_source_target_until_analyzable_or_exhausted"
+    master_spec_version: str = "SIGNALYTH-master30-v1"
+    benchmark: dict[str, object] | None = None
     sources: list[SourcePlan]
 
 class SourceConfigUpdate(BaseModel):

@@ -779,7 +779,32 @@ def analyze_records(
         final["ruleset_version"] = AI_RULESET_VERSION
         final["prompt_version"] = PROMPT_VERSION
         final["analyzed_at"] = _utcnow()
-        final["opinion_eligible"] = bool((row.get("cleaning") or {}).get("organic_eligible"))
+        cleaning = row.get("cleaning") or {}
+        final["opinion_eligible"] = bool(
+            decision == "ready"
+            and final.get("semantic_relevance") == "relevant"
+            and cleaning.get("content_class") == "organic"
+            and cleaning.get("account_type") == "person_or_creator"
+            and cleaning.get("authenticity_status") == "low_risk"
+            and not cleaning.get("coordination_cluster_id")
+        )
+        if decision == "excluded":
+            analytic_role = "irrelevant_quarantine"
+        elif decision == "review":
+            analytic_role = "review"
+        elif cleaning.get("content_class") in {"owned", "promotional"}:
+            analytic_role = "owned_promotional_visibility"
+        elif cleaning.get("origin_class") in {"media", "earned_media"} or row.get("platform") == "news":
+            analytic_role = "media_visibility"
+        elif cleaning.get("account_type") == "organization":
+            analytic_role = "organization_evidence"
+        elif cleaning.get("coordination_cluster_id") or cleaning.get("authenticity_status") in {"suspicious", "likely_automated"}:
+            analytic_role = "coordination_suspicious"
+        elif final["opinion_eligible"]:
+            analytic_role = "organic_opinion_reputation"
+        else:
+            analytic_role = "reputation_evidence" if final.get("target_stance") != "not_applicable" else "visibility_evidence"
+        final["analytic_role"] = analytic_role
 
         out = copy.deepcopy(row)
         out["ai_analysis"] = final
@@ -859,9 +884,11 @@ def analyze_run(
 ) -> dict:
     store = RunStore()
     plan = plan or store.read(folder / "plan.json") or {}
-    trusted = store.read(folder / "cleaning" / "trusted.json", None)
+    trusted = store.read(folder / "cleaning" / "semantic-candidates.json", None)
     if trusted is None:
-        raise RuntimeError("Cleaning trusted sample is not available. Run Step 3 first.")
+        trusted = store.read(folder / "cleaning" / "trusted.json", None)
+    if trusted is None:
+        raise RuntimeError("Cleaning semantic candidate sample is not available. Run Step 3 first.")
     if not isinstance(trusted, list):
         raise RuntimeError("cleaning/trusted.json is not a valid list")
     current_hash = _trusted_input_hash(trusted)
@@ -881,7 +908,9 @@ def load_analysis_summary(folder: Path) -> dict | None:
     report = store.read(folder / "analysis" / "report.json")
     if not isinstance(report, dict):
         return None
-    trusted = store.read(folder / "cleaning" / "trusted.json", []) or []
+    trusted = store.read(folder / "cleaning" / "semantic-candidates.json", None)
+    if trusted is None:
+        trusted = store.read(folder / "cleaning" / "trusted.json", []) or []
     report = copy.deepcopy(report)
     report["stale"] = report.get("trusted_input_hash") != _trusted_input_hash(trusted if isinstance(trusted, list) else [])
     return report
@@ -907,7 +936,9 @@ def _validate_human_sentiment(label: str | None, score: float | None):
 def _rebuild_analysis_outputs(folder: Path, analyzed: list[dict]) -> dict:
     store = RunStore()
     plan = store.read(folder / "plan.json", {}) or {}
-    trusted = store.read(folder / "cleaning" / "trusted.json", []) or []
+    trusted = store.read(folder / "cleaning" / "semantic-candidates.json", None)
+    if trusted is None:
+        trusted = store.read(folder / "cleaning" / "trusted.json", []) or []
     old_report = store.read(folder / "analysis" / "report.json", {}) or {}
     context = _context_from_plan(plan)
     report = _analysis_report(

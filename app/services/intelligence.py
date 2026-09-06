@@ -195,8 +195,11 @@ def _impact_components(row: dict, refs: dict[str, dict[str, float | None]]) -> d
         confidence = 0.0
     else:
         den = sum(w for _, _, w in available)
-        impact = sum(v * w for _, v, w in available) / den
-        confidence = sum(w for _, _, w in available) / 1.0
+        measured = sum(v * w for _, v, w in available) / den
+        confidence = min(1.0, sum(w for _, _, w in available) / 1.0)
+        # Sparse metrics are uncertain, not extreme. Shrink measured impact toward
+        # the neutral prior in proportion to actual metric coverage/confidence.
+        impact = 0.50 + confidence * (measured - 0.50)
 
     return {
         "impact_score": round(_clamp(impact), 6),
@@ -530,10 +533,18 @@ def _time_series(records: list[dict]) -> dict:
             )
             for emotion in EMOTION_LABELS
         }
+        rep_weights = [_safe_float((r.get("intelligence") or {}).get("reputation_weight"), 0.0) for r in rep_rows]
+        effective_sample = _effective_sample_size(rep_weights)
+        source_count = len({str(r.get("platform") or "") for r in rows if r.get("platform")})
+        daily_confidence = _clamp(0.72 * min(1.0, effective_sample / 20.0) + 0.28 * min(1.0, source_count / 3.0))
         point = {
             "date": day,
             "records": len(rows),
             "effective_voices": round(sum(_safe_float((r.get("intelligence") or {}).get("independent_voice_weight"), 0.0) for r in rows), 4),
+            "effective_sample_size": round(effective_sample, 4),
+            "source_count": source_count,
+            "daily_confidence": round(daily_confidence, 4),
+            "confidence_label": "high" if daily_confidence >= 0.75 else ("medium" if daily_confidence >= 0.45 else "low"),
             "brand_reputation_index": rep.get("index"),
             "negative_weight_share": round(neg_w / total_w, 6) if total_w > 0 else None,
             "attention_score_sum": round(sum(_safe_float((r.get("intelligence") or {}).get("impact_score"), 0.0) for r in rows), 4),

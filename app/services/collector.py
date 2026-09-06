@@ -7,7 +7,8 @@ from pathlib import Path
 from typing import Callable
 
 from app.services.apify_service import ApifyRunner, CollectionNotConfigured
-from app.services.normalizer import normalize_dataset, parse_date
+from app.services.normalizer import normalize_dataset, normalize_dataset_with_audit, parse_date
+from app.services.schema_mapping import recover_mapping
 from app.services.storage import RunStore
 from app.registry import output_mapping_for, load_registry
 from app.config import settings
@@ -52,7 +53,7 @@ def _assert_live_sources_verified(plan: dict) -> None:
             blocked.append(f"{source}:{actor_id or 'missing-actor'}")
     if blocked:
         raise CollectionNotConfigured(
-            "Live collection blocked: replacement/custom source Actors require verification before paid collection: "
+            "Live collection blocked: replacement/custom source Actors require a tiny paid smoke test / verification before paid collection: "
             + ", ".join(blocked)
         )
 
@@ -83,10 +84,10 @@ class BudgetGuard:
         reservation = max(0.0, float(reservation))
         self.reserved = max(0.0, self.reserved - reservation)
         charged = reservation if actual_cost is None else max(0.0, float(actual_cost))
-        # The provider receives the same per-call cap. If reported usage exceeds it,
-        # fail closed instead of silently consuming budget reserved for later sources.
-        if charged > reservation + 1e-6:
-            raise RuntimeError("Actor reported cost above the reserved per-call hard cap.")
+        # Reservation is a planning envelope, not a claim that Apify runtime/platform
+        # usage must equal the Actor event cap. Enforce the user's GLOBAL hard budget;
+        # do not reject a successful run merely because provider-reported total usage
+        # is above the smaller reservation used for scheduling.
         if self.spent + charged > self.max_budget + 1e-6:
             raise RuntimeError("Actual collection cost exceeded the SIGNALYTH analysis budget guard.")
         self.spent += charged
@@ -177,7 +178,10 @@ def _elastic_subruns(source_plan: dict, adjusted_target: int, source_cap: float)
 
 
 def _source_base_cap(source_plan: dict) -> float:
-    return sum(float(sr.get("max_charge_usd", 0) or 0) for sr in source_plan.get("subruns", []))
+    explicit = float(source_plan.get("source_budget_usd", 0) or 0)
+    if explicit > 0:
+        return explicit
+    return sum(float(sr.get("max_charge_usd", 0) or 0) for sr in [*(source_plan.get("subruns", []) or []), *(source_plan.get("topup_subruns", []) or [])])
 
 
 def _execution_order(sources: list[dict], automatic: bool) -> list[dict]:
@@ -202,20 +206,38 @@ def _adjusted_target(base_target: int, carry_shortfall: int, remaining_sources: 
 
 
 def _normalize_partial(source: str, source_raw: list[dict], desired_target: int, date_from: date, date_to: date):
-    data_rows, diagnostic_rows = split_diagnostic_rows(source_raw)
-    normalized_before = normalize_dataset(source, data_rows, mapping=output_mapping_for(source))
+    data_rows, provider_diagnostics = split_diagnostic_rows(source_raw)
+    configured_mapping = output_mapping_for(source)
+    audit = normalize_dataset_with_audit(source, data_rows, mapping=configured_mapping)
+    normalized_before = audit["rows"]
+    recovery = None
+    # Self-heal schema drift only when the known contract produced no usable dated
+    # evidence. Raw rows remain untouched and are always retained for audit/recovery.
+    if data_rows and (not normalized_before or not any(parse_date(r.get("date")) for r in normalized_before)):
+        recovery = recover_mapping(source, data_rows, current=configured_mapping)
+        if recovery.get("mapping"):
+            recovered_audit = normalize_dataset_with_audit(source, data_rows, mapping=recovery["mapping"])
+            if len(recovered_audit["rows"]) >= len(normalized_before):
+                audit = recovered_audit; normalized_before = audit["rows"]
     missing_date_items = sum(1 for r in normalized_before if not parse_date(r.get("date")))
     in_range_rows = [r for r in normalized_before if in_range(r, date_from, date_to)]
+    # normalize_dataset already de-duplicates stable ids. Preserve over-delivery raw,
+    # but cap the analysis candidate pool to the current source target.
     normalized = in_range_rows[:desired_target]
     metrics = {
         "raw_items": len(source_raw),
         "data_items": len(data_rows),
-        "diagnostic_items": len(diagnostic_rows),
+        "content_items": len(normalized_before),
+        "metadata_items": int(audit.get("metadata_rows", 0) or 0),
+        "diagnostic_items": len(provider_diagnostics) + int(audit.get("diagnostic_rows", 0) or 0),
         "normalized_before_date_filter": len(normalized_before),
         "missing_date_items": missing_date_items,
         "date_filtered_out": len(normalized_before) - len(in_range_rows),
+        "unique_in_range": len(in_range_rows),
         "capped_out": max(0, len(in_range_rows) - len(normalized)),
         "collected": len(normalized),
+        "topup_needed": max(0, int(desired_target) - len(normalized)),
+        "mapping_recovery": recovery,
     }
     return normalized, metrics
 
@@ -407,7 +429,17 @@ def execute_plan(
             "error": None,
         })
 
-        subruns = _elastic_subruns(sp, desired_target, source_cap)
+        primary_subruns = _elastic_subruns(sp, desired_target, min(source_cap, _source_base_cap(sp)))
+        # Top-up routes do NOT own quotas. They are dormant routes into the same source
+        # target and execute only if the normalized in-range pool is still short.
+        topup_subruns = []
+        for raw_sr in (sp.get("topup_subruns", []) or []):
+            sr = copy.deepcopy(raw_sr)
+            old_target = max(1, int(sr.get("target_items", desired_target) or desired_target))
+            sr["target_items"] = desired_target
+            sr["input"] = _resize_input(source, sr.get("input", {}), old_target, desired_target)
+            topup_subruns.append(sr)
+        subruns = [*primary_subruns, *topup_subruns]
         source_status["subruns_total"] = len(subruns)
         source_status["subruns_completed"] = 0
         source_status["subruns"] = [
@@ -444,10 +476,35 @@ def execute_plan(
                     break
 
                 sr_status = source_status["subruns"][sr_idx]
+                purpose = str(sr.get("purpose", "discovery"))
+                # Every planned query/batch is only a discovery route. It owns NO fixed
+                # fraction of the requested sample. Recompute the shared-source shortfall
+                # before every call and let the next route attempt the whole remainder.
+                current_norm, current_metrics = _normalize_partial(source, source_raw, desired_target, date_from, date_to)
+                source_status.update(current_metrics)
+                remaining_needed = max(0, desired_target - len(current_norm))
+                if remaining_needed <= 0:
+                    sr_status.update({"status":"skipped_target_met","started_at":None,"completed_at":_utcnow(),"error":None})
+                    source_status["subruns_completed"] += 1
+                    sync(f"{source}: target met; unused discovery route skipped", source, code="route_skipped_target_met", purpose=purpose)
+                    continue
+                old_target = max(1, int(sr.get("target_items", desired_target) or desired_target))
+                sr["target_items"] = remaining_needed
+                sr["input"] = _resize_input(source, sr.get("input", {}), old_target, remaining_needed)
+                sr_status["target_items"] = remaining_needed
                 sr_status.update({"status": "running", "started_at": _utcnow()})
-                sync(f"{source}: collecting {sr.get('purpose', 'discovery')}", source, code="collecting_purpose", purpose=sr.get("purpose", "discovery"))
+                sync(f"{source}: collecting {purpose}", source, code="collecting_purpose", purpose=purpose)
 
-                reservation = guard.reserve(float(sr["max_charge_usd"]))
+                # The source budget is one envelope shared by all its discovery routes.
+                # Do not strand money in a route whose planned share happened to be small.
+                source_spent = max(0.0, float(source_status.get("cost_usd", 0.0) or 0.0))
+                safe_cap = min(max(0.0, source_cap - source_spent), max(0.0, guard.remaining))
+                if safe_cap <= 0:
+                    sr_status.update({"status":"skipped_budget_safety","completed_at":_utcnow(),"error":"No remaining acquisition budget for this top-up route."})
+                    source_status["subruns_completed"] += 1
+                    continue
+                sr["max_charge_usd"] = safe_cap
+                reservation = guard.reserve(safe_cap)
                 try:
                     resilient = run_actor_resilient(
                         runner, sr["actor_id"], sr["input"],
@@ -682,6 +739,19 @@ def execute_plan(
     normalized_all = list(dedup.values())
     store.write(folder / "normalized-all.json", normalized_all)
     store.write(folder / "rebalancing.json", rebalance_audit)
+    collection_audit = {
+        "contract": "collection-loss-funnel-v1",
+        "target_semantics": plan.get("target_semantics", "requested_analyzable_evidence"),
+        "search_strategy": plan.get("search_strategy"),
+        "sources": {
+            name: {k: row.get(k) for k in (
+                "base_target","adjusted_target","raw_items","data_items","content_items","metadata_items","diagnostic_items",
+                "normalized_before_date_filter","missing_date_items","date_filtered_out","unique_in_range","collected","topup_needed",
+                "capped_out","cost_usd","mapping_recovery","status"
+            )} for name,row in status.get("sources",{}).items()
+        },
+    }
+    store.write(folder / "collection-audit.json", collection_audit)
 
     target_total = int(plan.get("target_total", 0) or 0)
     final_total = len(normalized_all)

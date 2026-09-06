@@ -29,6 +29,7 @@ from pptx.util import Inches, Pt
 from app.services.investigations import INDICATOR_REGISTRY, load_evidence_pack
 from app.services.storage import RunStore
 from app.services.visualizations import load_presentation_visual_pack, load_visualization_summary
+from app.services.report_synthesis import build_report_synthesis, final_consistency_qa
 
 PRESENTATION_RULESET_VERSION = "1.4.0"
 PRESENTATION_METHODOLOGY_VERSION = "signalyth-presentation-intelligence-v1.4"
@@ -284,6 +285,8 @@ GOLD_STANDARD_CAPABILITIES = (
     ("evidence_traceability", "Evidence behind findings"),
     ("strategic_synthesis", "Strategic synthesis / implications"),
     ("conclusions", "Conclusions and what to watch"),
+    ("analyst_findings", "Senior analyst evidence-grounded synthesis"),
+    ("recommendations", "Evidence-linked recommendations and monitoring actions"),
 )
 
 
@@ -345,6 +348,8 @@ def _gold_standard_audit(slides: list[dict], charts: dict[str, dict], inv: dict[
         "evidence_traceability": bool(mentions),
         "strategic_synthesis": bool((inv.get("positive_narrative_drivers") or {}).get("available") or (inv.get("negative_narrative_drivers") or {}).get("available") or investigations),
         "conclusions": True,
+        "analyst_findings": "analyst_findings" in slide_ids,
+        "recommendations": "recommendations" in slide_ids,
     }
     coverage_map = {
         "context": {"cover"},
@@ -365,6 +370,8 @@ def _gold_standard_audit(slides: list[dict], charts: dict[str, dict], inv: dict[
         "evidence_traceability": {"evidence"},
         "strategic_synthesis": {"strategic_synthesis"},
         "conclusions": {"conclusions"},
+        "analyst_findings": {"analyst_findings"},
+        "recommendations": {"recommendations"},
     }
     rows=[]
     for key,label in GOLD_STANDARD_CAPABILITIES:
@@ -543,6 +550,25 @@ def build_presentation_plan(visual_pack: dict, evidence_pack: dict, plan: dict |
         synthesis_claims.append(_claim("synthesis-watch", ("Watch signal: " if lang=="en" else "Σήμα παρακολούθησης: ")+_txt(top.get("question"),lang), _resolve_investigation_indicator_ids(top), evidence_refs=top.get("evidence_record_ids") or [], claim_type="attention_point", causal_status="not_proven", source_values={"role":"watch"}))
     if synthesis_claims:
         slides.append(_slide("strategic_synthesis", "strategic_synthesis", "Strategic synthesis" if lang=="en" else "Στρατηγική σύνθεση", claims=synthesis_claims[:4], priority=96, section="closing", notes={"causality_guardrail":"Association ≠ proven causality."}))
+
+    analyst = visual_pack.get("analyst_synthesis") or {}
+    if analyst.get("findings"):
+        analyst_claims=[]
+        for i,f in enumerate((analyst.get("findings") or [])[:6],start=1):
+            text=f"{_clean_text(f.get('title'),120)} — {_clean_text(f.get('finding'),700)} | {_clean_text(f.get('interpretation'),500)}"
+            analyst_claims.append(_claim(f"analyst-{i}",text,list(f.get("indicator_ids") or []),evidence_refs=f.get("evidence_record_ids") or [],
+                                         claim_type="analyst_finding",confidence=f.get("confidence"),causal_status=f.get("causal_status") or "not_proven",
+                                         source_values={"materiality":f.get("materiality"),"confidence_label":f.get("confidence")}))
+        slides.append(_slide("analyst_findings","evidence_cards","Senior analyst synthesis" if lang=="en" else "Σύνθεση senior analyst",claims=analyst_claims,priority=97,section="closing",notes={"causality_guardrail":"Association ≠ proven causality."}))
+    if analyst.get("recommendations"):
+        rec_claims=[]
+        for i,r in enumerate((analyst.get("recommendations") or [])[:5],start=1):
+            text=(f"Action: {_clean_text(r.get('action'),450)} | Why: {_clean_text(r.get('rationale'),550)} | Monitor: {_clean_text(r.get('monitor'),350)}" if lang=="en" else
+                  f"Ενέργεια: {_clean_text(r.get('action'),450)} | Γιατί: {_clean_text(r.get('rationale'),550)} | Παρακολούθηση: {_clean_text(r.get('monitor'),350)}")
+            rec_claims.append(_claim(f"recommendation-{i}",text,list(r.get("indicator_ids") or []),evidence_refs=r.get("evidence_record_ids") or [],claim_type="recommendation",causal_status="not_proven"))
+        slides.append(_slide("recommendations","evidence_cards","Recommended actions" if lang=="en" else "Προτεινόμενες ενέργειες",claims=rec_claims,priority=95,section="closing"))
+    if analyst.get("benchmark_summary") and (plan or {}).get("benchmark"):
+        slides.append(_slide("benchmark","evidence_cards","Benchmark / comparison" if lang=="en" else "Benchmark / σύγκριση",claims=[_claim("benchmark-1",analyst.get("benchmark_summary"),["brand_reputation","time_trends"],claim_type="benchmark",causal_status="not_proven")],priority=86,section="context"))
 
     methodology_claims = [
         _claim("method-reputation", "Brand Reputation is a deterministic 0–100 index built from evidence-linked sentiment, independent-voice weight, authenticity, confidence and bounded impact; reach does not create sentiment by itself.", ["brand_reputation","sentiment","effective_independent_voices","authenticity_risk","evidence_confidence","impact_attention"], claim_type="methodology"),
@@ -1083,11 +1109,13 @@ def build_exports(folder: Path, plan: dict, *, force: bool=False, cancel_check: 
     if visual_summary.get("stale"): raise RuntimeError("Step 7 is stale; rebuild Charts & Dashboard before exports.")
     visual_pack=load_presentation_visual_pack(folder); evidence_pack=load_evidence_pack(folder)
     _validate_inputs(visual_pack,evidence_pack,plan)
-    input_hash=_hash_payload({"visual_pack":visual_pack,"evidence_contract":evidence_pack.get("contract_version"),"research_context":evidence_pack.get("research_context"),"report_language":plan.get("report_language")})
+    input_hash=_hash_payload({"visual_pack":visual_pack,"evidence_contract":evidence_pack.get("contract_version"),"research_context":evidence_pack.get("research_context"),"report_language":plan.get("report_language"),"search_strategy":plan.get("search_strategy"),"keyword_roles":plan.get("keyword_roles"),"benchmark":plan.get("benchmark"),"master_spec_version":plan.get("master_spec_version")})
     old=RunStore.read(folder/"exports"/"summary.json")
     if old and not force and old.get("input_hash")==input_hash and not old.get("stale"):
         return old
     if cancel_check and cancel_check(): raise PresentationCancelled("Exports cancelled before planning")
+    synthesis=build_report_synthesis(folder,plan,visual_pack,evidence_pack)
+    visual_pack=copy.deepcopy(visual_pack); visual_pack["analyst_synthesis"]=synthesis
     pplan=build_presentation_plan(visual_pack,evidence_pack,plan,cancel_check=cancel_check)
     base=folder/"exports"; base.mkdir(parents=True,exist_ok=True)
     lang=pplan["language"]; ctx=pplan["research_context"]
@@ -1115,6 +1143,8 @@ def build_exports(folder: Path, plan: dict, *, force: bool=False, cancel_check: 
         manifest["files"].append({"name":p.name,"type":p.suffix.lower().lstrip("."),"bytes":p.stat().st_size,"sha256":hashlib.sha256(p.read_bytes()).hexdigest()})
 
     # Export QA is structural here; release workflow additionally renders PPTX/DOCX/PDF visually.
+    consistency_qa=final_consistency_qa(pplan,evidence_pack,visual_pack,synthesis,plan)
+    RunStore().write(folder/"exports"/"final-consistency-qa.json",consistency_qa)
     qa={
         "indicator_review_complete":len(pplan["indicator_review"])==len(INDICATOR_REGISTRY) and all(x.get("examined") for x in pplan["indicator_review"]),
         "claim_ledger_valid":True,
@@ -1128,8 +1158,10 @@ def build_exports(folder: Path, plan: dict, *, force: bool=False, cancel_check: 
         "causality_guardrail":True,
         "gold_standard_capability_coverage_percent": _safe_float((pplan.get("gold_standard_audit") or {}).get("coverage_percent")),
         "gold_standard_capability_complete": bool((pplan.get("gold_standard_audit") or {}).get("complete")),
+        "analyst_synthesis_provider": synthesis.get("provider"),
+        "final_consistency_qa_passed": bool(consistency_qa.get("passed")),
     }
-    if not all([qa["indicator_review_complete"],qa["claim_ledger_valid"],qa["native_editable_chart_contract"],qa["pptx_slides"]>=3,qa["gold_standard_capability_complete"]]):
+    if not all([qa["indicator_review_complete"],qa["claim_ledger_valid"],qa["native_editable_chart_contract"],qa["pptx_slides"]>=3,qa["gold_standard_capability_complete"],qa["final_consistency_qa_passed"]]):
         raise RuntimeError("Step 8 export QA failed before persistence.")
 
     summary={
@@ -1149,7 +1181,7 @@ def load_export_summary(folder: Path) -> dict | None:
     if not isinstance(current,dict) or not isinstance(evidence,dict):
         return {**summary,"stale":True}
     try:
-        now_hash=_hash_payload({"visual_pack":current,"evidence_contract":evidence.get("contract_version"),"research_context":evidence.get("research_context"),"report_language":plan.get("report_language")})
+        now_hash=_hash_payload({"visual_pack":current,"evidence_contract":evidence.get("contract_version"),"research_context":evidence.get("research_context"),"report_language":plan.get("report_language"),"search_strategy":plan.get("search_strategy"),"keyword_roles":plan.get("keyword_roles"),"benchmark":plan.get("benchmark"),"master_spec_version":plan.get("master_spec_version")})
     except Exception:
         return {**summary,"stale":True}
     return {**summary,"stale":summary.get("input_hash")!=now_hash}

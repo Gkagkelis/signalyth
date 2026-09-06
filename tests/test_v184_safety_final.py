@@ -110,7 +110,7 @@ def test_provider_cost_cap_violation_stops_all_later_paid_sources_and_preserves_
         def run(self, actor_id, run_input, *, max_items, max_charge_usd):
             self.__class__.calls.append(actor_id)
             if len(self.__class__.calls) == 1:
-                return {"status": "SUCCEEDED", "usageTotalUsd": max_charge_usd + 0.25}, [{
+                return {"status": "SUCCEEDED", "usageTotalUsd": max_charge_usd + 5.0}, [{
                     "text": "preserved evidence", "timestamp": "2026-08-20T12:00:00Z", "url": "https://evidence.invalid/overcap"
                 }]
             return {"status": "SUCCEEDED", "usageTotalUsd": 0.0}, [{

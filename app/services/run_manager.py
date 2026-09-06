@@ -14,6 +14,8 @@ from app.services.ai_analysis import AIAnalysisCancelled, analyze_run
 from app.services.intelligence import build_intelligence
 from app.services.investigations import InvestigationCancelled, build_investigations
 from app.services.visualizations import VisualizationCancelled, build_visualizations
+from app.services.semantic_refill import semantic_refill
+from app.services.presentation import PresentationCancelled, build_exports
 from app.services.storage import RunNotFound, RunStore
 
 
@@ -152,7 +154,7 @@ class RunManager:
             # and the requested *trusted/analyzable* target.  It may diversify a
             # dominant context and, when Comments is ON, deepen into direct replies.
             # Every adaptive Actor call remains inside the existing run budget.
-            if int(report.get("trusted_sample_shortfall", 0) or 0) > 0 and plan.get("search_strategy_version") == "smart-collection-v2":
+            if int(report.get("trusted_sample_shortfall", 0) or 0) > 0 and plan.get("search_strategy_version") in {"smart-collection-v2", "master30-search-v1"}:
                 adaptive_status = self.store.read_status(run_id)
                 adaptive_status.update({
                     "status": "running",
@@ -256,6 +258,25 @@ class RunManager:
             status.setdefault("progress", {})["percent"] = 100
             self.store.write_status(run_id, status)
             return
+
+        # Master30: if semantic relevance leaves a per-source analyzable shortfall,
+        # do one bounded source-specific refill pass, then re-clean/re-analyze. OpenAI
+        # cache prevents re-paying unchanged records.
+        if plan.get("master_spec_version") == "SIGNALYTH-master30-v1":
+            try:
+                refill = semantic_refill(folder, plan, cancel_check=lambda: self.store.cancel_requested_folder(folder))
+                if int(refill.get("added_normalized", 0) or 0) > 0:
+                    clean_run(folder, plan=plan, cancel_check=lambda: self.store.cancel_requested_folder(folder))
+                    report = analyze_run(folder, plan=plan, cancel_check=lambda: self.store.cancel_requested_folder(folder), force=True)
+                status_refill = self.store.read_status(run_id)
+                status_refill["semantic_refill"] = {"status": refill.get("status"), "summary": refill, "completed_at": _utcnow()}
+                self.store.write_status(run_id, status_refill)
+            except Exception as exc:
+                # Refill is quality-improving and bounded; a provider failure must not
+                # erase a valid first-pass analysis.
+                status_refill = self.store.read_status(run_id)
+                status_refill["semantic_refill"] = {"status":"failed_safe","error":str(exc),"completed_at":_utcnow()}
+                self.store.write_status(run_id, status_refill)
 
         self.store.checkpoint_run(run_id)
         status = self.store.read_status(run_id)
@@ -428,9 +449,9 @@ class RunManager:
         self.store.checkpoint_run(run_id)
         status = self.store.read_status(run_id)
         status.update({
-            "status": terminal_status,
-            "phase": "visualizations_ready",
-            "completed_at": _utcnow(),
+            "status": "running",
+            "phase": "exports",
+            "completed_at": None,
             "visualizations": {
                 "status": "succeeded",
                 "ruleset_version": visualizations.get("ruleset_version"),
@@ -441,10 +462,35 @@ class RunManager:
                 "error": None,
                 "summary": visualizations,
             },
-            "current": {"source": None, "code": "visualizations_completed", "message": "Charts, dashboard and native-editable presentation visual pack are ready"},
+            "exports": {"status":"running","started_at":_utcnow(),"completed_at":None,"error":None,"summary":None},
+            "current": {"source": None, "code": "building_professional_report", "message": "Building evidence-grounded professional report and editable exports"},
         })
-        status.setdefault("progress", {})["percent"] = 100
+        status.setdefault("progress", {})["percent"] = 99
         self.store.write_status(run_id, status)
+        prerequisites = [
+            folder / "visualizations" / "presentation-visual-pack.json",
+            folder / "investigations" / "evidence-pack.json",
+        ]
+        exports = None
+        if all(p.exists() for p in prerequisites):
+            try:
+                exports = build_exports(folder, plan=plan, cancel_check=lambda: self.store.cancel_requested_folder(folder))
+            except PresentationCancelled:
+                self._mark_cancelled_after_collection(run_id); return
+            except Exception as exc:
+                status=self.store.read_status(run_id); status.update({"status":"failed","phase":"exports_failed","completed_at":_utcnow(),
+                    "fatal_error":f"Professional report/export generation failed safely: {exc}",
+                    "exports":{**(status.get("exports") or {}),"status":"failed","completed_at":_utcnow(),"error":str(exc)},
+                    "current":{"source":None,"code":"exports_failed","message":"Report/export QA failed; all evidence and charts were preserved"}})
+                status.setdefault("progress",{})["percent"]=100; self.store.write_status(run_id,status); return
+        self.store.checkpoint_run(run_id)
+        status=self.store.read_status(run_id)
+        export_state = ({"status":"succeeded","completed_at":_utcnow(),"error":None,"summary":exports}
+                        if exports is not None else {"status":"skipped_not_ready","completed_at":_utcnow(),"error":None,"summary":None})
+        status.update({"status":terminal_status,"phase":"visualizations_ready","completed_at":_utcnow(),
+            "exports":{**(status.get("exports") or {}),**export_state},
+            "current":{"source":None,"code":"visualizations_completed","message":"Charts are ready" + ("; professional report exports are ready" if exports is not None else "")}})
+        status.setdefault("progress",{})["percent"]=100; self.store.write_status(run_id,status)
 
     def _mark_cancelled_after_collection(self, run_id: str):
         status = self.store.read_status(run_id)

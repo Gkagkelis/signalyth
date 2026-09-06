@@ -182,12 +182,13 @@ def test_malformed_and_missing_date_rows_cannot_poison_analysis_dataset():
         assert status["status"] == "completed_shortfall"
 
 
-def test_budget_guard_rejects_provider_report_above_reserved_call_cap():
+def test_budget_guard_accounts_provider_runtime_overhead_against_global_cap():
     guard = BudgetGuard(1.0)
     reservation = guard.reserve(0.10)
-    with pytest.raises(RuntimeError, match="per-call hard cap"):
-        guard.settle(reservation, 0.11)
-    assert guard.spent == 0.0
+    charged = guard.settle(reservation, 0.11)
+    assert charged == 0.11
+    assert guard.spent == 0.11
+    assert guard.remaining == pytest.approx(0.89)
 
 
 def test_actor_health_store_learns_smaller_batch_after_transient_failure(tmp_path):

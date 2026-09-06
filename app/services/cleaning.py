@@ -496,13 +496,17 @@ def _decision(relevance: float, market: float, spam: float, bot_risk: float, bot
     reasons: list[str] = []
     if "exact_duplicate" in flags or "near_duplicate_same_author" in flags:
         return "excluded", ["duplicate_not_independent_evidence"]
-    if relevance < RULESET_CONFIG["relevance_exclude_below"]:
-        return "excluded", ["low_relevance"]
+    if "explicit_exclusion_context" in flags:
+        return "excluded", ["explicit_exclusion_context"]
     if spam >= RULESET_CONFIG["spam_exclude_at"]:
         return "excluded", ["high_spam_risk"]
     if bot_risk >= RULESET_CONFIG["bot_likely_automated_at"] and bot_reason_count >= 2:
         return "excluded", ["high_automation_or_manipulation_risk"]
-    if RULESET_CONFIG["relevance_exclude_below"] <= relevance < RULESET_CONFIG["relevance_review_below"]:
+    # Lexical relevance is only a cheap pre-AI signal. Low lexical overlap is sent
+    # to semantic review rather than destroyed before the model can understand it.
+    if relevance < RULESET_CONFIG["relevance_exclude_below"]:
+        reasons.append("lexical_relevance_low_semantic_review_required")
+    elif relevance < RULESET_CONFIG["relevance_review_below"]:
         reasons.append("relevance_uncertain")
     if str(content_class) == "unknown" and relevance < 0.68:
         reasons.append("content_context_uncertain")
@@ -514,8 +518,7 @@ def _decision(relevance: float, market: float, spam: float, bot_risk: float, bot
         reasons.append("high_impact_suspicious_activity")
     if "ambiguous_short_entity" in flags:
         reasons.append("entity_disambiguation_needed")
-    return ("review", reasons) if reasons else ("trusted", [])
-
+    return ("review", list(dict.fromkeys(reasons))) if reasons else ("trusted", [])
 
 def _quality_report(cleaned: list[dict], plan: dict) -> dict:
     total = len(cleaned)
@@ -571,6 +574,7 @@ def _quality_report(cleaned: list[dict], plan: dict) -> dict:
         "generated_at": _utcnow(),
         "total_records": total,
         "trusted_records": len(trusted),
+        "semantic_candidate_records": len(trusted) + len(review),
         "review_records": len(review),
         "excluded_records": len(excluded),
         "organic_opinion_records": len(organic),
@@ -768,6 +772,7 @@ def clean_records(records: list[dict], plan: dict, cancel_check: Callable[[], bo
     return {
         "cleaned": cleaned,
         "trusted": [r for r in cleaned if r["cleaning"]["decision"] == "trusted"],
+        "semantic_candidates": [r for r in cleaned if r["cleaning"]["decision"] in {"trusted", "review"}],
         "organic": [r for r in cleaned if r["cleaning"]["decision"] == "trusted" and r["cleaning"]["organic_eligible"]],
         "review_queue": [r for r in cleaned if r["cleaning"]["decision"] == "review"],
         "excluded": [r for r in cleaned if r["cleaning"]["decision"] == "excluded"],
@@ -781,6 +786,7 @@ def persist_cleaning(folder: Path, result: dict) -> dict:
     base = folder / "cleaning"
     store.write(base / "cleaned.json", result["cleaned"])
     store.write(base / "trusted.json", result["trusted"])
+    store.write(base / "semantic-candidates.json", result.get("semantic_candidates", [*result["trusted"], *result.get("review_queue", [])]))
     store.write(base / "organic.json", result["organic"])
     store.write(base / "review-queue.json", result["review_queue"])
     store.write(base / "excluded.json", result["excluded"])
@@ -805,6 +811,7 @@ def _rebuild_outputs(folder: Path, cleaned: list[dict], plan: dict) -> dict:
     result = {
         "cleaned": cleaned,
         "trusted": [r for r in cleaned if r["cleaning"]["decision"] == "trusted"],
+        "semantic_candidates": [r for r in cleaned if r["cleaning"]["decision"] in {"trusted", "review"}],
         "organic": [r for r in cleaned if r["cleaning"]["decision"] == "trusted" and r["cleaning"].get("organic_eligible")],
         "review_queue": [r for r in cleaned if r["cleaning"]["decision"] == "review"],
         "excluded": [r for r in cleaned if r["cleaning"]["decision"] == "excluded"],

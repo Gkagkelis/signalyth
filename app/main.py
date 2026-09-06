@@ -68,7 +68,10 @@ async def persist_cloud_run_mutations(request: Request, call_next):
 
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request):
-    return templates.TemplateResponse(request=request, name="index.html", context={})
+    html=(BASE_DIR / "app" / "templates" / "index.html").read_text(encoding="utf-8")
+    panel='<style>\n#master30SearchPanel{position:fixed;right:18px;bottom:18px;z-index:99999;width:min(430px,calc(100vw - 36px));background:#fff;border:1px solid #d8d5cf;border-radius:14px;box-shadow:0 14px 45px rgba(0,0,0,.16);font-family:Inter,Arial,sans-serif;color:#181818}\n#master30SearchPanel summary{cursor:pointer;padding:12px 14px;font-weight:700;font-size:13px}#master30SearchPanel .m30body{padding:0 14px 14px;font-size:12px}#master30SearchPanel select,#master30SearchPanel input{width:100%;box-sizing:border-box;margin:5px 0 9px;padding:8px;border:1px solid #cbc7c0;border-radius:8px;background:#fff}#m30preview{max-height:190px;overflow:auto;background:#f7f5f0;padding:8px;border-radius:8px;white-space:pre-wrap;font-family:ui-monospace,monospace;font-size:10px}\n</style><details id="master30SearchPanel"><summary>Search Strategy & Query Preview</summary><div class="m30body"><label>Research Scope Mode</label><select id="m30strategy"><option value="balanced_smart">Balanced Smart</option><option value="topic_first">Topic-first</option><option value="context_first">Context-first</option></select><label>Required Context (comma separated)</label><input id="m30required" placeholder="π.χ. ΔΕΘ"><label>Aliases (comma separated)</label><input id="m30aliases" placeholder="π.χ. Tsipras"><label>Watch only (comma separated)</label><input id="m30watch" placeholder="θέματα προς μέτρηση, όχι υποχρεωτικό φίλτρο"><div style="margin:5px 0 6px;color:#67635d">Τα queries είναι routes αναζήτησης, όχι quotas. Ο στόχος παραμένει το τελικό analyzable sample ανά πηγή.</div><div id="m30preview">Το Query Preview θα εμφανιστεί μόλις γίνει planning/run.</div></div></details><script>\n(()=>{const originalFetch=window.fetch.bind(window);const split=id=>(document.getElementById(id)?.value||\'\').split(\',\').map(x=>x.trim()).filter(Boolean);const rolePayload=()=>{const roles={};split(\'m30required\').forEach(x=>roles[x]=\'required_context\');split(\'m30aliases\').forEach(x=>roles[x]=\'alias\');split(\'m30watch\').forEach(x=>roles[x]=\'watch\');return roles};window.fetch=async function(input,init){let url=typeof input===\'string\'?input:(input&&input.url)||\'\';let next=init?{...init}:{};if(next.body&&typeof next.body===\'string\'&&next.method&&String(next.method).toUpperCase()===\'POST\'&&(url.includes(\'/api/plan\')||url.match(/\\/api\\/runs(?:\\?|$)/))){try{const body=JSON.parse(next.body);body.search_strategy=document.getElementById(\'m30strategy\')?.value||\'balanced_smart\';body.keyword_roles={...(body.keyword_roles||{}),...rolePayload()};body.keywords=Array.isArray(body.keywords)?body.keywords:[];for(const x of [...split(\'m30required\'),...split(\'m30aliases\'),...split(\'m30watch\')])if(!body.keywords.includes(x))body.keywords.push(x);next.body=JSON.stringify(body)}catch(e){}}\nconst resp=await originalFetch(input,next);if(url.includes(\'/api/plan\')&&resp.ok){try{const clone=resp.clone();const data=await clone.json();const q=data.query_preview||{};document.getElementById(\'m30preview\').textContent=Object.entries(q).map(([s,rows])=>s.toUpperCase()+\':\\n\'+(rows||[]).map(r=>`• [${r.route}] ${r.query}`).join(\'\\n\')).join(\'\\n\\n\')||\'Δεν δημιουργήθηκαν queries.\'}catch(e){}}return resp};})();\n</script>'
+    html=html.replace("</body>",panel+"</body>") if "</body>" in html else html+panel
+    return HTMLResponse(html)
 
 
 @app.get("/api/health")
@@ -88,6 +91,8 @@ def health():
         "execution_backend": settings.signalyth_execution_backend,
         "cloud_storage_requested": settings.signalyth_cloud_storage,
         "cloud_storage_configured": cloud_persistence.enabled,
+        "master_spec_version": "SIGNALYTH-master30-v1",
+        "final_analyzable_target_semantics": True,
     }
 
 
