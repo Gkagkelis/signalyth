@@ -1,0 +1,66 @@
+name: Fix Apify budget accounting
+
+on:
+  push:
+    paths:
+      - '.github/workflows/fix-apify-budget-accounting.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Patch Apify budget accounting
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          # 1) Use the user's full analysis budget as the hard pool. Keep the
+          # estimated-cost weighting, but distribute spare headroom evenly so tiny
+          # live runs have room for Apify platform/runtime usage.
+          qp = Path('app/services/query_planner.py')
+          text = qp.read_text(encoding='utf-8')
+          old = '''    # Run caps are a second guard, independent of the estimate. Their total never exceeds the analysis budget.\n    if known_total > 0:\n        cap_pool = min(draft.max_budget_usd, max(known_total, min(draft.max_budget_usd, known_total * 1.25)))\n        source_budgets = {s: cap_pool * ((estimates[s] or 0) / known_total) for s in selected}\n    else:\n        source_budgets = allocate_equal(int(round(draft.max_budget_usd * 10000)), selected)\n        source_budgets = {s: v / 10000 for s, v in source_budgets.items()}\n'''
+          new = '''    # Run caps are a second guard, independent of the estimate. Their total never exceeds the analysis budget.\n    # Apify's run total can include platform/runtime usage in addition to Actor event charges,\n    # so tiny samples need operational headroom instead of micro-cent source envelopes.\n    if known_total > 0:\n        budget = max(0.0, float(draft.max_budget_usd))\n        if budget <= known_total:\n            source_budgets = {s: budget * ((estimates[s] or 0) / known_total) for s in selected}\n        else:\n            buffered_total = min(budget, known_total * 1.25)\n            source_budgets = {s: buffered_total * ((estimates[s] or 0) / known_total) for s in selected}\n            spare = max(0.0, budget - sum(source_budgets.values()))\n            if selected and spare > 0:\n                overhead_each = spare / len(selected)\n                source_budgets = {s: source_budgets[s] + overhead_each for s in selected}\n    else:\n        source_budgets = allocate_equal(int(round(draft.max_budget_usd * 10000)), selected)\n        source_budgets = {s: v / 10000 for s, v in source_budgets.items()}\n'''
+          if old not in text:
+              raise SystemExit('query_planner budget block not found')
+          qp.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          # 2) max_total_charge_usd is the pay-per-event cap. Apify usageTotalUsd can
+          # include separate platform usage, so comparing usageTotalUsd to the tiny
+          # per-attempt event cap creates a false "provider cost-cap violation".
+          rp = Path('app/services/resilience.py')
+          text = rp.read_text(encoding='utf-8')
+          old = '''            actual = actual_cost_from_meta(meta)\n            if actual is not None:\n                result.provider_reported_cost_usd += max(0.0, float(actual))\n            # Never silently clamp a provider-reported charge above the hard per-call cap.\n            # That would make the UI look budget-safe even though the upstream provider says otherwise.\n            if actual is not None and float(actual) > attempt_cap + 1e-6:\n                result.cost_cap_violation = True\n                result.failure_kinds.append("cost_cap_violation")\n                result.accounted_cost_usd = envelope\n                result.metas.append(meta)\n                result.diagnostics.extend(diagnostics)\n                result.items.extend(data_items)\n                attempt.update({\n                    "status": "cost_cap_violation",\n                    "returned_items": len(data_items),\n                    "diagnostic_rows": len(diagnostics),\n                    "provider_reported_cost_usd": round(float(actual), 6),\n                    "accounted_cost_usd": round(envelope, 6),\n                    "error": "Provider reported cost above the SIGNALYTH hard per-call cap.",\n                })\n                break\n            charged = attempt_cap if actual is None else min(remaining, max(0.0, float(actual)))\n'''
+          new = '''            actual = actual_cost_from_meta(meta)\n            if actual is not None:\n                result.provider_reported_cost_usd += max(0.0, float(actual))\n            # Apify max_total_charge_usd caps pay-per-event charges. usageTotalUsd may\n            # additionally include platform/runtime usage, so it must not be compared\n            # directly with the smaller event cap for this attempt. We account the real\n            # run total against the logical SIGNALYTH envelope instead.\n            if actual is not None and float(actual) > remaining + 1e-6:\n                result.cost_cap_violation = True\n                result.failure_kinds.append("cost_cap_violation")\n                result.accounted_cost_usd = envelope\n                result.metas.append(meta)\n                result.diagnostics.extend(diagnostics)\n                result.items.extend(data_items)\n                attempt.update({\n                    "status": "cost_cap_violation",\n                    "returned_items": len(data_items),\n                    "diagnostic_rows": len(diagnostics),\n                    "provider_reported_cost_usd": round(float(actual), 6),\n                    "accounted_cost_usd": round(envelope, 6),\n                    "error": "Provider-reported total run cost exceeded the SIGNALYTH logical budget envelope.",\n                })\n                break\n            charged = attempt_cap if actual is None else max(0.0, float(actual))\n'''
+          if old not in text:
+              raise SystemExit('resilience cost block not found')
+          rp.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          # Keep user-facing failure text accurate if a true logical envelope overrun occurs.
+          cp = Path('app/services/collector.py')
+          text = cp.read_text(encoding='utf-8')
+          text = text.replace('Provider cost-cap violation; source stopped safely.', 'Provider-reported run cost exceeded the allocated SIGNALYTH envelope; source stopped safely.')
+          text = text.replace('Provider cost-cap violation detected; paid collection stopped safely.', 'Provider-reported run cost exceeded the allocated SIGNALYTH envelope; paid collection stopped safely.')
+          text = text.replace('provider cost-cap violation; stopping all paid collection', 'provider-reported run cost exceeded the allocated envelope; stopping all paid collection')
+          text = text.replace('Collection stopped: provider cost-cap violation detected; preserved evidence is not treated as a completed sample', 'Collection stopped: provider-reported run cost exceeded the allocated SIGNALYTH envelope; preserved evidence is not treated as a completed sample')
+          cp.write_text(text, encoding='utf-8')
+          PY
+
+      - name: Syntax check
+        run: python -m compileall -q app
+
+      - name: Commit patch and remove temporary workflow
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/fix-apify-budget-accounting.yml
+          git add app/services/query_planner.py app/services/resilience.py app/services/collector.py
+          git commit -m "Fix Apify platform-cost budget accounting"
+          git push
