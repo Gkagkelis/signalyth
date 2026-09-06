@@ -46,7 +46,7 @@ def test_x_v2_uses_balanced_intents_and_current_actor_fields():
     assert sum("lang:el" in q for q in queries) == 1
     assert all("-filter:nativeretweets" in q for q in queries)
     assert plan.search_strategy_version == "master30-search-v1"
-    assert plan.target_semantics == "final_analyzable_unique_in_range_per_source"
+    assert plan.target_semantics == "requested_final_analyzable_unique_in_range"
 
 
 def test_allwyn_arena_like_collision_is_detected_not_deleted():
