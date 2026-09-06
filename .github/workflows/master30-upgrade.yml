@@ -7,6 +7,7 @@ on:
       - 'scripts/master30_core.py'
       - 'scripts/master30_pipeline.py'
       - 'scripts/master30_report_ui.py'
+      - 'scripts/master30_hotfix.py'
       - '.github/workflows/master30-upgrade.yml'
 
 permissions:
@@ -39,18 +40,40 @@ jobs:
           python scripts/master30_core.py
           python scripts/master30_pipeline.py
           python scripts/master30_report_ui.py
+          python scripts/master30_hotfix.py
       - name: Compile
         run: python -m compileall -q app tests
       - name: Full regression suite
-        run: pytest -q
-      - name: Commit tested upgrade
+        id: tests
+        shell: bash
         run: |
-          if git diff --quiet -- app tests; then
+          set +e
+          pytest -q --tb=short > master30-test-output.txt 2>&1
+          code=$?
+          tail -n 250 master30-test-output.txt
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          exit 0
+      - name: Publish regression failure details
+        if: steps.tests.outputs.code != '0'
+        run: |
+          git config user.name 'SIGNALYTH CI'
+          git config user.email 'signalyth-ci@users.noreply.github.com'
+          git add master30-test-output.txt
+          git commit -m 'Capture Master 30 regression failures' || true
+          git pull --rebase --autostash origin main
+          git push origin HEAD:main
+          exit 1
+      - name: Commit tested upgrade
+        if: steps.tests.outputs.code == '0'
+        run: |
+          git config user.name 'SIGNALYTH CI'
+          git config user.email 'signalyth-ci@users.noreply.github.com'
+          git rm -f master30-test-output.txt 2>/dev/null || true
+          if git diff --quiet -- app tests master30-test-output.txt; then
             echo 'No generated changes to commit.'
             exit 0
           fi
-          git config user.name 'SIGNALYTH CI'
-          git config user.email 'signalyth-ci@users.noreply.github.com'
           git add app tests
           git commit -m 'Implement Master 30 research and reporting pipeline'
+          git pull --rebase --autostash origin main
           git push origin HEAD:main
