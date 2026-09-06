@@ -44,7 +44,7 @@ def test_1000_deterministic_random_plans_preserve_hard_invariants():
                     value = sr.input.get(field)
                     if isinstance(value, list):
                         assert 1 <= len(value) <= safe
-        assert plan.preflight_forecast["sample_rule"].startswith("never fill")
+        assert "shared source target" in plan.preflight_forecast["sample_rule"]
         assert plan.preflight_forecast["query_safety"]["client_field_used_for_discovery"] is False
         forbidden = {"greece", "ελλάδα", "ellada", client.casefold()}
         for sp in plan.sources:
