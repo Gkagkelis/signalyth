@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     signalyth_ai_reasoning_input_usd_per_mtok: float = 2.00
     signalyth_ai_reasoning_output_usd_per_mtok: float = 12.00
     signalyth_allow_remote_secret_setup: bool = False
-    model_config = SettingsConfigDict(env_file=(str(BASE_DIR / ".env"), str(LEGACY_SECRETS_FILE), str(PERSISTENT_SECRETS_FILE)), extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=(str(BASE_DIR / ".env"), str(LEGACY_SECRETS_FILE), str(PERSISTENT_SECRETS_FILE)),
+        env_ignore_empty=True,
+        extra="ignore",
+    )
 
 settings = Settings()
