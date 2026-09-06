@@ -306,9 +306,11 @@ def run_actor_resilient(
             actual = actual_cost_from_meta(meta)
             if actual is not None:
                 result.provider_reported_cost_usd += max(0.0, float(actual))
-            # Never silently clamp a provider-reported charge above the hard per-call cap.
-            # That would make the UI look budget-safe even though the upstream provider says otherwise.
-            if actual is not None and float(actual) > attempt_cap + 1e-6:
+            # Apify max_total_charge_usd caps pay-per-event charges. usageTotalUsd may
+            # additionally include platform/runtime usage, so it must not be compared
+            # directly with the smaller event cap for this attempt. We account the real
+            # run total against the logical SIGNALYTH envelope instead.
+            if actual is not None and float(actual) > remaining + 1e-6:
                 result.cost_cap_violation = True
                 result.failure_kinds.append("cost_cap_violation")
                 result.accounted_cost_usd = envelope
@@ -321,10 +323,10 @@ def run_actor_resilient(
                     "diagnostic_rows": len(diagnostics),
                     "provider_reported_cost_usd": round(float(actual), 6),
                     "accounted_cost_usd": round(envelope, 6),
-                    "error": "Provider reported cost above the SIGNALYTH hard per-call cap.",
+                    "error": "Provider-reported total run cost exceeded the SIGNALYTH logical budget envelope.",
                 })
                 break
-            charged = attempt_cap if actual is None else min(remaining, max(0.0, float(actual)))
+            charged = attempt_cap if actual is None else max(0.0, float(actual))
             result.accounted_cost_usd += charged
             result.metas.append(meta)
             result.diagnostics.extend(diagnostics)

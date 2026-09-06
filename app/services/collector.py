@@ -519,7 +519,7 @@ def execute_plan(
                         "logical_max_charge_usd": float(sr.get("max_charge_usd", 0) or 0),
                         "message": "Provider reported a charge above the hard per-call cap. Further paid collection was stopped.",
                     }
-                    status["fatal_error"] = "Provider cost-cap violation detected; paid collection stopped safely."
+                    status["fatal_error"] = "Provider-reported run cost exceeded the allocated SIGNALYTH envelope; paid collection stopped safely."
                 source_status["subruns_completed"] += 1
 
                 # Source-level circuit breaker: a permanently invalid Actor/credential should not
@@ -565,7 +565,7 @@ def execute_plan(
                 )
 
                 if fatal_budget_violation:
-                    sync(f"{source}: provider cost-cap violation; stopping all paid collection", source, code="budget_safety_stop")
+                    sync(f"{source}: provider-reported run cost exceeded the allocated envelope; stopping all paid collection", source, code="budget_safety_stop")
                     break
                 if circuit_open:
                     sync(f"{source}: circuit opened; moving to the next source", source, code="actor_circuit_open")
@@ -602,7 +602,7 @@ def execute_plan(
                     later["status"] = "skipped_cancelled"
             source_status.update({"status": "cancelled_partial", "completed_at": _utcnow()})
         elif fatal_budget_violation:
-            source_status.update({"status": "failed", "error": "Provider cost-cap violation; source stopped safely.", "completed_at": _utcnow()})
+            source_status.update({"status": "failed", "error": "Provider-reported run cost exceeded the allocated SIGNALYTH envelope; source stopped safely.", "completed_at": _utcnow()})
         elif source_level_error:
             source_status.update({"status": "failed", "error": source_level_error, "completed_at": _utcnow()})
         elif data_contract_failure:
@@ -668,7 +668,7 @@ def execute_plan(
                 "remaining_usd": round(guard.remaining, 6),
                 "violation_detected": True,
             }
-            sync("Collection stopped: provider cost-cap violation detected; preserved evidence is not treated as a completed sample", None, "completed", terminal=True, code="budget_safety_failed")
+            sync("Collection stopped: provider-reported run cost exceeded the allocated SIGNALYTH envelope; preserved evidence is not treated as a completed sample", None, "completed", terminal=True, code="budget_safety_failed")
             return status
 
         if cancelled_mid_source:

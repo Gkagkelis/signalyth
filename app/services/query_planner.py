@@ -478,9 +478,19 @@ def build_collection_plan(draft: AnalysisDraft) -> CollectionPlan:
     budget_check = "unknown" if has_unknown else ("within_budget" if known_total <= draft.max_budget_usd else "estimate_over_budget")
 
     # Run caps are a second guard, independent of the estimate. Their total never exceeds the analysis budget.
+    # Apify's run total can include platform/runtime usage in addition to Actor event charges,
+    # so tiny samples need operational headroom instead of micro-cent source envelopes.
     if known_total > 0:
-        cap_pool = min(draft.max_budget_usd, max(known_total, min(draft.max_budget_usd, known_total * 1.25)))
-        source_budgets = {s: cap_pool * ((estimates[s] or 0) / known_total) for s in selected}
+        budget = max(0.0, float(draft.max_budget_usd))
+        if budget <= known_total:
+            source_budgets = {s: budget * ((estimates[s] or 0) / known_total) for s in selected}
+        else:
+            buffered_total = min(budget, known_total * 1.25)
+            source_budgets = {s: buffered_total * ((estimates[s] or 0) / known_total) for s in selected}
+            spare = max(0.0, budget - sum(source_budgets.values()))
+            if selected and spare > 0:
+                overhead_each = spare / len(selected)
+                source_budgets = {s: source_budgets[s] + overhead_each for s in selected}
     else:
         source_budgets = allocate_equal(int(round(draft.max_budget_usd * 10000)), selected)
         source_budgets = {s: v / 10000 for s, v in source_budgets.items()}
