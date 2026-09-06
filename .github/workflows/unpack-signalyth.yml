@@ -10,7 +10,6 @@ permissions:
 
 jobs:
   unpack:
-    if: ${{ hashFiles('SIGNALYTH-v1.8.4-VERCEL-READY.zip') != '' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -21,6 +20,10 @@ jobs:
         run: |
           set -euo pipefail
           ZIP="SIGNALYTH-v1.8.4-VERCEL-READY.zip"
+          if [ ! -f "$ZIP" ]; then
+            echo "Package already unpacked; nothing to do."
+            exit 0
+          fi
           TMP_DIR="$(mktemp -d)"
           unzip -q "$ZIP" -d "$TMP_DIR"
           ROOT="$(find "$TMP_DIR" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
