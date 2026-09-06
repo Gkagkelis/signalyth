@@ -154,8 +154,8 @@ def adaptive_expand_after_cleaning(
         "initial_trusted_shortfall": int(initial_report.get("trusted_sample_shortfall", 0) or 0),
         "steps": [], "warnings": [],
     }
-    if plan.get("search_strategy_version") != "smart-collection-v2":
-        audit["reason"] = "strategy_not_v2"
+    if plan.get("search_strategy_version") not in {"smart-collection-v2", "master30-search-v1"}:
+        audit["reason"] = "strategy_not_supported"
         store.write(folder / "smart-collection-expansion.json", audit)
         return {"report": initial_report, "audit": audit}
 
@@ -193,8 +193,6 @@ def adaptive_expand_after_cleaning(
             audit["warnings"].append(f"{source}:{kind}:budget_exhausted")
             return False
         actor_input = dict(actor_input)
-        # maxItems is a generic Apify call/result cap and is part of all currently
-        # supported deepening candidates. Source-specific discovery fields are left intact.
         actor_input["maxItems"] = min(int(actor_input.get("maxItems") or allowed), allowed)
         cap = _charge_cap(remaining, rate, actor_input["maxItems"])
         if cap <= 0:
@@ -229,8 +227,6 @@ def adaptive_expand_after_cleaning(
             audit["warnings"].append(f"{source}:{kind}:orchestrator_failed:{exc}")
             return False
 
-    # 1) X-specific collision correction. This is optional; non-X runs continue to
-    # multisource deepening instead of exiting early.
     xplan = _x_source_plan(plan)
     if xplan and shortfall > 0:
         actor_id = str(xplan.get("actor_id") or "")
@@ -250,8 +246,6 @@ def adaptive_expand_after_cleaning(
         else:
             audit["warnings"].append("x:adaptive_refinement_blocked_for_unverified_actor_capability")
 
-    # 2) Source-agnostic comment/reply deepening. Every route is fail-closed until
-    # its own live smoke verification is recorded in the registry/preflight.
     if bool(plan.get("comments_requested")) and shortfall > 0:
         forecast_rows = {r.get("source"): r for r in ((plan.get("preflight_forecast") or {}).get("sources") or [])}
         cleaned = store.read(folder / "cleaning" / "cleaned.json", []) or []
@@ -266,7 +260,6 @@ def adaptive_expand_after_cleaning(
             if comment_info.get("status") != "verified_available":
                 audit["warnings"].append(f"{source}:comment_deepening_blocked_until_live_route_verification")
                 if source == "x":
-                    # Backward-compatible audit code retained for existing v2 consumers.
                     audit["warnings"].append("reply_deepening_blocked_until_live_route_verification")
                 continue
             cfg = registry.get(source) or {}
@@ -287,8 +280,6 @@ def adaptive_expand_after_cleaning(
                 continue
             audit.setdefault("comment_seeds", {})[source] = seed_meta
             mapping = cfg.get("comment_output_mapping") or None
-            # Companion Actor pricing is deliberately treated as unknown until its
-            # smoke test; the hard remaining-budget cap still applies.
             rate = sp.get("price_per_1000_hint") if cap.get("mode") == "same_actor" else None
             do_call(source, actor_id, "comment_deepening", inp, wanted, rate, mapping=mapping)
             shortfall = int(report.get("trusted_sample_shortfall", 0) or 0)
