@@ -19,7 +19,7 @@ class CloudPersistence:
     """Persist SIGNALYTH run/config state in Vercel Blob.
 
     The application continues to use its existing filesystem-oriented pipeline in a
-    writable scratch directory.  On Vercel that scratch directory is /tmp; durable
+    writable scratch directory. On Vercel that scratch directory is /tmp; durable
     metadata and run snapshots are mirrored to a private Blob store.
     """
 
@@ -28,7 +28,13 @@ class CloudPersistence:
 
     @property
     def enabled(self) -> bool:
-        return bool(settings.signalyth_cloud_storage and os.getenv("BLOB_READ_WRITE_TOKEN"))
+        # New Vercel Blob project connections use OIDC by default. In that mode
+        # Vercel injects BLOB_STORE_ID and the SDK obtains short-lived credentials
+        # automatically at runtime. Keep supporting BLOB_READ_WRITE_TOKEN for local
+        # development and legacy/static-token connections.
+        has_static_token = bool(os.getenv("BLOB_READ_WRITE_TOKEN"))
+        has_oidc_store = bool(os.getenv("VERCEL") and os.getenv("BLOB_STORE_ID"))
+        return bool(settings.signalyth_cloud_storage and (has_static_token or has_oidc_store))
 
     @property
     def requested(self) -> bool:
@@ -37,8 +43,9 @@ class CloudPersistence:
     def require(self) -> None:
         if self.requested and not self.enabled:
             raise CloudPersistenceError(
-                "Cloud storage is enabled but BLOB_READ_WRITE_TOKEN is missing. "
-                "Connect a private Vercel Blob store to this project."
+                "Cloud storage is enabled but no Vercel Blob connection is available. "
+                "Connect a private Blob store to this project (OIDC/BLOB_STORE_ID) "
+                "or provide BLOB_READ_WRITE_TOKEN."
             )
 
     @staticmethod
