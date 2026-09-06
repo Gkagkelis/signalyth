@@ -25,10 +25,10 @@ SOURCE_TERMINAL = {"succeeded", "succeeded_empty", "partial", "failed", "cancell
 
 
 def _assert_live_sources_verified(plan: dict) -> None:
-    """Fail closed before any paid full collection if a selected Actor is unverified.
+    """Allow shipped default Actors without forcing a separate paid smoke test.
 
-    Actor lookup/schema inspection and tiny paid smoke verification happen through the
-    Connection Manager. A full RUN must never be the first live experiment with an Actor.
+    Built-in locked Actor routes run under the normal budget and resilience guards.
+    Replacement/custom Actors still require verification first.
     """
     if settings.signalyth_dry_run:
         return
@@ -38,11 +38,21 @@ def _assert_live_sources_verified(plan: dict) -> None:
         source = str(sp.get("source") or "")
         actor_id = str(sp.get("actor_id") or "")
         cfg = registry.get(source) or {}
-        if cfg.get("actor_status") != "verified" or str(cfg.get("actor_id") or "") != actor_id:
+        configured_actor = str(cfg.get("actor_id") or "")
+        default_actor = str(cfg.get("default_actor_id") or "")
+        is_shipped_default = bool(
+            cfg.get("locked", False)
+            and actor_id
+            and configured_actor == actor_id
+            and default_actor == actor_id
+            and cfg.get("adapter_mode", "legacy") == "legacy"
+        )
+        is_verified = cfg.get("actor_status") == "verified" and configured_actor == actor_id
+        if not (is_shipped_default or is_verified):
             blocked.append(f"{source}:{actor_id or 'missing-actor'}")
     if blocked:
         raise CollectionNotConfigured(
-            "Live collection blocked: selected source Actors require a successful tiny paid smoke test and verified commit first: "
+            "Live collection blocked: replacement/custom source Actors require verification before paid collection: "
             + ", ".join(blocked)
         )
 
