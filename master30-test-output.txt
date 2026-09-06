@@ -1,280 +1,34 @@
-.....................................................................F.. [ 13%]
-.......F................F.....................FFF....................... [ 27%]
+........................................................................ [ 13%]
+........................F............................................... [ 27%]
 ........................................................................ [ 41%]
-.................................F.F......F..F............F.F........... [ 55%]
-F..F......F.........................s....s...FFFFFFFFFFEEEEEEEEE...FF.FF [ 69%]
-.F...FFFF..........F.........................................FFFF....... [ 83%]
-............................FF..F....................................... [ 97%]
+..................................................F..................... [ 55%]
+....................................s....s.............................. [ 69%]
+.....FFFF..........F.................................................... [ 83%]
+................................F....................................... [ 97%]
 .............                                                            [100%]
-==================================== ERRORS ====================================
-_ ERROR at setup of PresentationAPITests.test_build_exports_endpoint_persists_status _
-tests/test_presentation_api.py:17: in setUpClass
-    assert er.status_code==200, er.text
-E   AssertionError: {"detail":"Presentation/export generation failed safely: Step 8 export QA failed before persistence."}
-E   assert 500 == 200
-E    +  where 500 = <Response [500 Internal Server Error]>.status_code
-_ ERROR at setup of PresentationAPITests.test_download_authorized_export_file __
-tests/test_presentation_api.py:17: in setUpClass
-    assert er.status_code==200, er.text
-E   AssertionError: {"detail":"Presentation/export generation failed safely: Step 8 export QA failed before persistence."}
-E   assert 500 == 200
-E    +  where 500 = <Response [500 Internal Server Error]>.status_code
-_ ERROR at setup of PresentationAPITests.test_export_bundle_contains_required_file_types _
-tests/test_presentation_api.py:17: in setUpClass
-    assert er.status_code==200, er.text
-E   AssertionError: {"detail":"Presentation/export generation failed safely: Step 8 export QA failed before persistence."}
-E   assert 500 == 200
-E    +  where 500 = <Response [500 Internal Server Error]>.status_code
-_ ERROR at setup of PresentationAPITests.test_get_exports_returns_summary_and_manifest _
-tests/test_presentation_api.py:17: in setUpClass
-    assert er.status_code==200, er.text
-E   AssertionError: {"detail":"Presentation/export generation failed safely: Step 8 export QA failed before persistence."}
-E   assert 500 == 200
-E    +  where 500 = <Response [500 Internal Server Error]>.status_code
-________ ERROR at setup of PresentationAPITests.test_health_reports_v13 ________
-tests/test_presentation_api.py:17: in setUpClass
-    assert er.status_code==200, er.text
-E   AssertionError: {"detail":"Presentation/export generation failed safely: Step 8 export QA failed before persistence."}
-E   assert 500 == 200
-E    +  where 500 = <Response [500 Internal Server Error]>.status_code
-_ ERROR at setup of PresentationAPITests.test_path_traversal_export_download_blocked _
-tests/test_presentation_api.py:17: in setUpClass
-    assert er.status_code==200, er.text
-E   AssertionError: {"detail":"Presentation/export generation failed safely: Step 8 export QA failed before persistence."}
-E   assert 500 == 200
-E    +  where 500 = <Response [500 Internal Server Error]>.status_code
-_ ERROR at setup of PresentationAPITests.test_step7_change_makes_exports_stale _
-tests/test_presentation_api.py:17: in setUpClass
-    assert er.status_code==200, er.text
-E   AssertionError: {"detail":"Presentation/export generation failed safely: Step 8 export QA failed before persistence."}
-E   assert 500 == 200
-E    +  where 500 = <Response [500 Internal Server Error]>.status_code
-_______ ERROR at setup of PresentationAPITests.test_step8_requires_step7 _______
-tests/test_presentation_api.py:17: in setUpClass
-    assert er.status_code==200, er.text
-E   AssertionError: {"detail":"Presentation/export generation failed safely: Step 8 export QA failed before persistence."}
-E   assert 500 == 200
-E    +  where 500 = <Response [500 Internal Server Error]>.status_code
-__ ERROR at setup of PresentationAPITests.test_unknown_run_export_returns_404 __
-tests/test_presentation_api.py:17: in setUpClass
-    assert er.status_code==200, er.text
-E   AssertionError: {"detail":"Presentation/export generation failed safely: Step 8 export QA failed before persistence."}
-E   assert 500 == 200
-E    +  where 500 = <Response [500 Internal Server Error]>.status_code
 =================================== FAILURES ===================================
-___________ CleaningTests.test_known_irrelevant_context_is_excluded ____________
-tests/test_cleaning.py:77: in test_known_irrelevant_context_is_excluded
-    self.assertEqual(c["decision"], "excluded")
-E   AssertionError: 'review' != 'excluded'
-E   - review
-E   + excluded
-_____________ CleaningTests.test_randomized_mixed_noise_invariants _____________
-tests/test_cleaning.py:367: in test_randomized_mixed_noise_invariants
-    self.assertEqual(len(result['cleaned']), len(result['trusted']) + len(result['review_queue']) + len(result['excluded']))
-E   AssertionError: 42 != 76
 ________ test_1000_deterministic_random_plans_preserve_hard_invariants _________
-tests/test_collection_fuzz_v182.py:46: in test_1000_deterministic_random_plans_preserve_hard_invariants
-    assert 1 <= len(value) <= safe
-E   AssertionError: assert 3 <= 2
-E    +  where 3 = len(['Brand X', 'Brand X primary', 'Brand X δευτερεύον'])
-____ test_generic_array_query_is_safely_batched_and_keeps_all_mapped_fields ____
-tests/test_generic_actor_v18.py:22: in test_generic_array_query_is_safely_batched_and_keeps_all_mapped_fields
-    assert len(p.subruns)==2
-E   AssertionError: assert 1 == 2
-E    +  where 1 = len([SubRunPlan(actor_id='owner/new', input={'queries': 'Vodafone Internet', 'limit': 12}, target_items=12, max_charge_usd...tetime.date(2026, 8, 31), purpose='primary_discovery', resilience_policy='adaptive-isolation-v1', max_attempt_calls=2)])
-E    +    where [SubRunPlan(actor_id='owner/new', input={'queries': 'Vodafone Internet', 'limit': 12}, target_items=12, max_charge_usd...tetime.date(2026, 8, 31), purpose='primary_discovery', resilience_policy='adaptive-isolation-v1', max_attempt_calls=2)] = SourcePlan(source='x', actor_id='owner/new', target_items=12, estimated_cost_usd=None, price_per_1000_hint=1.0, date_s..._to': '2026-08-31', 'strategy': 'balanced_smart'}], source_budget_usd=1.0, source_contract_version='actor-contract-v3').subruns
-_____ test_generic_string_query_splits_subruns_without_overshooting_target _____
-tests/test_generic_actor_v18.py:39: in test_generic_string_query_splits_subruns_without_overshooting_target
-    assert len(p.subruns)==3
-E   AssertionError: assert 1 == 3
-E    +  where 1 = len([SubRunPlan(actor_id='owner/new', input={'query': 'Vodafone Internet', 'maxResults': 10}, target_items=10, max_charge_...tetime.date(2026, 8, 31), purpose='primary_discovery', resilience_policy='adaptive-isolation-v1', max_attempt_calls=2)])
-E    +    where [SubRunPlan(actor_id='owner/new', input={'query': 'Vodafone Internet', 'maxResults': 10}, target_items=10, max_charge_...tetime.date(2026, 8, 31), purpose='primary_discovery', resilience_policy='adaptive-isolation-v1', max_attempt_calls=2)] = SourcePlan(source='x', actor_id='owner/new', target_items=10, estimated_cost_usd=None, price_per_1000_hint=1.0, date_s..._to': '2026-08-31', 'strategy': 'balanced_smart'}], source_budget_usd=1.0, source_contract_version='actor-contract-v3').subruns
-______________ test_instagram_generic_url_only_actor_is_supported ______________
-tests/test_generic_actor_v18.py:52: in test_instagram_generic_url_only_actor_is_supported
-    assert all("instagram.com/explore/tags" in x for x in p.subruns[0].input["startUrls"])
-E   assert False
-E    +  where False = all(<generator object test_instagram_generic_url_only_actor_is_supported.<locals>.<genexpr> at 0x7f7a8f7e1970>)
-_ LifecycleTests.test_live_pipeline_can_continue_from_cleaning_into_ai_without_exposing_false_completion _
-tests/test_lifecycle.py:254: in test_live_pipeline_can_continue_from_cleaning_into_ai_without_exposing_false_completion
-    self.assertEqual(done['status'], 'succeeded')
-E   AssertionError: 'failed' != 'succeeded'
-E   - failed
-E   + succeeded
-_ LifecycleTests.test_pipeline_does_not_expose_terminal_before_investigations __
-tests/test_lifecycle.py:333: in test_pipeline_does_not_expose_terminal_before_investigations
-    self.assertEqual(done['phase'],'visualizations_ready')
-E   AssertionError: 'exports_failed' != 'visualizations_ready'
-E   - exports_failed
-E   + visualizations_ready
-_ Step7LifecycleTests.test_pipeline_stays_running_until_visualizations_finish __
-tests/test_lifecycle.py:410: in test_pipeline_stays_running_until_visualizations_finish
-    self.assertEqual(done['status'],'succeeded'); self.assertEqual(done['phase'],'visualizations_ready'); self.assertEqual(done['current']['code'],'visualizations_completed')
-    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-E   AssertionError: 'failed' != 'succeeded'
-E   - failed
-E   + succeeded
-_______________ test_home_template_uses_explicit_request_keyword _______________
-tests/test_local_launch_regression_v1841.py:6: in test_home_template_uses_explicit_request_keyword
-    assert 'TemplateResponse(request=request, name="index.html", context={})' in text
-E   assert 'TemplateResponse(request=request, name="index.html", context={})' in 'from __future__ import annotations\n\nfrom contextlib import asynccontextmanager\nfrom datetime import datetime, time...se HTTPException(status_code=404, detail="Export file not found")\n    return FileResponse(path, filename=path.name)\n'
-_______ test_all_63_source_combinations_have_budget_safe_isolated_plans ________
-tests/test_multisource_matrix_v182.py:49: in test_all_63_source_combinations_have_budget_safe_isolated_plans
-    assert len(value) <= SAFE[sp.source]
-E   AssertionError: assert 9 <= 2
-E    +  where 9 = len(['Allwyn', 'Allwyn Allwyn', 'Allwyn OPAP', 'Allwyn (Greece OR Ελλάδα OR Ellada) -filter:nativeretweets', 'Allwyn (OPAP...ηση OR θετικό OR αρνητικό OR εμπιστοσύνη OR παράπονο OR αμφισβήτηση OR opinion OR review) -filter:nativeretweets', ...])
-_________ test_comments_forecast_never_claims_unverified_full_coverage _________
-tests/test_multisource_matrix_v182.py:68: in test_comments_forecast_never_claims_unverified_full_coverage
-    cc = plan.preflight_forecast["comments_coverage"]
-         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-E   KeyError: 'comments_coverage'
-_ test_repeated_transient_failures_open_source_circuit_and_skip_remaining_batches _
-tests/test_multisource_torture_v182.py:110: in test_repeated_transient_failures_open_source_circuit_and_skip_remaining_batches
-    assert len(plan["sources"][0]["subruns"]) >= 3
-E   AssertionError: assert 1 >= 3
-E    +  where 1 = len([{'actor_id': 'xquik/x-tweet-scraper', 'input': {'mode': 'search', 'searchTerms': ['Allwyn', 'Allwyn Allwyn', 'Allwyn ...retweets', ...], 'maxItems': 1000, 'includeSearchTerms': True, ...}, 'target_items': 1000, 'max_charge_usd': 0.7, ...}])
-______ test_budget_guard_rejects_provider_report_above_reserved_call_cap _______
-tests/test_multisource_torture_v182.py:188: in test_budget_guard_rejects_provider_report_above_reserved_call_cap
-    with pytest.raises(RuntimeError, match="per-call hard cap"):
-         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-E   Failed: DID NOT RAISE RuntimeError
-__ PlannerTests.test_greece_context_and_context_greeklish_are_topic_anchored ___
-tests/test_planner.py:22: in test_greece_context_and_context_greeklish_are_topic_anchored
-    self.assertIn("OPAP",[v.upper() for v in p.context_terms])
-E   AssertionError: 'OPAP' not found in ['EUROJACKPOT', 'ΟΠΑΠ', 'GREECE', 'ΕΛΛΆΔΑ', 'ELLADA']
-_______ ExportBundleTests.test_allowed_export_file_blocks_path_traversal _______
-tests/test_presentation.py:200: in test_allowed_export_file_blocks_path_traversal
-    self._build();self.assertIsNone(allowed_export_file(self.tmp,'../plan.json'));self.assertIsNone(allowed_export_file(self.tmp,'not-in-manifest.txt'))
-    ^^^^^^^^^^^^^
-tests/test_presentation.py:182: in _build
-    return build_exports(self.tmp,plan(),force=force)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-app/services/presentation.py:1165: in build_exports
-    raise RuntimeError("Step 8 export QA failed before persistence.")
-E   RuntimeError: Step 8 export QA failed before persistence.
-____ ExportBundleTests.test_bundle_generates_pptx_docx_and_evidence_exports ____
-tests/test_presentation.py:185: in test_bundle_generates_pptx_docx_and_evidence_exports
-    s=self._build();self.assertGreaterEqual(s['slide_count'],7);names=set(s['files']);self.assertTrue(any(x.endswith('.pptx') for x in names));self.assertTrue(any(x.endswith('.docx') for x in names));self.assertTrue(any(x.endswith('_Evidence.json') for x in names));self.assertTrue(any(x.endswith('_Evidence.csv') for x in names))
-      ^^^^^^^^^^^^^
-tests/test_presentation.py:182: in _build
-    return build_exports(self.tmp,plan(),force=force)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-app/services/presentation.py:1165: in build_exports
-    raise RuntimeError("Step 8 export QA failed before persistence.")
-E   RuntimeError: Step 8 export QA failed before persistence.
-____ ExportBundleTests.test_bundle_summary_has_complete_indicator_contract _____
-tests/test_presentation.py:215: in test_bundle_summary_has_complete_indicator_contract
-    s=self._build();self.assertEqual(s['indicator_contract']['required'],25);self.assertEqual(s['indicator_contract']['examined'],25);self.assertTrue(s['indicator_contract']['complete'])
-      ^^^^^^^^^^^^^
-tests/test_presentation.py:182: in _build
-    return build_exports(self.tmp,plan(),force=force)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-app/services/presentation.py:1165: in build_exports
-    raise RuntimeError("Step 8 export QA failed before persistence.")
-E   RuntimeError: Step 8 export QA failed before persistence.
-________ ExportBundleTests.test_evidence_export_keeps_record_id_and_url ________
-tests/test_presentation.py:197: in test_evidence_export_keeps_record_id_and_url
-    self._build();p=next((self.tmp/'exports').glob('*_Evidence.json'));rows=json.loads(p.read_text());self.assertEqual(rows[0]['record_id'],'r1');self.assertEqual(rows[0]['url'],'https://x/1')
-    ^^^^^^^^^^^^^
-tests/test_presentation.py:182: in _build
-    return build_exports(self.tmp,plan(),force=force)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-app/services/presentation.py:1165: in build_exports
-    raise RuntimeError("Step 8 export QA failed before persistence.")
-E   RuntimeError: Step 8 export QA failed before persistence.
-__________ ExportBundleTests.test_force_rebuild_keeps_same_input_hash __________
-tests/test_presentation.py:206: in test_force_rebuild_keeps_same_input_hash
-    a=self._build();b=self._build(force=True);self.assertEqual(a['input_hash'],b['input_hash'])
-      ^^^^^^^^^^^^^
-tests/test_presentation.py:182: in _build
-    return build_exports(self.tmp,plan(),force=force)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-app/services/presentation.py:1165: in build_exports
-    raise RuntimeError("Step 8 export QA failed before persistence.")
-E   RuntimeError: Step 8 export QA failed before persistence.
-_ ExportBundleTests.test_idempotent_build_reuses_same_summary_when_input_unchanged _
-tests/test_presentation.py:203: in test_idempotent_build_reuses_same_summary_when_input_unchanged
-    a=self._build();b=self._build();self.assertEqual(a['input_hash'],b['input_hash']);self.assertEqual(a['generated_at'],b['generated_at'])
-      ^^^^^^^^^^^^^
-tests/test_presentation.py:182: in _build
-    return build_exports(self.tmp,plan(),force=force)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-app/services/presentation.py:1165: in build_exports
-    raise RuntimeError("Step 8 export QA failed before persistence.")
-E   RuntimeError: Step 8 export QA failed before persistence.
-__ ExportBundleTests.test_load_export_summary_marks_changed_visual_pack_stale __
-tests/test_presentation.py:209: in test_load_export_summary_marks_changed_visual_pack_stale
-    self._build();changed=copy.deepcopy(self.v);changed['chart_specs'][0]['priority']=1
-    ^^^^^^^^^^^^^
-tests/test_presentation.py:182: in _build
-    return build_exports(self.tmp,plan(),force=force)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-app/services/presentation.py:1165: in build_exports
-    raise RuntimeError("Step 8 export QA failed before persistence.")
-E   RuntimeError: Step 8 export QA failed before persistence.
-______________ ExportBundleTests.test_manifest_hashes_match_files ______________
-tests/test_presentation.py:189: in test_manifest_hashes_match_files
-    self._build();m=json.loads((self.tmp/'exports'/'manifest.json').read_text())
-    ^^^^^^^^^^^^^
-tests/test_presentation.py:182: in _build
-    return build_exports(self.tmp,plan(),force=force)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-app/services/presentation.py:1165: in build_exports
-    raise RuntimeError("Step 8 export QA failed before persistence.")
-E   RuntimeError: Step 8 export QA failed before persistence.
-___________ ExportBundleTests.test_no_raw_evidence_file_is_modified ____________
-tests/test_presentation.py:218: in test_no_raw_evidence_file_is_modified
-    original=copy.deepcopy(self.e);self._build();self.assertEqual(self.e,original)
-                                   ^^^^^^^^^^^^^
-tests/test_presentation.py:182: in _build
-    return build_exports(self.tmp,plan(),force=force)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-app/services/presentation.py:1165: in build_exports
-    raise RuntimeError("Step 8 export QA failed before persistence.")
-E   RuntimeError: Step 8 export QA failed before persistence.
-_____________ ExportBundleTests.test_qa_requires_all_25_indicators _____________
-tests/test_presentation.py:194: in test_qa_requires_all_25_indicators
-    self._build();q=json.loads((self.tmp/'exports'/'qa.json').read_text());self.assertTrue(q['indicator_review_complete']);self.assertTrue(q['native_editable_chart_contract'])
-    ^^^^^^^^^^^^^
-tests/test_presentation.py:182: in _build
-    return build_exports(self.tmp,plan(),force=force)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-app/services/presentation.py:1165: in build_exports
-    raise RuntimeError("Step 8 export QA failed before persistence.")
-E   RuntimeError: Step 8 export QA failed before persistence.
-___________ test_market_suffix_is_canonicalized_for_non_x_discovery ____________
-tests/test_query_safety_v183.py:67: in test_market_suffix_is_canonicalized_for_non_x_discovery
-    assert any(q.casefold() == "allwyn greece" for q in sp.queries)
-E   assert False
-E    +  where False = any(<generator object test_market_suffix_is_canonicalized_for_non_x_discovery.<locals>.<genexpr> at 0x7f7a878f1be0>)
-______ test_parent_brand_keyword_does_not_waste_a_redundant_query_bucket _______
-tests/test_query_safety_v183.py:73: in test_parent_brand_keyword_does_not_waste_a_redundant_query_bucket
-    assert "Vodafone" not in plan.context_terms
-E   AssertionError: assert 'Vodafone' not in ['Vodafone Internet', 'Vodafone', 'Greece', 'Ελλάδα', 'Ellada']
-E    +  where ['Vodafone Internet', 'Vodafone', 'Greece', 'Ελλάδα', 'Ellada'] = CollectionPlan(client='Agency Example', topic='Vodafone Internet', market='Greece', date_from=datetime.date(2026, 8, 1...', 'strategy': 'balanced_smart'}], source_budget_usd=1.1013215859030836, source_contract_version='actor-contract-v3')]).context_terms
-_________ test_allwyn_context_remains_explicit_and_x_is_batched_safely _________
-tests/test_query_safety_v183.py:101: in test_allwyn_context_remains_explicit_and_x_is_batched_safely
-    assert all(len(sr.input.get("searchTerms", [])) <= 2 for sr in sp.subruns)
-E   assert False
-E    +  where False = all(<generator object test_allwyn_context_remains_explicit_and_x_is_batched_safely.<locals>.<genexpr> at 0x7f7a87b9e200>)
-____________ test_query_safety_holds_for_all_63_source_combinations ____________
-tests/test_query_safety_v183.py:113: in test_query_safety_holds_for_all_63_source_combinations
-    assert plan.preflight_forecast["query_safety"]["market_only_queries_allowed"] is False
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-E   KeyError: 'market_only_queries_allowed'
-______________ test_x_intents_are_entity_agnostic_for_person_case ______________
-tests/test_query_safety_v183.py:155: in test_x_intents_are_entity_agnostic_for_person_case
-    assert "media" in blob or "είδηση" in blob
-E   assert ('media' in 'αλέξησ τσίπρασ\nalexis tsipras\nαλέξησ τσίπρασ αλέξησ τσίπρασ\nαλέξησ τσίπρασ alexis tsipras\n"αλέξησ τσίπρασ" (greec... or χορηγία or καμπάνια or εκδήλωση or λανσάρισμα or αποτελέσματα or announcement or statement) -filter:nativeretweets' or 'είδηση' in 'αλέξησ τσίπρασ\nalexis tsipras\nαλέξησ τσίπρασ αλέξησ τσίπρασ\nαλέξησ τσίπρασ alexis tsipras\n"αλέξησ τσίπρασ" (greec... or χορηγία or καμπάνια or εκδήλωση or λανσάρισμα or αποτελέσματα or announcement or statement) -filter:nativeretweets')
+tests/test_collection_fuzz_v182.py:47: in test_1000_deterministic_random_plans_preserve_hard_invariants
+    assert plan.preflight_forecast["sample_rule"].startswith("never fill")
+E   AssertionError: assert False
+E    +  where False = <built-in method startswith of str object at 0x7fb4abfe2650>('never fill')
+E    +    where <built-in method startswith of str object at 0x7fb4abfe2650> = 'shared source target; every route can refill the same target until target, source exhaustion, relevance floor or budget'.startswith
+___________ test_topic_only_is_valid_and_facebook_uses_whole_target ____________
+tests/test_master30_contract.py:17: in test_topic_only_is_valid_and_facebook_uses_whole_target
+    assert len(fb.subruns)==1 and fb.subruns[0].target_items==50
+E   AssertionError: assert (2 == 1)
+E    +  where 2 = len([SubRunPlan(actor_id='scraper_one/facebook-posts-search', input={'query': 'Αλέξης Τσίπρας', 'resultsCount': 25, 'searc...one, post_filter_to=None, purpose='primary_context_2', resilience_policy='adaptive-isolation-v1', max_attempt_calls=2)])
+E    +    where [SubRunPlan(actor_id='scraper_one/facebook-posts-search', input={'query': 'Αλέξης Τσίπρας', 'resultsCount': 25, 'searc...one, post_filter_to=None, purpose='primary_context_2', resilience_policy='adaptive-isolation-v1', max_attempt_calls=2)] = SourcePlan(source='facebook', actor_id='scraper_one/facebook-posts-search', target_items=50, estimated_cost_usd=0.1245...09-04', 'strategy': 'topic_first'}], source_budget_usd=0.5418933623503809, source_contract_version='actor-contract-v3').subruns
 ________ test_adaptive_refinement_splits_dominant_context_and_recleans _________
 tests/test_relevance_expansion_v2.py:75: in test_adaptive_refinement_splits_dominant_context_and_recleans
     assert runner.calls and runner.calls[0][1]["mode"] == "search"
 E   assert ([])
-E    +  where [] = <test_relevance_expansion_v2.FakeRunner object at 0x7f7a8d09c770>.calls
+E    +  where [] = <test_relevance_expansion_v2.FakeRunner object at 0x7fb4a222edb0>.calls
 _________ test_reply_deepening_runs_when_comments_on_and_no_collision __________
 tests/test_relevance_expansion_v2.py:95: in test_reply_deepening_runs_when_comments_on_and_no_collision
     assert runner.calls and runner.calls[0][1]["mode"] == "replies"
 E   assert ([])
-E    +  where [] = <test_relevance_expansion_v2.FakeRunner object at 0x7f7a8786ce60>.calls
+E    +  where [] = <test_relevance_expansion_v2.FakeRunner object at 0x7fb4a9fc8cb0>.calls
 ____________ test_adaptive_expansion_never_exceeds_remaining_budget ____________
 tests/test_relevance_expansion_v2.py:110: in test_adaptive_expansion_never_exceeds_remaining_budget
     assert runner.calls[0][2] <= 6
@@ -285,40 +39,10 @@ tests/test_relevance_expansion_v2.py:120: in test_reply_deepening_is_blocked_unt
     assert "reply_deepening_blocked_until_live_route_verification" in result["audit"]["warnings"]
 E   AssertionError: assert 'reply_deepening_blocked_until_live_route_verification' in []
 ___________ test_x_v2_uses_balanced_intents_and_current_actor_fields ___________
-tests/test_smart_collection_v2.py:32: in test_x_v2_uses_balanced_intents_and_current_actor_fields
-    assert len(sp.subruns) >= 3
-E   AssertionError: assert 1 >= 3
-E    +  where 1 = len([SubRunPlan(actor_id='xquik/x-tweet-scraper', input={'mode': 'search', 'searchTerms': ['Allwyn', 'Allwyn Allwyn', 'All...=datetime.date(2026, 8, 31), purpose='primary_global', resilience_policy='adaptive-isolation-v1', max_attempt_calls=2)])
-E    +    where [SubRunPlan(actor_id='xquik/x-tweet-scraper', input={'mode': 'search', 'searchTerms': ['Allwyn', 'Allwyn Allwyn', 'All...=datetime.date(2026, 8, 31), purpose='primary_global', resilience_policy='adaptive-isolation-v1', max_attempt_calls=2)] = SourcePlan(source='x', actor_id='xquik/x-tweet-scraper', target_items=500, estimated_cost_usd=0.075, price_per_1000_hi..._to': '2026-08-31', 'strategy': 'balanced_smart'}], source_budget_usd=2.0, source_contract_version='actor-contract-v3').subruns
-____________ test_ultra_tiny_global_budget_is_never_inflated[0.001] ____________
-tests/test_v184_hardening.py:34: in test_ultra_tiny_global_budget_is_never_inflated
-    assert caps <= budget + 1e-12
-E   assert 0.0042 <= (0.001 + 1e-12)
-___________ test_ultra_tiny_global_budget_is_never_inflated[0.0001] ____________
-tests/test_v184_hardening.py:34: in test_ultra_tiny_global_budget_is_never_inflated
-    assert caps <= budget + 1e-12
-E   assert 0.0042 <= (0.0001 + 1e-12)
-____________ test_ultra_tiny_global_budget_is_never_inflated[1e-05] ____________
-tests/test_v184_hardening.py:34: in test_ultra_tiny_global_budget_is_never_inflated
-    assert caps <= budget + 1e-12
-E   assert 0.0042 <= (1e-05 + 1e-12)
-____________ test_ultra_tiny_global_budget_is_never_inflated[1e-06] ____________
-tests/test_v184_hardening.py:34: in test_ultra_tiny_global_budget_is_never_inflated
-    assert caps <= budget + 1e-12
-E   assert 0.0042 <= (1e-06 + 1e-12)
-_ test_default_actor_subrun_inputs_have_capacity_for_logical_targets[3000-news] _
-tests/test_v184_hardening.py:127: in test_default_actor_subrun_inputs_have_capacity_for_logical_targets
-    assert cap is not None and cap >= sr.target_items, (source, target, sr.target_items, sr.input)
-E   AssertionError: ('news', 3000, 3000, {'queries': ['Allwyn', 'Allwyn Allwyn', 'Allwyn OPAP', 'Allwyn νέα', 'Allwyn ανακοίνωση'], 'language': 'el', 'country': 'GR', 'maxArticles': 500, ...})
-E   assert (2500 is not None and 2500 >= 3000)
-E    +  where 3000 = SubRunPlan(actor_id='logiover/google-news-scraper', input={'queries': ['Allwyn', 'Allwyn Allwyn', 'Allwyn OPAP', 'Allw...om=None, post_filter_to=None, purpose='primary_global', resilience_policy='adaptive-isolation-v1', max_attempt_calls=2).target_items
-___ test_live_full_collection_is_blocked_until_selected_actors_are_verified ____
-tests/test_v184_safety_final.py:71: in test_live_full_collection_is_blocked_until_selected_actors_are_verified
-    with pytest.raises(CollectionNotConfigured, match="tiny paid smoke test"):
-         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-E   AssertionError: Regex pattern did not match.
-E     Expected regex: 'tiny paid smoke test'
-E     Actual message: 'Live collection blocked: replacement/custom source Actors require verification before paid collection: x:xquik/x-tweet-scraper'
+tests/test_smart_collection_v2.py:33: in test_x_v2_uses_balanced_intents_and_current_actor_fields
+    assert all(sr.purpose.startswith("balanced_intent_discovery_batch_") for sr in sp.subruns)
+E   assert False
+E    +  where False = all(<generator object test_x_v2_uses_balanced_intents_and_current_actor_fields.<locals>.<genexpr> at 0x7fb4a224e9b0>)
 _ test_provider_cost_cap_violation_stops_all_later_paid_sources_and_preserves_evidence _
 tests/test_v184_safety_final.py:123: in test_provider_cost_cap_violation_stops_all_later_paid_sources_and_preserves_evidence
     assert status["status"] == "failed"
@@ -333,103 +57,22 @@ E     + succeeded
 
 -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
 =========================== short test summary info ============================
-FAILED tests/test_cleaning.py::CleaningTests::test_known_irrelevant_context_is_excluded - AssertionError: 'review' != 'excluded'
-- review
-+ excluded
-FAILED tests/test_cleaning.py::CleaningTests::test_randomized_mixed_noise_invariants - AssertionError: 42 != 76
-FAILED tests/test_collection_fuzz_v182.py::test_1000_deterministic_random_plans_preserve_hard_invariants - AssertionError: assert 3 <= 2
- +  where 3 = len(['Brand X', 'Brand X primary', 'Brand X δευτερεύον'])
-FAILED tests/test_generic_actor_v18.py::test_generic_array_query_is_safely_batched_and_keeps_all_mapped_fields - AssertionError: assert 1 == 2
- +  where 1 = len([SubRunPlan(actor_id='owner/new', input={'queries': 'Vodafone Internet', 'limit': 12}, target_items=12, max_charge_usd...tetime.date(2026, 8, 31), purpose='primary_discovery', resilience_policy='adaptive-isolation-v1', max_attempt_calls=2)])
- +    where [SubRunPlan(actor_id='owner/new', input={'queries': 'Vodafone Internet', 'limit': 12}, target_items=12, max_charge_usd...tetime.date(2026, 8, 31), purpose='primary_discovery', resilience_policy='adaptive-isolation-v1', max_attempt_calls=2)] = SourcePlan(source='x', actor_id='owner/new', target_items=12, estimated_cost_usd=None, price_per_1000_hint=1.0, date_s..._to': '2026-08-31', 'strategy': 'balanced_smart'}], source_budget_usd=1.0, source_contract_version='actor-contract-v3').subruns
-FAILED tests/test_generic_actor_v18.py::test_generic_string_query_splits_subruns_without_overshooting_target - AssertionError: assert 1 == 3
- +  where 1 = len([SubRunPlan(actor_id='owner/new', input={'query': 'Vodafone Internet', 'maxResults': 10}, target_items=10, max_charge_...tetime.date(2026, 8, 31), purpose='primary_discovery', resilience_policy='adaptive-isolation-v1', max_attempt_calls=2)])
- +    where [SubRunPlan(actor_id='owner/new', input={'query': 'Vodafone Internet', 'maxResults': 10}, target_items=10, max_charge_...tetime.date(2026, 8, 31), purpose='primary_discovery', resilience_policy='adaptive-isolation-v1', max_attempt_calls=2)] = SourcePlan(source='x', actor_id='owner/new', target_items=10, estimated_cost_usd=None, price_per_1000_hint=1.0, date_s..._to': '2026-08-31', 'strategy': 'balanced_smart'}], source_budget_usd=1.0, source_contract_version='actor-contract-v3').subruns
-FAILED tests/test_generic_actor_v18.py::test_instagram_generic_url_only_actor_is_supported - assert False
- +  where False = all(<generator object test_instagram_generic_url_only_actor_is_supported.<locals>.<genexpr> at 0x7f7a8f7e1970>)
-FAILED tests/test_lifecycle.py::LifecycleTests::test_live_pipeline_can_continue_from_cleaning_into_ai_without_exposing_false_completion - AssertionError: 'failed' != 'succeeded'
-- failed
-+ succeeded
-FAILED tests/test_lifecycle.py::LifecycleTests::test_pipeline_does_not_expose_terminal_before_investigations - AssertionError: 'exports_failed' != 'visualizations_ready'
-- exports_failed
-+ visualizations_ready
-FAILED tests/test_lifecycle.py::Step7LifecycleTests::test_pipeline_stays_running_until_visualizations_finish - AssertionError: 'failed' != 'succeeded'
-- failed
-+ succeeded
-FAILED tests/test_local_launch_regression_v1841.py::test_home_template_uses_explicit_request_keyword - assert 'TemplateResponse(request=request, name="index.html", context={})' in 'from __future__ import annotations\n\nfrom contextlib import asynccontextmanager\nfrom datetime import datetime, time...se HTTPException(status_code=404, detail="Export file not found")\n    return FileResponse(path, filename=path.name)\n'
-FAILED tests/test_multisource_matrix_v182.py::test_all_63_source_combinations_have_budget_safe_isolated_plans - AssertionError: assert 9 <= 2
- +  where 9 = len(['Allwyn', 'Allwyn Allwyn', 'Allwyn OPAP', 'Allwyn (Greece OR Ελλάδα OR Ellada) -filter:nativeretweets', 'Allwyn (OPAP...ηση OR θετικό OR αρνητικό OR εμπιστοσύνη OR παράπονο OR αμφισβήτηση OR opinion OR review) -filter:nativeretweets', ...])
-FAILED tests/test_multisource_matrix_v182.py::test_comments_forecast_never_claims_unverified_full_coverage - KeyError: 'comments_coverage'
-FAILED tests/test_multisource_torture_v182.py::test_repeated_transient_failures_open_source_circuit_and_skip_remaining_batches - AssertionError: assert 1 >= 3
- +  where 1 = len([{'actor_id': 'xquik/x-tweet-scraper', 'input': {'mode': 'search', 'searchTerms': ['Allwyn', 'Allwyn Allwyn', 'Allwyn ...retweets', ...], 'maxItems': 1000, 'includeSearchTerms': True, ...}, 'target_items': 1000, 'max_charge_usd': 0.7, ...}])
-FAILED tests/test_multisource_torture_v182.py::test_budget_guard_rejects_provider_report_above_reserved_call_cap - Failed: DID NOT RAISE RuntimeError
-FAILED tests/test_planner.py::PlannerTests::test_greece_context_and_context_greeklish_are_topic_anchored - AssertionError: 'OPAP' not found in ['EUROJACKPOT', 'ΟΠΑΠ', 'GREECE', 'ΕΛΛΆΔΑ', 'ELLADA']
-FAILED tests/test_presentation.py::ExportBundleTests::test_allowed_export_file_blocks_path_traversal - RuntimeError: Step 8 export QA failed before persistence.
-FAILED tests/test_presentation.py::ExportBundleTests::test_bundle_generates_pptx_docx_and_evidence_exports - RuntimeError: Step 8 export QA failed before persistence.
-FAILED tests/test_presentation.py::ExportBundleTests::test_bundle_summary_has_complete_indicator_contract - RuntimeError: Step 8 export QA failed before persistence.
-FAILED tests/test_presentation.py::ExportBundleTests::test_evidence_export_keeps_record_id_and_url - RuntimeError: Step 8 export QA failed before persistence.
-FAILED tests/test_presentation.py::ExportBundleTests::test_force_rebuild_keeps_same_input_hash - RuntimeError: Step 8 export QA failed before persistence.
-FAILED tests/test_presentation.py::ExportBundleTests::test_idempotent_build_reuses_same_summary_when_input_unchanged - RuntimeError: Step 8 export QA failed before persistence.
-FAILED tests/test_presentation.py::ExportBundleTests::test_load_export_summary_marks_changed_visual_pack_stale - RuntimeError: Step 8 export QA failed before persistence.
-FAILED tests/test_presentation.py::ExportBundleTests::test_manifest_hashes_match_files - RuntimeError: Step 8 export QA failed before persistence.
-FAILED tests/test_presentation.py::ExportBundleTests::test_no_raw_evidence_file_is_modified - RuntimeError: Step 8 export QA failed before persistence.
-FAILED tests/test_presentation.py::ExportBundleTests::test_qa_requires_all_25_indicators - RuntimeError: Step 8 export QA failed before persistence.
-FAILED tests/test_query_safety_v183.py::test_market_suffix_is_canonicalized_for_non_x_discovery - assert False
- +  where False = any(<generator object test_market_suffix_is_canonicalized_for_non_x_discovery.<locals>.<genexpr> at 0x7f7a878f1be0>)
-FAILED tests/test_query_safety_v183.py::test_parent_brand_keyword_does_not_waste_a_redundant_query_bucket - AssertionError: assert 'Vodafone' not in ['Vodafone Internet', 'Vodafone', 'Greece', 'Ελλάδα', 'Ellada']
- +  where ['Vodafone Internet', 'Vodafone', 'Greece', 'Ελλάδα', 'Ellada'] = CollectionPlan(client='Agency Example', topic='Vodafone Internet', market='Greece', date_from=datetime.date(2026, 8, 1...', 'strategy': 'balanced_smart'}], source_budget_usd=1.1013215859030836, source_contract_version='actor-contract-v3')]).context_terms
-FAILED tests/test_query_safety_v183.py::test_allwyn_context_remains_explicit_and_x_is_batched_safely - assert False
- +  where False = all(<generator object test_allwyn_context_remains_explicit_and_x_is_batched_safely.<locals>.<genexpr> at 0x7f7a87b9e200>)
-FAILED tests/test_query_safety_v183.py::test_query_safety_holds_for_all_63_source_combinations - KeyError: 'market_only_queries_allowed'
-FAILED tests/test_query_safety_v183.py::test_x_intents_are_entity_agnostic_for_person_case - assert ('media' in 'αλέξησ τσίπρασ\nalexis tsipras\nαλέξησ τσίπρασ αλέξησ τσίπρασ\nαλέξησ τσίπρασ alexis tsipras\n"αλέξησ τσίπρασ" (greec... or χορηγία or καμπάνια or εκδήλωση or λανσάρισμα or αποτελέσματα or announcement or statement) -filter:nativeretweets' or 'είδηση' in 'αλέξησ τσίπρασ\nalexis tsipras\nαλέξησ τσίπρασ αλέξησ τσίπρασ\nαλέξησ τσίπρασ alexis tsipras\n"αλέξησ τσίπρασ" (greec... or χορηγία or καμπάνια or εκδήλωση or λανσάρισμα or αποτελέσματα or announcement or statement) -filter:nativeretweets')
+FAILED tests/test_collection_fuzz_v182.py::test_1000_deterministic_random_plans_preserve_hard_invariants - AssertionError: assert False
+ +  where False = <built-in method startswith of str object at 0x7fb4abfe2650>('never fill')
+ +    where <built-in method startswith of str object at 0x7fb4abfe2650> = 'shared source target; every route can refill the same target until target, source exhaustion, relevance floor or budget'.startswith
+FAILED tests/test_master30_contract.py::test_topic_only_is_valid_and_facebook_uses_whole_target - AssertionError: assert (2 == 1)
+ +  where 2 = len([SubRunPlan(actor_id='scraper_one/facebook-posts-search', input={'query': 'Αλέξης Τσίπρας', 'resultsCount': 25, 'searc...one, post_filter_to=None, purpose='primary_context_2', resilience_policy='adaptive-isolation-v1', max_attempt_calls=2)])
+ +    where [SubRunPlan(actor_id='scraper_one/facebook-posts-search', input={'query': 'Αλέξης Τσίπρας', 'resultsCount': 25, 'searc...one, post_filter_to=None, purpose='primary_context_2', resilience_policy='adaptive-isolation-v1', max_attempt_calls=2)] = SourcePlan(source='facebook', actor_id='scraper_one/facebook-posts-search', target_items=50, estimated_cost_usd=0.1245...09-04', 'strategy': 'topic_first'}], source_budget_usd=0.5418933623503809, source_contract_version='actor-contract-v3').subruns
 FAILED tests/test_relevance_expansion_v2.py::test_adaptive_refinement_splits_dominant_context_and_recleans - assert ([])
- +  where [] = <test_relevance_expansion_v2.FakeRunner object at 0x7f7a8d09c770>.calls
+ +  where [] = <test_relevance_expansion_v2.FakeRunner object at 0x7fb4a222edb0>.calls
 FAILED tests/test_relevance_expansion_v2.py::test_reply_deepening_runs_when_comments_on_and_no_collision - assert ([])
- +  where [] = <test_relevance_expansion_v2.FakeRunner object at 0x7f7a8786ce60>.calls
+ +  where [] = <test_relevance_expansion_v2.FakeRunner object at 0x7fb4a9fc8cb0>.calls
 FAILED tests/test_relevance_expansion_v2.py::test_adaptive_expansion_never_exceeds_remaining_budget - IndexError: list index out of range
 FAILED tests/test_relevance_expansion_v2.py::test_reply_deepening_is_blocked_until_route_live_verified - AssertionError: assert 'reply_deepening_blocked_until_live_route_verification' in []
-FAILED tests/test_smart_collection_v2.py::test_x_v2_uses_balanced_intents_and_current_actor_fields - AssertionError: assert 1 >= 3
- +  where 1 = len([SubRunPlan(actor_id='xquik/x-tweet-scraper', input={'mode': 'search', 'searchTerms': ['Allwyn', 'Allwyn Allwyn', 'All...=datetime.date(2026, 8, 31), purpose='primary_global', resilience_policy='adaptive-isolation-v1', max_attempt_calls=2)])
- +    where [SubRunPlan(actor_id='xquik/x-tweet-scraper', input={'mode': 'search', 'searchTerms': ['Allwyn', 'Allwyn Allwyn', 'All...=datetime.date(2026, 8, 31), purpose='primary_global', resilience_policy='adaptive-isolation-v1', max_attempt_calls=2)] = SourcePlan(source='x', actor_id='xquik/x-tweet-scraper', target_items=500, estimated_cost_usd=0.075, price_per_1000_hi..._to': '2026-08-31', 'strategy': 'balanced_smart'}], source_budget_usd=2.0, source_contract_version='actor-contract-v3').subruns
-FAILED tests/test_v184_hardening.py::test_ultra_tiny_global_budget_is_never_inflated[0.001] - assert 0.0042 <= (0.001 + 1e-12)
-FAILED tests/test_v184_hardening.py::test_ultra_tiny_global_budget_is_never_inflated[0.0001] - assert 0.0042 <= (0.0001 + 1e-12)
-FAILED tests/test_v184_hardening.py::test_ultra_tiny_global_budget_is_never_inflated[1e-05] - assert 0.0042 <= (1e-05 + 1e-12)
-FAILED tests/test_v184_hardening.py::test_ultra_tiny_global_budget_is_never_inflated[1e-06] - assert 0.0042 <= (1e-06 + 1e-12)
-FAILED tests/test_v184_hardening.py::test_default_actor_subrun_inputs_have_capacity_for_logical_targets[3000-news] - AssertionError: ('news', 3000, 3000, {'queries': ['Allwyn', 'Allwyn Allwyn', 'Allwyn OPAP', 'Allwyn νέα', 'Allwyn ανακοίνωση'], 'language': 'el', 'country': 'GR', 'maxArticles': 500, ...})
-assert (2500 is not None and 2500 >= 3000)
- +  where 3000 = SubRunPlan(actor_id='logiover/google-news-scraper', input={'queries': ['Allwyn', 'Allwyn Allwyn', 'Allwyn OPAP', 'Allw...om=None, post_filter_to=None, purpose='primary_global', resilience_policy='adaptive-isolation-v1', max_attempt_calls=2).target_items
-FAILED tests/test_v184_safety_final.py::test_live_full_collection_is_blocked_until_selected_actors_are_verified - AssertionError: Regex pattern did not match.
-  Expected regex: 'tiny paid smoke test'
-  Actual message: 'Live collection blocked: replacement/custom source Actors require verification before paid collection: x:xquik/x-tweet-scraper'
+FAILED tests/test_smart_collection_v2.py::test_x_v2_uses_balanced_intents_and_current_actor_fields - assert False
+ +  where False = all(<generator object test_x_v2_uses_balanced_intents_and_current_actor_fields.<locals>.<genexpr> at 0x7fb4a224e9b0>)
 FAILED tests/test_v184_safety_final.py::test_provider_cost_cap_violation_stops_all_later_paid_sources_and_preserves_evidence - AssertionError: assert 'succeeded' == 'failed'
   
   - failed
   + succeeded
-ERROR tests/test_presentation_api.py::PresentationAPITests::test_build_exports_endpoint_persists_status - AssertionError: {"detail":"Presentation/export generation failed safely: Step 8 export QA failed before persistence."}
-assert 500 == 200
- +  where 500 = <Response [500 Internal Server Error]>.status_code
-ERROR tests/test_presentation_api.py::PresentationAPITests::test_download_authorized_export_file - AssertionError: {"detail":"Presentation/export generation failed safely: Step 8 export QA failed before persistence."}
-assert 500 == 200
- +  where 500 = <Response [500 Internal Server Error]>.status_code
-ERROR tests/test_presentation_api.py::PresentationAPITests::test_export_bundle_contains_required_file_types - AssertionError: {"detail":"Presentation/export generation failed safely: Step 8 export QA failed before persistence."}
-assert 500 == 200
- +  where 500 = <Response [500 Internal Server Error]>.status_code
-ERROR tests/test_presentation_api.py::PresentationAPITests::test_get_exports_returns_summary_and_manifest - AssertionError: {"detail":"Presentation/export generation failed safely: Step 8 export QA failed before persistence."}
-assert 500 == 200
- +  where 500 = <Response [500 Internal Server Error]>.status_code
-ERROR tests/test_presentation_api.py::PresentationAPITests::test_health_reports_v13 - AssertionError: {"detail":"Presentation/export generation failed safely: Step 8 export QA failed before persistence."}
-assert 500 == 200
- +  where 500 = <Response [500 Internal Server Error]>.status_code
-ERROR tests/test_presentation_api.py::PresentationAPITests::test_path_traversal_export_download_blocked - AssertionError: {"detail":"Presentation/export generation failed safely: Step 8 export QA failed before persistence."}
-assert 500 == 200
- +  where 500 = <Response [500 Internal Server Error]>.status_code
-ERROR tests/test_presentation_api.py::PresentationAPITests::test_step7_change_makes_exports_stale - AssertionError: {"detail":"Presentation/export generation failed safely: Step 8 export QA failed before persistence."}
-assert 500 == 200
- +  where 500 = <Response [500 Internal Server Error]>.status_code
-ERROR tests/test_presentation_api.py::PresentationAPITests::test_step8_requires_step7 - AssertionError: {"detail":"Presentation/export generation failed safely: Step 8 export QA failed before persistence."}
-assert 500 == 200
- +  where 500 = <Response [500 Internal Server Error]>.status_code
-ERROR tests/test_presentation_api.py::PresentationAPITests::test_unknown_run_export_returns_404 - AssertionError: {"detail":"Presentation/export generation failed safely: Step 8 export QA failed before persistence."}
-assert 500 == 200
- +  where 500 = <Response [500 Internal Server Error]>.status_code
-42 failed, 464 passed, 2 skipped, 1 warning, 9 errors in 41.79s
+8 failed, 507 passed, 2 skipped, 1 warning in 35.31s
