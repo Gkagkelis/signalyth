@@ -1,4 +1,5 @@
 from __future__ import annotations
+from datetime import timedelta
 from decimal import Decimal
 from app.config import settings
 
@@ -41,6 +42,10 @@ class ApifyRunner:
             run_input=run_input,
             max_items=max_items,
             max_total_charge_usd=Decimal(str(max_charge_usd)),
+            # A single slow provider must not hold the whole SIGNALYTH pipeline forever.
+            # Apify terminates the Actor run itself at this limit; resilience logic can
+            # then isolate the failure and continue with later batches/sources.
+            run_timeout=timedelta(minutes=3),
         )
         if not run:
             raise RuntimeError(f"Actor {actor_id} returned no run object")
