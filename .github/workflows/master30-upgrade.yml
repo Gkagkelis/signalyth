@@ -1,5 +1,5 @@
 name: Master 30 upgrade
-# regression gate refresh: master30-v1
+# regression gate refresh: master30-v2
 
 on:
   workflow_dispatch:
@@ -9,6 +9,7 @@ on:
       - 'scripts/master30_pipeline.py'
       - 'scripts/master30_report_ui.py'
       - 'scripts/master30_hotfix.py'
+      - 'scripts/master30_hotfix2.py'
       - '.github/workflows/master30-upgrade.yml'
 
 permissions:
@@ -42,6 +43,7 @@ jobs:
           python scripts/master30_pipeline.py
           python scripts/master30_report_ui.py
           python scripts/master30_hotfix.py
+          python scripts/master30_hotfix2.py
       - name: Compile
         run: python -m compileall -q app tests
       - name: Full regression suite
