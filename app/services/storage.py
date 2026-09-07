@@ -57,6 +57,9 @@ class RunStore:
         self.root.mkdir(parents=True, exist_ok=True)
         self.cloud = cloud_persistence
 
+    _refresh_checked: dict[str, float] = {}
+    _refresh_lock = threading.Lock()
+
     def folder_for(self, run_id: str) -> Path:
         if not run_id or not _RUN_ID_RE.match(run_id):
             raise RunNotFound(run_id)
@@ -65,9 +68,61 @@ class RunStore:
             # Prefer the complete snapshot; a newly planned run may only have metadata.
             if not self.cloud.restore_run_archive(run_id, folder):
                 self.cloud.restore_run_metadata(run_id, folder)
+        elif folder.is_dir() and self.cloud.enabled:
+            # A warm serverless instance may hold a mid-run copy restored earlier.
+            # When the durable archive has since moved forward, replace the local
+            # copy so status, evidence pack and exports never disagree.
+            self._refresh_if_outdated(run_id, folder)
         if not folder.is_dir():
             raise RunNotFound(run_id)
         return folder
+
+    def _refresh_if_outdated(self, run_id: str, folder: Path) -> None:
+        import time as _time
+        with self._refresh_lock:
+            last = self._refresh_checked.get(run_id, 0.0)
+            if _time.monotonic() - last < 20.0:
+                return
+            self._refresh_checked[run_id] = _time.monotonic()
+        try:
+            meta = self.cloud.get_archive_meta(run_id)
+            remote = str((meta or {}).get("checkpointed_at") or "")
+            stamp_file = folder / ".signalyth-archive-stamp"
+            local = stamp_file.read_text(encoding="utf-8").strip() if stamp_file.exists() else ""
+            needs_refresh = bool(remote) and remote != local
+            if not remote and not local:
+                # Legacy run archived before version stamps existed. Heal a possibly
+                # mid-run local copy ONCE per instance — but never clobber a copy that
+                # an active worker in this process is still writing to.
+                actively_written = False
+                try:
+                    raw = json.loads((folder / "status.json").read_text(encoding="utf-8"))
+                    if str(raw.get("status")) in {"running", "cancelling", "queued"}:
+                        stamp = raw.get("updated_at")
+                        if stamp:
+                            updated = datetime.fromisoformat(str(stamp))
+                            if updated.tzinfo is None:
+                                updated = updated.replace(tzinfo=timezone.utc)
+                            actively_written = (datetime.now(timezone.utc) - updated).total_seconds() < 120
+                except Exception:
+                    pass
+                if not actively_written:
+                    needs_refresh = True
+            if needs_refresh:
+                refreshed = folder.parent / f".{run_id}.refresh"
+                shutil.rmtree(refreshed, ignore_errors=True)
+                ok = self.cloud.restore_run_archive(run_id, refreshed)
+                if ok and refreshed.is_dir():
+                    stamp_file2 = refreshed / ".signalyth-archive-stamp"
+                    if not stamp_file2.exists():
+                        stamp_file2.write_text("legacy-refreshed", encoding="utf-8")
+                    shutil.rmtree(folder, ignore_errors=True)
+                    refreshed.rename(folder)
+                else:
+                    shutil.rmtree(refreshed, ignore_errors=True)
+        except Exception:
+            # Freshness sync is best-effort; the existing local copy stays usable.
+            pass
 
     def create(self, plan: dict) -> tuple[str, Path]:
         self.cloud.require()
