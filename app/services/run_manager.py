@@ -53,8 +53,19 @@ class RunManager:
         else:
             self._deadline_monotonic = None
 
-    def _deadline_reached(self) -> bool:
-        return self._deadline_monotonic is not None and time.monotonic() >= self._deadline_monotonic
+    def _deadline_reached(self, margin_seconds: float = 0.0) -> bool:
+        if self._deadline_monotonic is None:
+            return False
+        return time.monotonic() >= self._deadline_monotonic - max(0.0, margin_seconds)
+
+    def _analysis_deadline_check(self) -> bool:
+        """Deadline check used to gate NEW analysis batch submissions.
+
+        In-flight OpenAI requests can run up to the client timeout (60s) after
+        the last submission, and the final checkpoint/requeue also needs time,
+        so submissions must stop with a safety margin before the soft deadline.
+        """
+        return self._deadline_reached(margin_seconds=75.0)
 
     @staticmethod
     def _status_age_seconds(status: dict) -> float | None:
@@ -304,7 +315,7 @@ class RunManager:
                 folder,
                 plan=plan,
                 cancel_check=lambda: self.store.cancel_requested_folder(folder),
-                deadline_check=self._deadline_reached,
+                deadline_check=self._analysis_deadline_check,
             )
         except AIAnalysisCancelled:
             self._mark_cancelled_after_collection(run_id)
@@ -380,7 +391,7 @@ class RunManager:
                         plan=plan,
                         cancel_check=lambda: self.store.cancel_requested_folder(folder),
                         force=True,
-                        deadline_check=self._deadline_reached,
+                        deadline_check=self._analysis_deadline_check,
                     )
                 status_refill = self.store.read_status(run_id)
                 status_refill["semantic_refill"] = {"status": refill.get("status"), "summary": refill, "completed_at": _utcnow()}

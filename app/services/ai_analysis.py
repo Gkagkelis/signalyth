@@ -5,6 +5,8 @@ import hashlib
 import json
 import math
 import re
+import threading
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -565,6 +567,120 @@ def _usage_cost_usd(usage: dict | None, tier: str) -> float:
     )
 
 
+def _run_tier_batches(
+    provider: AIProvider,
+    batches: list[list[dict]],
+    tier: str,
+    context: dict,
+    cache: dict,
+    key_by_id: dict[str, str],
+    budget: dict,
+    budget_lock: threading.Lock,
+    cancel_check: Callable[[], bool] | None,
+    deadline_check: Callable[[], bool] | None,
+    checkpoint: Callable[[dict], None] | None,
+    on_budget_blocked: Callable[[list[dict]], list[dict]],
+    parallel: int,
+) -> dict[str, dict]:
+    """Execute the batches of one tier with bounded parallelism.
+
+    Safety contract:
+    - Budget is one shared, atomic pool: each batch RESERVES its conservative
+      estimate under the lock before it may start, and SETTLES to the actual
+      provider-reported usage when it finishes. Independent copies of the
+      remaining balance are never used, so concurrent batches can never jointly
+      exceed the hard AI budget.
+    - Every completed paid batch is durably checkpointed under the lock.
+    - Cancellation and the worker time budget stop NEW submissions; in-flight
+      requests (bounded by the provider client timeout) are drained, their
+      results are checkpointed, and only then is the control exception raised.
+    """
+    annotations: dict[str, dict] = {}
+    if not batches:
+        return annotations
+    parallel = max(1, int(parallel))
+    ai_budget_usd = float(budget.get("max") or 0.0)
+    deadline_hit = False
+    cancelled = False
+
+    def _absorb(outputs: list[dict]) -> None:
+        with budget_lock:
+            for a in outputs:
+                rid = str(a["record_id"])
+                a["cache_hit"] = False
+                annotations[rid] = a
+                if not ({"provider_partial_failure", "ai_budget_guard"} & set(a.get("flags", []))):
+                    cache[key_by_id[rid]] = copy.deepcopy(a)
+            if checkpoint:
+                checkpoint(cache)
+
+    def _worker(batch: list[dict], reservation: float) -> list[dict]:
+        try:
+            outputs = _analyze_batch_resilient(provider, batch, context, tier, cancel_check)
+            actual = _usage_sum(outputs).get("estimated_cost_usd", 0.0)
+            with budget_lock:
+                budget["reserved"] = max(0.0, budget["reserved"] - reservation)
+                budget["spent"] += float(actual if actual else reservation)
+            return outputs
+        except BaseException:
+            with budget_lock:
+                budget["reserved"] = max(0.0, budget["reserved"] - reservation)
+                budget["spent"] += reservation  # conservative: unknown outcome is charged
+            raise
+
+    with ThreadPoolExecutor(max_workers=parallel, thread_name_prefix=f"signalyth-ai-{tier}") as pool:
+        pending: set = set()
+        idx = 0
+        try:
+            while idx < len(batches) or pending:
+                # Submit while there is capacity and submission is still allowed.
+                while idx < len(batches) and len(pending) < parallel and not cancelled and not deadline_hit:
+                    if cancel_check and cancel_check():
+                        cancelled = True
+                        break
+                    if deadline_check and deadline_check():
+                        deadline_hit = True
+                        break
+                    batch = batches[idx]
+                    idx += 1
+                    reservation = _batch_reservation_usd(batch, tier)
+                    with budget_lock:
+                        over = ai_budget_usd and (budget["spent"] + budget["reserved"] + reservation > ai_budget_usd)
+                        if not over:
+                            budget["reserved"] += reservation
+                    if over:
+                        _absorb(on_budget_blocked(batch))
+                        continue
+                    pending.add(pool.submit(_worker, batch, reservation))
+                if not pending:
+                    if cancelled or deadline_hit:
+                        break
+                    continue
+                done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                for fut in done:
+                    _absorb(fut.result())
+        finally:
+            # Never abandon in-flight paid work: drain and checkpoint it.
+            if pending:
+                done, _ = wait(pending)
+                for fut in done:
+                    try:
+                        _absorb(fut.result())
+                    except Exception:
+                        pass
+
+    if cancelled:
+        raise AIAnalysisCancelled()
+    if deadline_hit:
+        if checkpoint:
+            checkpoint(cache)
+        raise AIAnalysisTimeBudgetExceeded(
+            f"Worker time budget reached during {tier} analysis; "
+            "completed batches are checkpointed and the run will resume."
+        )
+    return annotations
+
+
 def _batch_reservation_usd(rows: list[dict], tier: str) -> float:
     if not rows:
         return 0.0
@@ -706,36 +822,29 @@ def analyze_records(
         else:
             bulk_missing.append(row)
 
-    ai_spent_usd = 0.0
     ai_budget_usd = max(0.0, float(settings.signalyth_ai_max_cost_usd))
-    for start in range(0, len(bulk_missing), batch_size):
-        if cancel_check and cancel_check():
-            raise AIAnalysisCancelled()
-        if deadline_check and deadline_check():
-            if checkpoint:
-                checkpoint(cache)
-            raise AIAnalysisTimeBudgetExceeded(
-                f"Worker time budget reached before bulk batch {start // batch_size + 1}; "
-                "completed batches are checkpointed and the run will resume."
-            )
-        batch = bulk_missing[start:start + batch_size]
-        reservation = _batch_reservation_usd(batch, "bulk")
-        if ai_budget_usd and ai_spent_usd + reservation > ai_budget_usd:
-            outputs = [_budget_unavailable_annotation(row, "bulk") for row in batch]
-        else:
-            outputs = _analyze_batch_resilient(provider, batch, context, "bulk", cancel_check)
-            actual = _usage_sum(outputs).get("estimated_cost_usd", 0.0)
-            ai_spent_usd += float(actual if actual else reservation)
-        for a in outputs:
-            rid = str(a["record_id"])
-            a["cache_hit"] = False
-            bulk_annotations[rid] = a
-            if not ({"provider_partial_failure", "ai_budget_guard"} & set(a.get("flags", []))):
-                cache[bulk_key_by_id[rid]] = copy.deepcopy(a)
-        # Paid results must survive a hard worker kill: persist after EVERY batch,
-        # never only at the end of the whole analysis.
-        if checkpoint:
-            checkpoint(cache)
+    ai_budget = {"max": ai_budget_usd, "spent": 0.0, "reserved": 0.0}
+    ai_budget_lock = threading.Lock()
+    ai_parallel = max(1, int(getattr(settings, "signalyth_ai_parallel_requests", 1) or 1))
+
+    bulk_batches = [bulk_missing[start:start + batch_size] for start in range(0, len(bulk_missing), batch_size)]
+    bulk_annotations.update(
+        _run_tier_batches(
+            provider,
+            bulk_batches,
+            "bulk",
+            context,
+            cache,
+            bulk_key_by_id,
+            ai_budget,
+            ai_budget_lock,
+            cancel_check,
+            deadline_check,
+            checkpoint,
+            on_budget_blocked=lambda batch: [_budget_unavailable_annotation(row, "bulk") for row in batch],
+            parallel=ai_parallel,
+        )
+    )
 
     escalation_rows = [
         row for row in trusted_records
@@ -758,34 +867,37 @@ def analyze_records(
             reasoning_missing.append(row)
 
     reasoning_batch_size = max(1, min(12, batch_size))
-    for start in range(0, len(reasoning_missing), reasoning_batch_size):
-        if cancel_check and cancel_check():
-            raise AIAnalysisCancelled()
-        if deadline_check and deadline_check():
-            if checkpoint:
-                checkpoint(cache)
-            raise AIAnalysisTimeBudgetExceeded(
-                f"Worker time budget reached before reasoning batch {start // reasoning_batch_size + 1}; "
-                "completed batches are checkpointed and the run will resume."
-            )
-        batch = reasoning_missing[start:start + reasoning_batch_size]
-        reservation = _batch_reservation_usd(batch, "reasoning")
-        if ai_budget_usd and ai_spent_usd + reservation > ai_budget_usd:
-            for row in batch:
-                rid = str(row.get("id"))
-                bulk_annotations[rid].setdefault("flags", []).append("reasoning_skipped_budget")
-            continue
-        outputs = _analyze_batch_resilient(provider, batch, context, "reasoning", cancel_check)
-        actual = _usage_sum(outputs).get("estimated_cost_usd", 0.0)
-        ai_spent_usd += float(actual if actual else reservation)
-        for a in outputs:
-            rid = str(a["record_id"])
-            a["cache_hit"] = False
-            reasoning_annotations[rid] = a
-            if not ({"provider_partial_failure", "ai_budget_guard"} & set(a.get("flags", []))):
-                cache[reasoning_key_by_id[rid]] = copy.deepcopy(a)
-        if checkpoint:
-            checkpoint(cache)
+    reasoning_batches = [
+        reasoning_missing[start:start + reasoning_batch_size]
+        for start in range(0, len(reasoning_missing), reasoning_batch_size)
+    ]
+
+    def _reasoning_budget_blocked(batch: list[dict]) -> list[dict]:
+        # Same semantics as before: a budget-blocked escalation keeps the bulk
+        # verdict and is flagged, it never produces a reasoning annotation.
+        for row in batch:
+            rid = str(row.get("id"))
+            bulk_annotations[rid].setdefault("flags", []).append("reasoning_skipped_budget")
+        return []
+
+    reasoning_annotations.update(
+        _run_tier_batches(
+            provider,
+            reasoning_batches,
+            "reasoning",
+            context,
+            cache,
+            reasoning_key_by_id,
+            ai_budget,
+            ai_budget_lock,
+            cancel_check,
+            deadline_check,
+            checkpoint,
+            on_budget_blocked=_reasoning_budget_blocked,
+            parallel=ai_parallel,
+        )
+    )
+    ai_spent_usd = float(ai_budget["spent"])
 
     enriched: list[dict] = []
     audit: list[dict] = []
