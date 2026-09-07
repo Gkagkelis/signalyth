@@ -18,6 +18,14 @@ class Settings(BaseSettings):
     signalyth_runtime_config_dir: str = str(DEFAULT_RUNTIME_CONFIG_DIR)
     signalyth_cloud_storage: bool = RUNNING_ON_VERCEL
     signalyth_execution_backend: str = "celery" if RUNNING_ON_VERCEL else "thread"
+    # Serverless invocations are hard-killed at vercel.json maxDuration. The pipeline
+    # must therefore stop at a SOFT deadline, persist its durable state and requeue a
+    # continuation instead of dying mid-phase with an eternally "running" status.
+    # 0 disables the soft deadline (local/long-lived workers).
+    signalyth_worker_soft_deadline_seconds: int = 240 if RUNNING_ON_VERCEL else 0
+    # A run whose status is "running" but whose status.json has not been updated for
+    # this long is treated as orphaned by a killed worker and may be resumed.
+    signalyth_stale_running_after_seconds: int = 600
     signalyth_dry_run: bool = True
     signalyth_max_parallel_runs: int = 2
     openai_api_key: str = ""
