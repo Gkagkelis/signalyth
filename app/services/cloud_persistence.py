@@ -5,6 +5,7 @@ import os
 import shutil
 import tempfile
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -133,9 +134,10 @@ class CloudPersistence:
             return []
         return sorted(found, reverse=True)[:limit]
 
-    def persist_run_archive(self, run_id: str, folder: Path) -> None:
+    def persist_run_archive(self, run_id: str, folder: Path) -> str | None:
         if not self.enabled or not folder.is_dir():
-            return
+            return None
+        stamp = datetime.now(timezone.utc).isoformat()
         tmp_dir = Path(tempfile.mkdtemp(prefix="signalyth-archive-", dir="/tmp" if Path("/tmp").exists() else None))
         try:
             archive = tmp_dir / f"{run_id}.zip"
@@ -152,6 +154,15 @@ class CloudPersistence:
                     overwrite=True,
                     multipart=archive.stat().st_size >= 8 * 1024 * 1024,
                 )
+            try:
+                self.put_json(run_id, "archive-meta.json", {"checkpointed_at": stamp})
+            except Exception:
+                pass
+            try:
+                (folder / ".signalyth-archive-stamp").write_text(stamp, encoding="utf-8")
+            except Exception:
+                pass
+            return stamp
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
@@ -163,6 +174,15 @@ class CloudPersistence:
             if target != destination and destination not in target.parents:
                 raise CloudPersistenceError("Unsafe path in stored run archive.")
         zf.extractall(destination)
+
+    def get_archive_meta(self, run_id: str) -> dict | None:
+        if not self.enabled:
+            return None
+        try:
+            meta = self.get_json(run_id, "archive-meta.json")
+            return meta if isinstance(meta, dict) else None
+        except Exception:
+            return None
 
     def restore_run_archive(self, run_id: str, folder: Path) -> bool:
         if not self.enabled:
@@ -182,6 +202,12 @@ class CloudPersistence:
                     self._safe_extract(zf, folder)
             finally:
                 archive.unlink(missing_ok=True)
+            meta = self.get_archive_meta(run_id)
+            if meta and meta.get("checkpointed_at"):
+                try:
+                    (folder / ".signalyth-archive-stamp").write_text(str(meta["checkpointed_at"]), encoding="utf-8")
+                except Exception:
+                    pass
             return True
         except Exception:
             return False
