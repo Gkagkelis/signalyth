@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+import threading
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import math
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -76,6 +78,9 @@ class BudgetGuard:
         self.max_budget = float(max_budget)
         self.spent = 0.0
         self.reserved = 0.0
+        # Parallel sources reserve/settle against ONE shared pool; the lock makes
+        # each reservation atomic so concurrent sources can never jointly overspend.
+        self._lock = threading.Lock()
 
     @property
     def remaining(self) -> float:
@@ -83,12 +88,17 @@ class BudgetGuard:
 
     def reserve(self, amount: float) -> float:
         amount = max(0.0, float(amount))
-        if self.spent + self.reserved + amount > self.max_budget + 1e-9:
-            raise RuntimeError("Budget guard blocked a sub-run that could exceed the analysis budget.")
-        self.reserved += amount
+        with self._lock:
+            if self.spent + self.reserved + amount > self.max_budget + 1e-9:
+                raise RuntimeError("Budget guard blocked a sub-run that could exceed the analysis budget.")
+            self.reserved += amount
         return amount
 
     def settle(self, reservation: float, actual_cost: float | None) -> float:
+        with self._lock:
+            return self._settle_locked(reservation, actual_cost)
+
+    def _settle_locked(self, reservation: float, actual_cost: float | None) -> float:
         reservation = max(0.0, float(reservation))
         self.reserved = max(0.0, self.reserved - reservation)
         charged = reservation if actual_cost is None else max(0.0, float(actual_cost))
@@ -358,7 +368,16 @@ def execute_plan(
         })
         status["sources"][source] = existing
 
-    def sync(message: str, source: str | None = None, phase: str | None = None, terminal: bool = False, code: str | None = None, purpose: str | None = None):
+    state_lock = threading.RLock()
+    violation = {"hit": False}
+    cancel_box = {"hit": False}
+
+    def sync(*args, **kwargs):
+        # One writer at a time: parallel sources share status.json and the budget row.
+        with state_lock:
+            return _sync_unlocked(*args, **kwargs)
+
+    def _sync_unlocked(message: str, source: str | None = None, phase: str | None = None, terminal: bool = False, code: str | None = None, purpose: str | None = None):
         if phase:
             status["phase"] = phase
         completed_sources = sum(1 for v in status.get("sources", {}).values() if v.get("status") in SOURCE_TERMINAL)
@@ -419,29 +438,10 @@ def execute_plan(
     processed_base_total = 0
     collected_total_so_far = 0
     rebalance_audit = []
-    fatal_budget_violation = False
 
-    for idx, sp in enumerate(execution_sources):
-        if cancel_check():
-            status["cancel_requested"] = True
-            mark_remaining_cancelled(idx)
-            return finish_cancelled("Cancelled before the next source started")
-        if deadline_check and deadline_check():
-            # Every completed source is persisted with a terminal status; hand the
-            # remaining sources to a fresh invocation instead of dying mid-run.
-            sync("Worker time budget reached; collection continues automatically in a new worker", None, code="collection_continuation")
-            raise CollectionTimeBudgetExceeded(
-                f"Worker time budget reached before source {sp.get('source')}; run will continue automatically."
-            )
-
+    def _collect_one_source(idx: int, sp: dict) -> dict:
+        nonlocal processed_base_total, collected_total_so_far
         source = sp["source"]
-        if source in resumed_sources:
-            prior_norm = store.read(folder / f"normalized-{source}.json", []) or []
-            all_normalized.extend(prior_norm)
-            processed_base_total += int(sp.get("target_items", 0) or 0)
-            collected_total_so_far += len(prior_norm)
-            sync(f"{source}: already completed in a previous invocation; evidence reused", source, code="source_resumed")
-            continue
         base_target = int(sp.get("target_items", 0) or 0)
         carry_in = max(0, processed_base_total - collected_total_so_far) if automatic else 0
         remaining_count = len(execution_sources) - idx
@@ -502,6 +502,7 @@ def execute_plan(
         sync(f"Collecting {source}", source, code="collecting_source")
 
         cancelled_mid_source = False
+        own_violation = False
         source_level_error: str | None = None
         consecutive_transient_failures = 0
         circuit_open = False
@@ -512,6 +513,16 @@ def execute_plan(
                 if cancel_check():
                     status["cancel_requested"] = True
                     cancelled_mid_source = True
+                    break
+                if violation["hit"] and not own_violation:
+                    # Another parallel source hit a provider cost-cap violation: stop
+                    # paying here too and record why the remaining routes were skipped.
+                    for later in source_status.get("subruns", [])[sr_idx:]:
+                        if later.get("status") == "pending":
+                            later["status"] = "skipped_budget_safety"
+                            later["completed_at"] = _utcnow()
+                            later["error"] = "Skipped because another source reported cost above a hard per-call cap."
+                            source_status["subruns_completed"] += 1
                     break
 
                 sr_status = source_status["subruns"][sr_idx]
@@ -608,7 +619,8 @@ def execute_plan(
                     "returned_items": len(resilient.items),
                 })
                 if resilient.cost_cap_violation:
-                    fatal_budget_violation = True
+                    violation["hit"] = True
+                    own_violation = True
                     source_status["budget_safety_violation"] = {
                         "detected": True,
                         "provider_reported_cost_usd": resilient.provider_reported_cost_usd,
@@ -660,7 +672,7 @@ def execute_plan(
                     code="actor_batch_completed" if mapped_status in {"succeeded", "succeeded_empty"} else "actor_batch_degraded",
                 )
 
-                if fatal_budget_violation:
+                if violation["hit"]:
                     sync(f"{source}: provider-reported run cost exceeded the allocated envelope; stopping all paid collection", source, code="budget_safety_stop")
                     break
                 if circuit_open:
@@ -678,7 +690,8 @@ def execute_plan(
         store.write(folder / f"normalized-{source}.json", normalized)
         store.write(folder / f"apify-{source}.json", source_meta)
         store.write(folder / f"diagnostics-{source}.json", split_diagnostic_rows(source_raw)[1])
-        all_normalized.extend(normalized)
+        with state_lock:
+            all_normalized.extend(normalized)
 
         failed_subruns = int(source_status.get("subruns_failed", 0) or 0)
         partial_subruns = int(source_status.get("subruns_partial", 0) or 0)
@@ -697,7 +710,7 @@ def execute_plan(
                 if later.get("status") == "pending":
                     later["status"] = "skipped_cancelled"
             source_status.update({"status": "cancelled_partial", "completed_at": _utcnow()})
-        elif fatal_budget_violation:
+        elif own_violation:
             source_status.update({"status": "failed", "error": "Provider-reported run cost exceeded the allocated SIGNALYTH envelope; source stopped safely.", "completed_at": _utcnow()})
         elif source_level_error:
             source_status.update({"status": "failed", "error": source_level_error, "completed_at": _utcnow()})
@@ -720,13 +733,15 @@ def execute_plan(
         else:
             source_status.update({"status": "succeeded", "completed_at": _utcnow(), "error": None})
 
-        processed_base_total += base_target
-        collected_total_so_far += int(source_status.get("collected", 0) or 0)
+        with state_lock:
+            processed_base_total += base_target
+            collected_total_so_far += int(source_status.get("collected", 0) or 0)
         base_shortfall = max(0, base_target - int(source_status.get("collected", 0) or 0))
         carry_out = max(0, processed_base_total - collected_total_so_far) if automatic else base_shortfall
         source_status["base_shortfall"] = base_shortfall
         source_status["carry_out"] = carry_out
-        rebalance_audit.append({
+        with state_lock:
+            rebalance_audit.append({
             "source": source,
             "base_target": base_target,
             "carry_in": carry_in,
@@ -737,39 +752,135 @@ def execute_plan(
         })
         sync(f"{source} complete" if source_status["status"] in {"succeeded", "succeeded_empty"} else f"{source}: {source_status['status']}", source, code="source_complete" if source_status["status"] in {"succeeded", "succeeded_empty"} else "source_status")
 
-        if fatal_budget_violation:
-            for rest in execution_sources[idx + 1:]:
-                row = status["sources"][rest["source"]]
-                if row.get("status") == "pending":
-                    row.update({
-                        "status": "skipped_budget_safety",
-                        "completed_at": _utcnow(),
-                        "error": "Skipped because an upstream provider reported cost above a hard per-call cap.",
-                    })
-            normalized_all = list({r["id"]: r for r in all_normalized}.values())
-            store.write(folder / "normalized-all.json", normalized_all)
-            store.write(folder / "rebalancing.json", rebalance_audit)
-            status.update({
-                "collection_status": "failed",
-                "status": "failed",
-                "phase": "completed",
-                "completed_at": _utcnow(),
-                "normalized_total": len(normalized_all),
-                "sample_shortfall": max(0, int(plan.get("target_total", 0) or 0) - len(normalized_all)),
-                "sample_status": "failed_budget_safety",
-            })
-            status["budget"] = {
-                "max_usd": round(guard.max_budget, 6),
-                "spent_usd": round(guard.spent, 6),
-                "remaining_usd": round(guard.remaining, 6),
-                "violation_detected": True,
-            }
-            sync("Collection stopped: provider-reported run cost exceeded the allocated SIGNALYTH envelope; preserved evidence is not treated as a completed sample", None, "completed", terminal=True, code="budget_safety_failed")
-            return status
+        return {"cancelled": bool(cancelled_mid_source)}
 
-        if cancelled_mid_source:
-            mark_remaining_cancelled(idx + 1)
+    def _apply_budget_safety_stop() -> dict:
+        for rest in execution_sources:
+            row = status["sources"].get(rest["source"], {})
+            if row.get("status") == "pending":
+                row.update({
+                    "status": "skipped_budget_safety",
+                    "completed_at": _utcnow(),
+                    "error": "Skipped because an upstream provider reported cost above a hard per-call cap.",
+                })
+        normalized_all = list({r["id"]: r for r in all_normalized}.values())
+        store.write(folder / "normalized-all.json", normalized_all)
+        store.write(folder / "rebalancing.json", rebalance_audit)
+        status.update({
+            "collection_status": "failed",
+            "status": "failed",
+            "phase": "completed",
+            "completed_at": _utcnow(),
+            "normalized_total": len(normalized_all),
+            "sample_shortfall": max(0, int(plan.get("target_total", 0) or 0) - len(normalized_all)),
+            "sample_status": "failed_budget_safety",
+        })
+        status["budget"] = {
+            "max_usd": round(guard.max_budget, 6),
+            "spent_usd": round(guard.spent, 6),
+            "remaining_usd": round(guard.remaining, 6),
+            "violation_detected": True,
+        }
+        sync("Collection stopped: provider-reported run cost exceeded the allocated SIGNALYTH envelope; preserved evidence is not treated as a completed sample", None, "completed", terminal=True, code="budget_safety_failed")
+        return status
+
+    parallel_workers = max(1, int(getattr(settings, "signalyth_collection_parallel_sources", 1) or 1))
+    if automatic:
+        # Automatic elastic rebalancing computes each source's target from the
+        # previous sources' yield; that math is inherently sequential.
+        parallel_workers = 1
+
+    if parallel_workers <= 1:
+        for idx, sp in enumerate(execution_sources):
+            if cancel_check():
+                status["cancel_requested"] = True
+                mark_remaining_cancelled(idx)
+                return finish_cancelled("Cancelled before the next source started")
+            if deadline_check and deadline_check():
+                sync("Worker time budget reached; collection continues automatically in a new worker", None, code="collection_continuation")
+                raise CollectionTimeBudgetExceeded(
+                    f"Worker time budget reached before source {sp.get('source')}; run will continue automatically."
+                )
+            source = sp["source"]
+            if source in resumed_sources:
+                prior_norm = store.read(folder / f"normalized-{source}.json", []) or []
+                all_normalized.extend(prior_norm)
+                processed_base_total += int(sp.get("target_items", 0) or 0)
+                collected_total_so_far += len(prior_norm)
+                sync(f"{source}: already completed in a previous invocation; evidence reused", source, code="source_resumed")
+                continue
+            result = _collect_one_source(idx, sp)
+            if violation["hit"]:
+                return _apply_budget_safety_stop()
+            if result["cancelled"]:
+                mark_remaining_cancelled(idx + 1)
+                return finish_cancelled("Cancellation completed; partial data was preserved")
+    else:
+        # Independent per-source collection: run up to N sources at once against ONE
+        # atomic budget guard and one locked status writer. Only fixed per-source
+        # plans reach this path, so no source's target depends on another's yield.
+        queue: list[tuple[int, dict]] = []
+        for idx, sp in enumerate(execution_sources):
+            source = sp["source"]
+            if source in resumed_sources:
+                prior_norm = store.read(folder / f"normalized-{source}.json", []) or []
+                with state_lock:
+                    all_normalized.extend(prior_norm)
+                    processed_base_total += int(sp.get("target_items", 0) or 0)
+                    collected_total_so_far += len(prior_norm)
+                sync(f"{source}: already completed in a previous invocation; evidence reused", source, code="source_resumed")
+                continue
+            queue.append((idx, sp))
+        deadline_stop = False
+        pool = ThreadPoolExecutor(max_workers=parallel_workers, thread_name_prefix="signalyth-src")
+        futures: dict = {}
+        qi = 0
+        try:
+            while qi < len(queue) or futures:
+                while qi < len(queue) and len(futures) < parallel_workers and not violation["hit"] and not cancel_box["hit"]:
+                    if cancel_check():
+                        cancel_box["hit"] = True
+                        break
+                    if deadline_check and deadline_check():
+                        deadline_stop = True
+                        break
+                    i2, sp2 = queue[qi]
+                    qi += 1
+                    futures[pool.submit(_collect_one_source, i2, sp2)] = sp2["source"]
+                if not futures:
+                    break
+                done, _pending = wait(set(futures), return_when=FIRST_COMPLETED)
+                for fut in done:
+                    futures.pop(fut, None)
+                    try:
+                        if fut.result().get("cancelled"):
+                            cancel_box["hit"] = True
+                    except Exception as exc:
+                        sync(f"Source worker failed safely: {exc}", None, code="source_worker_error")
+                if deadline_stop or violation["hit"] or cancel_box["hit"]:
+                    # Stop submitting; drain whatever is in flight.
+                    if futures:
+                        done, _pending = wait(set(futures))
+                        for fut in done:
+                            futures.pop(fut, None)
+                            try:
+                                if fut.result().get("cancelled"):
+                                    cancel_box["hit"] = True
+                            except Exception:
+                                pass
+                    break
+        finally:
+            pool.shutdown(wait=True)
+        if violation["hit"]:
+            return _apply_budget_safety_stop()
+        if cancel_box["hit"] or cancel_check():
+            for name, row in status.get("sources", {}).items():
+                if row.get("status") == "pending":
+                    row.update({"status": "skipped_cancelled", "completed_at": _utcnow()})
             return finish_cancelled("Cancellation completed; partial data was preserved")
+        if deadline_stop and qi < len(queue):
+            sync("Worker time budget reached; collection continues automatically in a new worker", None, code="collection_continuation")
+            raise CollectionTimeBudgetExceeded("Worker time budget reached; run will continue automatically.")
 
     status["phase"] = "finalizing"
     sync("Finalizing the collected sample", None, "finalizing", code="finalizing_collection")

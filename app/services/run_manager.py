@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from app.config import settings
 from app.services.apify_service import CollectionNotConfigured
-from app.services.collector import execute_plan
+from app.services.collector import CollectionTimeBudgetExceeded, execute_plan
 from app.services.cleaning import CleaningCancelled, clean_run
 from app.services.relevance_expansion import adaptive_expand_after_cleaning
 from app.services.ai_analysis import AIAnalysisCancelled, AIAnalysisTimeBudgetExceeded, analyze_run
@@ -183,13 +183,47 @@ class RunManager:
                     self._run_cleaning(run_id, folder, plan)
                 return
 
-            collection_status = execute_plan(
-                plan,
-                run_id,
-                folder,
-                cancel_check=lambda: self.store.cancel_requested_folder(folder),
-                continue_pipeline=True,
-            )
+            try:
+                collection_status = execute_plan(
+                    plan,
+                    run_id,
+                    folder,
+                    cancel_check=lambda: self.store.cancel_requested_folder(folder),
+                    continue_pipeline=True,
+                    deadline_check=lambda: self._deadline_reached(
+                        margin_seconds=float(settings.signalyth_collection_deadline_margin_seconds)
+                    ),
+                )
+            except CollectionTimeBudgetExceeded:
+                # Not a failure: completed sources are terminal on disk/Blob and are
+                # never re-paid. Requeue a continuation that resumes the rest.
+                status = self.store.read_status(run_id)
+                status.update({
+                    "status": "queued",
+                    "phase": "collecting",
+                    "fatal_error": None,
+                    "current": {
+                        "source": None,
+                        "code": "collection_continuation",
+                        "message": "Worker time budget reached; collection continues automatically from the completed sources",
+                    },
+                })
+                self.store.write_status(run_id, status)
+                try:
+                    self.store.checkpoint_run(run_id)
+                except Exception:
+                    pass
+                try:
+                    self._requeue_continuation(run_id)
+                except Exception as requeue_exc:
+                    status = self.store.read_status(run_id)
+                    status["current"] = {
+                        "source": None,
+                        "code": "continuation_requeue_failed",
+                        "message": f"Automatic continuation could not be enqueued ({requeue_exc}); press Start to resume safely",
+                    }
+                    self.store.write_status(run_id, status)
+                return
             self.store.checkpoint_run(run_id)
             if collection_status.get("status") in {"cancelled", "failed"}:
                 return
