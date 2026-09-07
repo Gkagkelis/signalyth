@@ -30,6 +30,11 @@ class Settings(BaseSettings):
     # remain before the soft deadline, so a typical source (subruns + persist)
     # finishes before Vercel's hard kill and the run continues in a new worker.
     signalyth_collection_deadline_margin_seconds: int = 160
+    # Number of collection sources allowed to run at the same time. Sources are
+    # independent in fixed per-source plans; they share ONE atomic budget guard
+    # and one locked status writer. Automatic elastic rebalancing always runs
+    # sequentially regardless of this value. 1 = classic sequential behavior.
+    signalyth_collection_parallel_sources: int = 3 if RUNNING_ON_VERCEL else 1
     signalyth_dry_run: bool = True
     signalyth_max_parallel_runs: int = 2
     openai_api_key: str = ""
