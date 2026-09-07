@@ -35,18 +35,46 @@ PRESENTATION_RULESET_VERSION = "1.4.0"
 PRESENTATION_METHODOLOGY_VERSION = "signalyth-presentation-intelligence-v1.4"
 PRESENTATION_CONTRACT_VERSION = "signalyth-presentation-pack-v1.4"
 
-BG = "F7F5F0"
-INK = "151515"
-MUTED = "67635D"
-STONE = "E8E4DC"
-STONE_DARK = "D7D1C7"
+BG = "FFFFFF"
+INK = "1A1A1A"
+MUTED = "5F6368"
+STONE = "F1F1F1"
+STONE_DARK = "DADADA"
 WHITE = "FFFFFF"
-AEGEAN = "4D7180"
-POS = "597364"
-NEG = "8A5D57"
-NEUTRAL = "A7A198"
-WARN = "9B744E"
+AEGEAN = "155E75"
+POS = "1E7F4F"
+NEG = "B23B32"
+NEUTRAL = "9AA0A6"
+MIXED = "C98A2B"
+WARN = "B26A00"
 FONT = "Inter"
+
+# Stable semantic colors: the same sentiment/emotion always gets the same color
+# in dashboard, PPTX, PDF and Word, as the methodology requires.
+SENTIMENT_COLORS = {"positive": POS, "negative": NEG, "neutral": NEUTRAL, "mixed": MIXED}
+EMOTION_COLORS = {
+    "joy": "E2A63D", "anger": "B23B32", "sadness": "3E6B9E", "fear": "6B4FA1",
+    "disgust": "7A7F3A", "surprise": "2E8C8C", "neutral": "9AA0A6",
+}
+CATEGORY_LABELS_EL = {
+    "positive": "Θετικό", "negative": "Αρνητικό", "neutral": "Ουδέτερο", "mixed": "Μικτό",
+    "joy": "Χαρά", "anger": "Θυμός", "sadness": "Λύπη", "fear": "Φόβος",
+    "disgust": "Αποστροφή", "surprise": "Έκπληξη",
+    "media": "ΜΜΕ", "person": "Πρόσωπα", "brand_owned": "Owned", "organization": "Οργανισμοί", "unknown": "Άγνωστο",
+}
+
+def _cat_key(label) -> str:
+    return str(label or "").strip().lower()
+
+def _cat_label(label, lang: str) -> str:
+    key = _cat_key(label)
+    if lang == "el" and key in CATEGORY_LABELS_EL:
+        return CATEGORY_LABELS_EL[key]
+    return str(label)
+
+def _semantic_color(label) -> str | None:
+    key = _cat_key(label)
+    return SENTIMENT_COLORS.get(key) or EMOTION_COLORS.get(key)
 
 
 class PresentationCancelled(RuntimeError):
@@ -415,18 +443,18 @@ def build_presentation_plan(visual_pack: dict, evidence_pack: dict, plan: dict |
 
     exec_claims = []
     if rep.get("index") is not None:
-        exec_claims.append(_claim("exec-reputation", f"Brand Reputation: {_safe_float(rep.get('index')):.1f}/100", ["brand_reputation"], claim_type="deterministic_metric", source_values={"brand_reputation": rep.get("index")}))
+        exec_claims.append(_claim("exec-reputation", (f"Brand Reputation: {_safe_float(rep.get('index')):.1f}/100" if lang=="en" else f"Brand Reputation: {_safe_float(rep.get('index')):.1f}/100 (δείκτης ψηφιακής συζήτησης)"), ["brand_reputation"], claim_type="deterministic_metric", source_values={"brand_reputation": rep.get("index")}))
     if sentiment_chart:
         label, value = _largest_distribution(sentiment_chart)
         if label:
-            exec_claims.append(_claim("exec-sentiment", f"Largest weighted sentiment group: {label} ({value:.1f}%)", ["sentiment"], claim_type="deterministic_metric", source_values={label: value}))
+            exec_claims.append(_claim("exec-sentiment", (f"Largest weighted sentiment group: {label} ({value:.1f}%)" if lang=="en" else f"Μεγαλύτερη σταθμισμένη ομάδα sentiment: {_cat_label(label, lang)} ({value:.1f}%)"), ["sentiment"], claim_type="deterministic_metric", source_values={label: value}))
     if trend_chart:
         rows = (trend_chart.get("data") or {}).get("rows") or []
         if len(rows) >= 2:
             first, last = rows[0], rows[-1]
             if first.get("brand_reputation_index") is not None and last.get("brand_reputation_index") is not None:
                 delta = _safe_float(last.get("brand_reputation_index")) - _safe_float(first.get("brand_reputation_index"))
-                exec_claims.append(_claim("exec-trend", f"Brand Reputation changed {delta:+.1f} points across the observed period.", ["time_trends", "brand_reputation"], claim_type="deterministic_change", source_values={"delta": round(delta, 2)}))
+                exec_claims.append(_claim("exec-trend", ((f"Brand Reputation changed {delta:+.1f} points across the observed period." if lang=="en" else f"Το Brand Reputation μεταβλήθηκε κατά {delta:+.1f} μονάδες στην περίοδο παρατήρησης.") if lang=="en" else f"Το Brand Reputation μεταβλήθηκε κατά {delta:+.1f} μονάδες στην περίοδο παρατήρησης."), ["time_trends", "brand_reputation"], claim_type="deterministic_change", source_values={"delta": round(delta, 2)}))
 
     inv_candidates = sorted(investigations.values(), key=lambda x: (_safe_int((x.get("presentation") or {}).get("priority_score")), _safe_float((x.get("confidence") or {}).get("score"))), reverse=True)
     if inv_candidates:
@@ -450,7 +478,7 @@ def build_presentation_plan(visual_pack: dict, evidence_pack: dict, plan: dict |
     # Reputation + sentiment are core and are grouped deliberately to mirror the original report's analytical spine.
     rep_charts = [x for x in ["brand_reputation", "sentiment_distribution", "stance_distribution"] if x in charts]
     if rep_charts:
-        slides.append(_slide("reputation_sentiment", "metrics", "Reputation & sentiment" if lang == "en" else "Reputation & sentiment", chart_ids=rep_charts, priority=98, section="perception"))
+        slides.append(_slide("reputation_sentiment", "metrics", "Reputation & sentiment" if lang == "en" else "Φήμη & συναίσθημα", chart_ids=rep_charts, priority=98, section="perception"))
 
     positive_mentions = [m for m in mentions if str(m.get("sentiment_label") or "").lower() == "positive" and m.get("excerpt")]
     negative_mentions = [m for m in mentions if str(m.get("sentiment_label") or "").lower() == "negative" and m.get("excerpt")]
@@ -552,6 +580,44 @@ def build_presentation_plan(visual_pack: dict, evidence_pack: dict, plan: dict |
         slides.append(_slide("strategic_synthesis", "strategic_synthesis", "Strategic synthesis" if lang=="en" else "Στρατηγική σύνθεση", claims=synthesis_claims[:4], priority=96, section="closing", notes={"causality_guardrail":"Association ≠ proven causality."}))
 
     analyst = visual_pack.get("analyst_synthesis") or {}
+    if analyst.get("narratives"):
+        mention_by_id={str(m.get("record_id")):m for m in _top_mentions(inv)}
+        groups: list[tuple[str,list[dict]]] = []
+        for n in (analyst.get("narratives") or [])[:8]:
+            theme=_clean_text(n.get("theme") or "", 60) or ("Other themes" if lang=="en" else "Λοιπά θέματα")
+            for g in groups:
+                if g[0]==theme:
+                    g[1].append(n); break
+            else:
+                groups.append((theme,[n]))
+        # One slide per theme; a large theme spills onto a continuation slide.
+        nar_slides=0; ci=0
+        for theme,items in groups:
+            for chunk_start in range(0,len(items),3):
+                if nar_slides>=3: break
+                chunk=items[chunk_start:chunk_start+3]
+                nar_claims=[]
+                for n in chunk:
+                    ci+=1
+                    origin_lbl={"media":("media","ΜΜΕ"),"organic_people":("organic voices","οργανικές φωνές"),"owned":("owned","owned/promo"),"mixed":("mixed","μικτής προέλευσης"),"unknown":("unknown","άγνωστης προέλευσης")}.get(str(n.get("origin")),("mixed","μικτής προέλευσης"))
+                    text=(f"{_clean_text(n.get('title'),110)} — {_clean_text(n.get('idea'),330)} | Σημασία για το brand: {_clean_text(n.get('brand_meaning'),260)} | Βαρύτητα: {_clean_text(n.get('importance'),160)} ({origin_lbl[1]})" if lang=="el" else
+                          f"{_clean_text(n.get('title'),110)} — {_clean_text(n.get('idea'),330)} | Brand meaning: {_clean_text(n.get('brand_meaning'),260)} | Weight: {_clean_text(n.get('importance'),160)} ({origin_lbl[0]})")
+                    quotes=[]
+                    for rid in (n.get("evidence_record_ids") or [])[:2]:
+                        m=mention_by_id.get(str(rid))
+                        if m and m.get("excerpt"):
+                            quotes.append({"excerpt":_clean_text(m.get("excerpt"),210),"platform":m.get("platform"),"date":m.get("date"),"author":m.get("author")})
+                    nar_claims.append(_claim(f"narrative-{ci}",text,list(n.get("indicator_ids") or []),evidence_refs=n.get("evidence_record_ids") or [],claim_type="analyst_finding",causal_status="not_proven",source_values={"valence":n.get("valence"),"origin":n.get("origin"),"quotes":quotes}))
+                nar_slides+=1
+                base_title="What people really say" if lang=="en" else "Τι πραγματικά λέει ο κόσμος"
+                slides.append(_slide(f"consumer_narratives_{nar_slides}","narratives",f"{base_title} · {theme}",claims=nar_claims,priority=93,section="perception",notes={"causality_guardrail":"Association ≠ proven causality."}))
+    if analyst.get("strategic_implications"):
+        imp_claims=[]
+        for i,m in enumerate((analyst.get("strategic_implications") or [])[:4],start=1):
+            text=(f"Insight: {_clean_text(m.get('insight'),260)} | Implication: {_clean_text(m.get('implication'),260)} | Action: {_clean_text(m.get('action'),260)} | Objective: {_clean_text(m.get('objective'),200)}" if lang=="en" else
+                  f"Insight: {_clean_text(m.get('insight'),260)} | Επίπτωση: {_clean_text(m.get('implication'),260)} | Ενέργεια: {_clean_text(m.get('action'),260)} | Στόχος: {_clean_text(m.get('objective'),200)}")
+            imp_claims.append(_claim(f"implication-{i}",text,list(m.get("indicator_ids") or []),evidence_refs=m.get("evidence_record_ids") or [],claim_type="recommendation",causal_status="not_proven"))
+        slides.append(_slide("strategic_implications","evidence_cards","Strategic implications" if lang=="en" else "Στρατηγικές κατευθύνσεις",claims=imp_claims,priority=96,section="closing",notes={"causality_guardrail":"Association ≠ proven causality."}))
     if analyst.get("findings"):
         analyst_claims=[]
         for i,f in enumerate((analyst.get("findings") or [])[:6],start=1):
@@ -563,8 +629,11 @@ def build_presentation_plan(visual_pack: dict, evidence_pack: dict, plan: dict |
     if analyst.get("recommendations"):
         rec_claims=[]
         for i,r in enumerate((analyst.get("recommendations") or [])[:5],start=1):
-            text=(f"Action: {_clean_text(r.get('action'),450)} | Why: {_clean_text(r.get('rationale'),550)} | Monitor: {_clean_text(r.get('monitor'),350)}" if lang=="en" else
-                  f"Ενέργεια: {_clean_text(r.get('action'),450)} | Γιατί: {_clean_text(r.get('rationale'),550)} | Παρακολούθηση: {_clean_text(r.get('monitor'),350)}")
+            extra_en=[]; extra_el=[]
+            if r.get("timing"): extra_en.append(f"When: {_clean_text(r.get('timing'),120)}"); extra_el.append(f"Πότε: {_clean_text(r.get('timing'),120)}")
+            if r.get("stop_condition"): extra_en.append(f"Stop/review if: {_clean_text(r.get('stop_condition'),200)}"); extra_el.append(f"Όριο διακοπής: {_clean_text(r.get('stop_condition'),200)}")
+            text=(f"Action: {_clean_text(r.get('action'),450)} | Why: {_clean_text(r.get('rationale'),550)} | Monitor: {_clean_text(r.get('monitor'),350)}" + ("".join(" | "+e for e in extra_en)) if lang=="en" else
+                  f"Ενέργεια: {_clean_text(r.get('action'),450)} | Γιατί: {_clean_text(r.get('rationale'),550)} | Παρακολούθηση: {_clean_text(r.get('monitor'),350)}" + ("".join(" | "+e for e in extra_el)))
             rec_claims.append(_claim(f"recommendation-{i}",text,list(r.get("indicator_ids") or []),evidence_refs=r.get("evidence_record_ids") or [],claim_type="recommendation",causal_status="not_proven"))
         slides.append(_slide("recommendations","evidence_cards","Recommended actions" if lang=="en" else "Προτεινόμενες ενέργειες",claims=rec_claims,priority=95,section="closing"))
     if analyst.get("benchmark_summary") and (plan or {}).get("benchmark"):
@@ -586,14 +655,28 @@ def build_presentation_plan(visual_pack: dict, evidence_pack: dict, plan: dict |
         neg = [r for r in rows if _safe_float(r.get("contribution")) < 0]
         if pos:
             r = max(pos, key=lambda x: _safe_float(x.get("contribution")))
-            closing_claims.append(_claim("close-positive", f"Strongest positive driver: {_clean_text(r.get('name'))}", ["positive_narrative_drivers"], claim_type="deterministic_rank"))
+            closing_claims.append(_claim("close-positive", (f"Strongest positive driver: {_clean_text(r.get('name'))}" if lang=="en" else f"Ισχυρότερος θετικός παράγοντας: {_clean_text(r.get('name'))}"), ["positive_narrative_drivers"], claim_type="deterministic_rank"))
         if neg:
             r = min(neg, key=lambda x: _safe_float(x.get("contribution")))
-            closing_claims.append(_claim("close-negative", f"Strongest negative driver: {_clean_text(r.get('name'))}", ["negative_narrative_drivers"], claim_type="deterministic_rank"))
+            closing_claims.append(_claim("close-negative", (f"Strongest negative driver: {_clean_text(r.get('name'))}" if lang=="en" else f"Ισχυρότερος αρνητικός παράγοντας: {_clean_text(r.get('name'))}"), ["negative_narrative_drivers"], claim_type="deterministic_rank"))
     if inv_candidates:
         top = inv_candidates[0]
         closing_claims.append(_claim("close-watch", ("Watch next: " if lang == "en" else "Παρακολούθηση: ") + _txt(top.get("question"), lang), _resolve_investigation_indicator_ids(top), evidence_refs=top.get("evidence_record_ids") or [], claim_type="attention_point", causal_status="not_proven"))
-    slides.append(_slide("conclusions", "conclusions", "Conclusions & what to watch" if lang == "en" else "Συμπεράσματα & τι να προσέξουμε", claims=closing_claims, priority=100, required=True, section="closing"))
+    heads=(analyst.get("slide_headlines") or {}) if isinstance(analyst, dict) else {}
+    for sl in slides:
+        h=heads.get(sl.get("slide_id"))
+        if h: sl["title"]=_clean_text(h,110)
+    if analyst.get("emotion_interpretation"):
+        for sl in slides:
+            if sl.get("slide_id")=="emotions" and not sl.get("subtitle"):
+                sl["subtitle"]=_clean_text(analyst.get("emotion_interpretation"),260)
+    conclusions_notes={}
+    pr=(analyst.get("priorities") or {}) if isinstance(analyst, dict) else {}
+    if any(pr.get(k) for k in ("protect","improve","amplify","monitor")):
+        conclusions_notes["priorities"]={k:list(pr.get(k) or [])[:3] for k in ("protect","improve","amplify","monitor")}
+    if analyst.get("final_takeaway"):
+        conclusions_notes["final_takeaway"]=_clean_text(analyst.get("final_takeaway"),420)
+    slides.append(_slide("conclusions", "conclusions", "Conclusions & what to watch" if lang == "en" else "Συμπεράσματα & η επόμενη κίνηση", claims=closing_claims, priority=100, required=True, section="closing", notes=conclusions_notes or None))
 
     if cancel_check and cancel_check():
         raise PresentationCancelled("Presentation planning cancelled after slide selection")
@@ -739,14 +822,18 @@ def _add_logo(slide, logo_path: Path, x, y, w):
 
 def _add_kpi_card(slide, label, value, x, y, w, h, *, suffix="", accent=AEGEAN):
     shape = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(x), Inches(y), Inches(w), Inches(h))
-    shape.fill.solid(); shape.fill.fore_color.rgb = _rgb(WHITE); shape.line.color.rgb = _rgb(STONE_DARK)
-    _add_text(slide, label, x+0.18, y+0.18, w-0.36, 0.32, size=9.5, color=MUTED, bold=True)
-    _add_text(slide, f"{value}{suffix}", x+0.18, y+0.58, w-0.36, h-0.7, size=28, color=accent, bold=True, valign=MSO_ANCHOR.MIDDLE)
+    shape.adjustments[0] = 0.06
+    shape.fill.solid(); shape.fill.fore_color.rgb = _rgb("FAFAFA"); shape.line.color.rgb = _rgb(STONE_DARK)
+    shape.shadow.inherit = False
+    label_txt = str(label or "").upper()
+    _add_text(slide, label_txt, x+0.2, y+0.17, w-0.4, 0.5, size=9, color=MUTED, bold=True)
+    value_size = 36 if w >= 2.4 else 26 if w >= 1.7 else 20
+    _add_text(slide, f"{value}{suffix}", x+0.2, y+0.52, w-0.4, h-0.66, size=value_size, color=accent, bold=True, valign=MSO_ANCHOR.MIDDLE)
     return shape
 
 
-def _native_bar(slide, categories, series, x, y, w, h, *, horizontal=False, diverging=False, percent=False):
-    data = ChartData(); data.categories = [_clean_text(c, 60) for c in categories]
+def _native_bar(slide, categories, series, x, y, w, h, *, horizontal=False, diverging=False, percent=False, lang="en", point_colors=None, show_values=True):
+    data = ChartData(); data.categories = [_clean_text(_cat_label(c, lang), 60) for c in categories]
     for name, vals in series:
         data.add_series(_clean_text(name, 50), [float(_safe_float(v)) for v in vals])
     chart_type = XL_CHART_TYPE.BAR_CLUSTERED if horizontal else XL_CHART_TYPE.COLUMN_CLUSTERED
@@ -754,12 +841,13 @@ def _native_bar(slide, categories, series, x, y, w, h, *, horizontal=False, dive
     chart.has_legend = len(series) > 1
     if chart.has_legend:
         chart.legend.position = XL_LEGEND_POSITION.BOTTOM
-        chart.legend.font.size = Pt(8)
+        chart.legend.font.size = Pt(9)
+        chart.legend.include_in_layout = False
     chart.has_title = False
     chart.value_axis.has_major_gridlines = True
-    chart.value_axis.major_gridlines.format.line.color.rgb = _rgb(STONE_DARK)
-    chart.value_axis.tick_labels.font.size = Pt(8)
-    chart.category_axis.tick_labels.font.size = Pt(8)
+    chart.value_axis.major_gridlines.format.line.color.rgb = _rgb(STONE)
+    chart.value_axis.tick_labels.font.size = Pt(9)
+    chart.category_axis.tick_labels.font.size = Pt(10)
     chart.category_axis.tick_labels.font.name = FONT
     chart.value_axis.tick_labels.font.name = FONT
     if percent:
@@ -767,11 +855,74 @@ def _native_bar(slide, categories, series, x, y, w, h, *, horizontal=False, dive
         chart.value_axis.minimum_scale = 0
     if diverging:
         chart.value_axis.crosses_at = 0
-    # Explicit restrained palette; all chart elements remain editable.
-    palette = [AEGEAN, STONE_DARK, NEG, POS]
-    for i, s in enumerate(chart.series):
-        s.format.fill.solid(); s.format.fill.fore_color.rgb = _rgb(palette[i % len(palette)])
-        s.format.line.color.rgb = _rgb(palette[i % len(palette)])
+        try:
+            from pptx.enum.chart import XL_TICK_LABEL_POSITION
+            chart.category_axis.tick_labels.font.size = Pt(9)
+            chart.category_axis.tick_label_position = XL_TICK_LABEL_POSITION.LOW
+        except Exception:
+            pass
+    palette = [AEGEAN, "3E6B9E", NEG, POS]
+    values0 = [float(_safe_float(v)) for v in series[0][1]] if series else []
+    for i, sr in enumerate(chart.series):
+        sr.format.fill.solid(); sr.format.fill.fore_color.rgb = _rgb(palette[i % len(palette)])
+        sr.format.line.color.rgb = _rgb(WHITE)
+    if len(series) == 1:
+        sr = chart.series[0]
+        try:
+            for j, pt in enumerate(sr.points):
+                col = None
+                if point_colors:
+                    col = point_colors[j] if j < len(point_colors) else None
+                elif diverging:
+                    col = POS if values0[j] >= 0 else NEG
+                else:
+                    col = _semantic_color(categories[j])
+                if col:
+                    pt.format.fill.solid(); pt.format.fill.fore_color.rgb = _rgb(col)
+        except Exception:
+            pass
+        if show_values:
+            try:
+                plot = chart.plots[0]
+                plot.has_data_labels = True
+                dl = plot.data_labels
+                dl.font.size = Pt(9); dl.font.name = FONT; dl.font.color.rgb = _rgb(INK)
+                dl.number_format = '0.0'; dl.number_format_is_linked = False
+            except Exception:
+                pass
+        try:
+            chart.plots[0].gap_width = 60
+        except Exception:
+            pass
+    return chart
+
+
+def _native_doughnut(slide, categories, values, x, y, w, h, *, lang="en"):
+    data = ChartData(); data.categories = [_clean_text(_cat_label(c, lang), 40) for c in categories]
+    data.add_series("share", [float(_safe_float(v)) for v in values])
+    chart = slide.shapes.add_chart(XL_CHART_TYPE.DOUGHNUT, Inches(x), Inches(y), Inches(w), Inches(h), data).chart
+    chart.has_title = False
+    chart.has_legend = True
+    chart.legend.position = XL_LEGEND_POSITION.RIGHT
+    chart.legend.font.size = Pt(11); chart.legend.font.name = FONT
+    chart.legend.include_in_layout = False
+    sr = chart.series[0]
+    try:
+        for j, pt in enumerate(sr.points):
+            col = _semantic_color(categories[j]) or [AEGEAN, "3E6B9E", NEUTRAL, MIXED, NEG, POS][j % 6]
+            pt.format.fill.solid(); pt.format.fill.fore_color.rgb = _rgb(col)
+            pt.format.line.color.rgb = _rgb(WHITE); pt.format.line.width = Pt(2)
+    except Exception:
+        pass
+    try:
+        plot = chart.plots[0]
+        plot.has_data_labels = True
+        dl = plot.data_labels
+        dl.show_value = True
+        dl.font.size = Pt(11); dl.font.bold = True; dl.font.name = FONT; dl.font.color.rgb = _rgb(WHITE)
+        dl.number_format = '0"%"'; dl.number_format_is_linked = False
+    except Exception:
+        pass
     return chart
 
 
@@ -809,13 +960,13 @@ def _add_editable_table(slide, headers, rows, x, y, w, h, *, col_widths=None, fo
         for i, cw in enumerate(col_widths):
             table.columns[i].width = Inches(w * cw / total)
     for j, head in enumerate(headers):
-        cell = table.cell(0,j); cell.text = _clean_text(head, 80); cell.fill.solid(); cell.fill.fore_color.rgb = _rgb(INK)
+        cell = table.cell(0,j); cell.text = _clean_text(head, 80); cell.fill.solid(); cell.fill.fore_color.rgb = _rgb("EFEFEF")
         for p in cell.text_frame.paragraphs:
             for r in p.runs:
-                r.font.name=FONT; r.font.size=Pt(font_size); r.font.bold=True; r.font.color.rgb=_rgb(WHITE)
+                r.font.name=FONT; r.font.size=Pt(font_size); r.font.bold=True; r.font.color.rgb=_rgb(INK)
     for i, row in enumerate(rows, start=1):
         for j, val in enumerate(row):
-            cell=table.cell(i,j); cell.text=_clean_text(val, 500); cell.fill.solid(); cell.fill.fore_color.rgb=_rgb(WHITE if i%2 else "F0EDE7")
+            cell=table.cell(i,j); cell.text=_clean_text(val, 500); cell.fill.solid(); cell.fill.fore_color.rgb=_rgb(WHITE if i%2 else "F7F7F7")
             for p in cell.text_frame.paragraphs:
                 for r in p.runs:
                     r.font.name=FONT; r.font.size=Pt(font_size); r.font.color.rgb=_rgb(INK)
@@ -825,34 +976,59 @@ def _add_editable_table(slide, headers, rows, x, y, w, h, *, col_widths=None, fo
 def _render_chart_spec(slide, chart: dict, x, y, w, h, lang: str):
     typ = chart.get("chart_type"); data = chart.get("data") or {}
     if typ not in {"gauge_kpi", "quality_kpi", "kpi_group"}:
-        _add_text(slide, _txt(chart.get("title"), lang), x, y, w, 0.28, size=9.4, color=MUTED, bold=True)
-        y += 0.34
-        h = max(0.5, h - 0.34)
+        _add_text(slide, _txt(chart.get("title"), lang), x, y, w, 0.3, size=10.5, color=MUTED, bold=True)
+        y += 0.38
+        h = max(0.5, h - 0.38)
     if typ == "gauge_kpi":
         val = data.get("value")
-        _add_kpi_card(slide, _txt(chart.get("title"), lang), f"{_safe_float(val):.1f}", x, y, w, h, suffix=" / 100", accent=AEGEAN)
+        title_txt = _txt(chart.get("title"), lang)
+        cid = str(chart.get("chart_id") or "").lower()
+        if "confidence" in cid or "βεβαιότητα" in title_txt.lower() or "confidence" in title_txt.lower():
+            # §14: confidence is shown as High/Medium/Low with the profile score as
+            # secondary context — never as false client-facing precision.
+            score = _safe_float(val)
+            label = ("High" if score >= 70 else "Medium" if score >= 40 else "Low") if lang == "en" else ("Υψηλή" if score >= 70 else "Μέτρια" if score >= 40 else "Χαμηλή")
+            _add_kpi_card(slide, title_txt, label, x, y, w, h, accent=AEGEAN)
+            _add_text(slide, ("evidence profile " if lang == "en" else "προφίλ evidence ") + f"{score:.0f}/100", x+0.2, y+h-0.34, w-0.4, 0.26, size=8.5, color=MUTED)
+        else:
+            _add_kpi_card(slide, title_txt, f"{_safe_float(val):.1f}", x, y, w, h, suffix=" / 100", accent=AEGEAN)
+            if "reputation" in cid or "reputation" in title_txt.lower() or "φήμη" in title_txt.lower():
+                # §9: Brand Reputation is client-facing only with its scientific scope subtitle.
+                _add_text(slide, "Digital conversation signal" if lang == "en" else "Δείκτης ψηφιακής συζήτησης — όχι μέτρηση κοινής γνώμης", x+0.2, y+h-0.34, w-0.4, 0.26, size=8.5, color=MUTED)
         return "editable_shapes"
     if typ == "quality_kpi":
         val = next((data.get(k) for k in ("known_metric_share_percent","high_relevance_share_percent","value") if data.get(k) is not None), None)
         _add_kpi_card(slide, _txt(chart.get("title"), lang), f"{_safe_float(val):.1f}" if val is not None else "—", x, y, w, h, suffix="%" if val is not None else "", accent=AEGEAN)
         return "editable_shapes"
     if typ == "kpi_group":
-        items=data.get("items") or []; n=max(1,len(items)); gap=.12; cw=(w-gap*(n-1))/n
+        items=data.get("items") or []; n=max(1,len(items)); gap=.16
+        cols = n if (w - gap*(n-1))/n >= 1.9 else max(1, (n + 1)//2)
+        rows_n = (n + cols - 1)//cols
+        cw=(w-gap*(cols-1))/cols; ch=(h-gap*(rows_n-1))/rows_n
         for i,item in enumerate(items):
             label=_txt(item.get("label"),lang); val=item.get("value")
-            _add_kpi_card(slide,label, f"{_safe_float(val):.0f}" if isinstance(val,(int,float)) else str(val), x+i*(cw+gap),y,cw,h,accent=AEGEAN)
+            r,c=divmod(i,cols)
+            _add_kpi_card(slide,label, f"{_safe_float(val):.0f}" if isinstance(val,(int,float)) else str(val), x+c*(cw+gap),y+r*(ch+gap),cw,ch,accent=AEGEAN)
         return "editable_shapes"
     if typ == "distribution_bar":
         cats=data.get("categories") or []
-        _native_bar(slide,[c.get("label") for c in cats],[("%",[c.get("value") for c in cats])],x,y,w,h,horizontal=True,percent=True)
+        labels=[c.get("label") for c in cats]
+        values=[c.get("value") for c in cats]
+        keys={_cat_key(l) for l in labels}
+        if keys and keys.issubset(set(SENTIMENT_COLORS) | {"media","person","brand_owned","organization","unknown"}):
+            _native_doughnut(slide,labels,values,x,y,w,h,lang=lang)
+        else:
+            order=sorted(range(len(labels)),key=lambda i:-_safe_float(values[i]))
+            labels=[labels[i] for i in order]; values=[values[i] for i in order]
+            _native_bar(slide,labels,[("%",values)],x,y,w,h,horizontal=True,percent=True,lang=lang)
         return "native_chart"
     if typ == "diverging_bar":
         rows=data.get("rows") or []
-        _native_bar(slide,[r.get("name") for r in rows[:10]],[("Contribution",[r.get("contribution") for r in rows[:10]])],x,y,w,h,horizontal=True,diverging=True)
+        _native_bar(slide,[r.get("name") for r in rows[:10]],[("Contribution",[r.get("contribution") for r in rows[:10]])],x,y,w,h,horizontal=True,diverging=True,lang=lang)
         return "native_chart"
     if typ == "grouped_bar":
         rows=data.get("rows") or []
-        _native_bar(slide,[r.get("name") for r in rows],[("Record share",[r.get("record_share") for r in rows]),("Attention share",[r.get("attention_share") for r in rows])],x,y,w,h,horizontal=False,percent=True)
+        _native_bar(slide,[r.get("name") for r in rows],[("Record share" if lang=="en" else "Μερίδιο αναφορών",[r.get("record_share") for r in rows]),("Attention share" if lang=="en" else "Μερίδιο προσοχής",[r.get("attention_share") for r in rows])],x,y,w,h,horizontal=False,percent=True,lang=lang)
         return "native_chart"
     if typ == "time_series":
         rows=data.get("rows") or []
@@ -909,13 +1085,29 @@ def _render_chart_spec(slide, chart: dict, x, y, w, h, lang: str):
 
 def _add_claim_card(slide, text, x, y, w, h, *, label=None, accent=AEGEAN, font_size=11.5):
     shape = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(x), Inches(y), Inches(w), Inches(h))
-    shape.fill.solid(); shape.fill.fore_color.rgb = _rgb(WHITE); shape.line.color.rgb = _rgb(STONE_DARK)
+    shape.adjustments[0] = 0.05
+    shape.shadow.inherit = False
+    shape.fill.solid(); shape.fill.fore_color.rgb = _rgb("FAFAFA"); shape.line.color.rgb = _rgb(STONE_DARK)
     if label:
         _add_text(slide, label, x+.18, y+.14, w-.36, .24, size=8.5, color=accent, bold=True)
         _add_text(slide, text, x+.18, y+.47, w-.36, h-.58, size=font_size, color=INK)
     else:
         _add_text(slide, text, x+.18, y+.18, w-.36, h-.36, size=font_size, color=INK, valign=MSO_ANCHOR.MIDDLE)
     return shape
+
+
+CLAIM_TYPE_LABELS = {
+    "descriptive": ("FACT", "ΔΕΔΟΜΕΝΟ"), "deterministic_rank": ("FACT", "ΔΕΔΟΜΕΝΟ"),
+    "investigation": ("INTERPRETATION", "ΕΡΜΗΝΕΙΑ"), "analyst_finding": ("INTERPRETATION", "ΕΡΜΗΝΕΙΑ"),
+    "hypothesis": ("HYPOTHESIS", "ΥΠΟΘΕΣΗ"), "recommendation": ("RECOMMENDATION", "ΣΥΣΤΑΣΗ"),
+    "benchmark": ("BENCHMARK", "ΣΥΓΚΡΙΣΗ"),
+}
+
+def _claim_type_label(claim_type: str, lang: str) -> str | None:
+    pair = CLAIM_TYPE_LABELS.get(str(claim_type or ""))
+    if not pair:
+        return None
+    return pair[1] if lang == "el" else pair[0]
 
 
 def _role_label(role: str, lang: str) -> str:
@@ -965,10 +1157,39 @@ def generate_pptx(presentation_plan: dict, visual_pack: dict, output_path: Path,
                 _add_text(slide,"Critical / negative evidence" if lang=="en" else "Κριτικό / αρνητικό evidence",6.82,1.55,5.2,.35,size=11,color=NEG,bold=True)
                 for i,cl in enumerate(pos[:3]): _add_claim_card(slide,cl.get("text"),1.12,2.0+i*1.42,5.35,1.22,accent=POS,font_size=9.5)
                 for i,cl in enumerate(neg[:3]): _add_claim_card(slide,cl.get("text"),6.82,2.0+i*1.42,5.35,1.22,accent=NEG,font_size=9.5)
+            elif typ == "narratives":
+                n=min(3,len(claims)); block=(4.95-(n-1)*0.18)/max(1,n)
+                val_col={"positive":POS,"negative":NEG,"mixed":MIXED}
+                for i,cl in enumerate(claims[:3]):
+                    yy=1.6+i*(block+0.18)
+                    sv=cl.get("source_values") or {}
+                    valence=str(sv.get("valence") or "")
+                    quotes=[q for q in (sv.get("quotes") or []) if q.get("excerpt")][:2]
+                    qh=0.34*len(quotes)
+                    card_h=max(0.8, block-qh-0.06)
+                    dot = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(1.12), Inches(yy+0.16), Inches(0.18), Inches(0.18))
+                    dot.fill.solid(); dot.fill.fore_color.rgb=_rgb(val_col.get(valence,NEUTRAL)); dot.line.fill.background(); dot.shadow.inherit=False
+                    txt=str(cl.get("text") or "").replace(" | ","\n")
+                    _add_claim_card(slide,txt,1.48,yy,10.75,card_h,font_size=10.2 if n<=2 else 9.3)
+                    # Verbatim voice of the audience: real excerpts only, with source and date.
+                    for qi,q in enumerate(quotes):
+                        src=" · ".join(str(x) for x in (q.get("platform"),q.get("date")) if x)
+                        line=f"“{q.get('excerpt')}” — {src}" if src else f"“{q.get('excerpt')}”"
+                        _add_text(slide,line,1.86,yy+card_h+0.04+qi*0.32,10.3,0.3,size=9,color=MUTED)
+            elif typ == "evidence_cards" and spec.get("slide_id") == "recommendations":
+                n=min(5,len(claims)); ch=(5.0-(n-1)*0.16)/max(1,n)
+                for i,cl in enumerate(claims[:5]):
+                    yy=1.62+i*(ch+0.16)
+                    badge = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(1.12), Inches(yy+ch/2-0.21), Inches(0.42), Inches(0.42))
+                    badge.fill.solid(); badge.fill.fore_color.rgb=_rgb(AEGEAN); badge.line.fill.background(); badge.shadow.inherit=False
+                    _add_text(slide,str(i+1),1.12,yy+ch/2-0.21,0.42,0.42,size=15,color=WHITE,bold=True,align=PP_ALIGN.CENTER,valign=MSO_ANCHOR.MIDDLE)
+                    txt=str(cl.get("text") or "").replace(" | ","\n")
+                    _add_claim_card(slide,txt,1.72,yy,10.5,ch,font_size=10.5 if n<=4 else 9.5)
             elif typ == "evidence_cards":
                 for i,cl in enumerate(claims[:4]):
                     col=i%2; row=i//2
-                    _add_claim_card(slide,cl.get("text"),1.12+col*5.7,1.72+row*2.35,5.35,1.95,accent=AEGEAN,font_size=10.0)
+                    tag=_claim_type_label(cl.get("claim_type"),lang)
+                    _add_claim_card(slide,cl.get("text"),1.12+col*5.7,1.72+row*2.35,5.35,1.95,label=tag,accent=AEGEAN,font_size=10.0)
             elif typ == "strategic_synthesis":
                 for i,cl in enumerate(claims[:4]):
                     role=str((cl.get("source_values") or {}).get("role") or "")
@@ -986,15 +1207,42 @@ def generate_pptx(presentation_plan: dict, visual_pack: dict, output_path: Path,
             elif len(cids)>=2:
                 chart_modes.append((cids[0],_render_chart_spec(slide,charts[cids[0]],1.12,2.0,5.35,4.35,lang)))
                 chart_modes.append((cids[1],_render_chart_spec(slide,charts[cids[1]],6.82,2.0,5.35,4.35,lang)))
+            elif typ == "conclusions" and (spec.get("notes") or {}).get("priorities"):
+                prm=(spec.get("notes") or {}).get("priorities") or {}
+                quad=[("protect", "Protect" if lang=="en" else "ΠΡΟΣΤΑΤΕΨΕ", POS),
+                      ("improve", "Improve" if lang=="en" else "ΔΙΟΡΘΩΣΕ", NEG),
+                      ("amplify", "Amplify" if lang=="en" else "ΕΝΙΣΧΥΣΕ", AEGEAN),
+                      ("monitor", "Monitor" if lang=="en" else "ΠΑΡΑΚΟΛΟΥΘΗΣΕ", MIXED)]
+                has_take=bool((spec.get("notes") or {}).get("final_takeaway"))
+                qh=2.18 if has_take else 2.5
+                for i,(key,lbl,accent) in enumerate(quad):
+                    col=i%2; row=i//2
+                    items=[_clean_text(v,150) for v in (prm.get(key) or [])][:3]
+                    body="\n".join("• "+v for v in items) if items else ("—")
+                    _add_claim_card(slide,body,1.12+col*5.72,1.6+row*(qh+0.18),5.5,qh,label=lbl,accent=accent,font_size=10)
+                if has_take:
+                    strip = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(1.12), Inches(6.18), Inches(11.1), Inches(0.92))
+                    strip.adjustments[0]=0.1; strip.shadow.inherit=False
+                    strip.fill.solid(); strip.fill.fore_color.rgb=_rgb("EEF4F6"); strip.line.fill.background()
+                    prefix="Final takeaway: " if lang=="en" else "Τελικό συμπέρασμα: "
+                    _add_text(slide,prefix+_clean_text((spec.get("notes") or {}).get("final_takeaway"),380),1.34,6.28,10.66,.74,size=12,color=INK,bold=True,valign=MSO_ANCHOR.MIDDLE)
             elif claims:
+                sub_norm=_clean_text(spec.get("subtitle") or "", 400)
+                # The subtitle already states the finding; never repeat it as a card.
+                claims=[c for c in claims if _clean_text(c.get("text"),400)!=sub_norm]
                 y=1.8
                 for cl in claims[:5]:
                     _add_claim_card(slide,cl.get("text"),1.15,y,10.9,.82,font_size=12.5)
                     y+=1.0
             if claims and cids and typ not in {"executive_summary","methodology"}:
-                # Small evidence note at the bottom; the claim ledger is fully persisted separately.
-                note=" · ".join(_clean_text(c.get("text"),180) for c in claims[:2])
-                _add_text(slide,note,1.15,6.55,11.0,.38,size=8.2,color=MUTED)
+                # Plain-language takeaway strip: what this slide means, in one sentence.
+                strip = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(1.12), Inches(6.42), Inches(11.1), Inches(0.62))
+                strip.adjustments[0] = 0.14
+                strip.shadow.inherit = False
+                strip.fill.solid(); strip.fill.fore_color.rgb = _rgb("EEF4F6"); strip.line.fill.background()
+                prefix = "What it means: " if lang == "en" else "Τι σημαίνει: "
+                note = prefix + _clean_text(claims[0].get("text"), 220)
+                _add_text(slide, note, 1.32, 6.5, 10.7, .48, size=10.5, color=INK, valign=MSO_ANCHOR.MIDDLE)
             if spec.get("notes",{}).get("causality_guardrail"):
                 _add_text(slide,"Association ≠ proven causality." if lang=="en" else "Συσχέτιση ≠ αποδεδειγμένη αιτιότητα.",8.3,6.92,4.0,.2,size=7.2,color=WARN,align=PP_ALIGN.RIGHT)
             render_audit.extend({"slide_id":spec.get("slide_id"),"chart_id":cid,"render_mode":mode} for cid,mode in chart_modes)
