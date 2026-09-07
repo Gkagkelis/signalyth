@@ -23,6 +23,14 @@ from app.services.resilience import (
 SOURCE_TERMINAL = {"succeeded", "succeeded_empty", "partial", "failed", "cancelled_partial", "skipped_cancelled", "skipped_budget_safety"}
 
 
+class CollectionTimeBudgetExceeded(RuntimeError):
+    """Raised between sources when the worker invocation is out of safe time.
+
+    All completed sources are already persisted with terminal statuses, so the
+    requeued continuation resumes them for free and only runs remaining sources.
+    """
+
+
 
 
 def _assert_live_sources_verified(plan: dict) -> None:
@@ -248,6 +256,7 @@ def execute_plan(
     folder: Path,
     cancel_check: Callable[[], bool] | None = None,
     continue_pipeline: bool = False,
+    deadline_check: Callable[[], bool] | None = None,
 ):
     """Execute a collection plan and persist observable lifecycle state.
 
@@ -417,6 +426,13 @@ def execute_plan(
             status["cancel_requested"] = True
             mark_remaining_cancelled(idx)
             return finish_cancelled("Cancelled before the next source started")
+        if deadline_check and deadline_check():
+            # Every completed source is persisted with a terminal status; hand the
+            # remaining sources to a fresh invocation instead of dying mid-run.
+            sync("Worker time budget reached; collection continues automatically in a new worker", None, code="collection_continuation")
+            raise CollectionTimeBudgetExceeded(
+                f"Worker time budget reached before source {sp.get('source')}; run will continue automatically."
+            )
 
         source = sp["source"]
         if source in resumed_sources:

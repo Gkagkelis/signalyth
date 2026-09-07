@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import re
 import threading
 from datetime import datetime, timezone
@@ -283,6 +284,15 @@ class RunStore:
 
     def cancel_requested_folder(self, folder: Path) -> bool:
         return bool(self.read_control_folder(folder).get("cancel_requested"))
+
+    def delete_run(self, run_id: str) -> None:
+        """Permanently remove a run's local workspace and its cloud mirror."""
+        if not run_id or not _RUN_ID_RE.match(run_id):
+            raise RunNotFound(run_id)
+        folder = self.root / "runs" / run_id
+        if folder.is_dir():
+            shutil.rmtree(folder, ignore_errors=True)
+        self.cloud.delete_run(run_id)
 
     def checkpoint_run(self, run_id: str) -> None:
         """Persist the complete run workspace after an expensive pipeline boundary."""
