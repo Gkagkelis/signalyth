@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import threading
+import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
 
 from app.config import settings
 from app.services.apify_service import CollectionNotConfigured
 from app.services.collector import execute_plan
 from app.services.cleaning import CleaningCancelled, clean_run
 from app.services.relevance_expansion import adaptive_expand_after_cleaning
-from app.services.ai_analysis import AIAnalysisCancelled, analyze_run
+from app.services.ai_analysis import AIAnalysisCancelled, AIAnalysisTimeBudgetExceeded, analyze_run
 from app.services.intelligence import build_intelligence
 from app.services.investigations import InvestigationCancelled, build_investigations
 from app.services.visualizations import VisualizationCancelled, build_visualizations
@@ -41,6 +43,44 @@ class RunManager:
         self.executor = ThreadPoolExecutor(max_workers=max(1, workers), thread_name_prefix="signalyth-run")
         self._lock = threading.RLock()
         self._jobs: dict[str, Future] = {}
+        # Monotonic timestamp after which the current invocation must stop doing new
+        # paid work, checkpoint and requeue a continuation. None disables the guard.
+        self._deadline_monotonic: float | None = None
+
+    def set_invocation_deadline(self, seconds: float | None) -> None:
+        if seconds and seconds > 0:
+            self._deadline_monotonic = time.monotonic() + float(seconds)
+        else:
+            self._deadline_monotonic = None
+
+    def _deadline_reached(self) -> bool:
+        return self._deadline_monotonic is not None and time.monotonic() >= self._deadline_monotonic
+
+    @staticmethod
+    def _status_age_seconds(status: dict) -> float | None:
+        stamp = status.get("updated_at")
+        if not stamp:
+            return None
+        try:
+            updated = datetime.fromisoformat(str(stamp))
+            if updated.tzinfo is None:
+                updated = updated.replace(tzinfo=timezone.utc)
+            return max(0.0, (datetime.now(timezone.utc) - updated).total_seconds())
+        except Exception:
+            return None
+
+    def _requeue_continuation(self, run_id: str) -> None:
+        """Schedule a fresh invocation that resumes the run from durable state."""
+        if settings.signalyth_execution_backend.strip().lower() == "celery":
+            from app.worker.tasks import run_signalyth
+            result = run_signalyth.apply_async(args=[run_id], task_id=f"{run_id}-c{uuid4().hex[:8]}")
+            status = self.store.read_status(run_id)
+            status["queue_message_id"] = str(result.id)
+            self.store.write_status(run_id, status)
+        else:
+            with self._lock:
+                future = self.executor.submit(self._worker, run_id)
+                self._jobs[run_id] = future
 
     def _set_status(self, run_id: str, **changes) -> dict:
         status = self.store.read_status(run_id)
@@ -57,7 +97,15 @@ class RunManager:
             if current in self.store.TERMINAL_STATUSES:
                 raise RunStateError(f"Run is already terminal: {current}")
             if current not in {"planned", "queued"}:
-                raise RunStateError(f"Run cannot be started from state: {current}")
+                # A serverless worker can be hard-killed mid-run, leaving the status
+                # permanently "running". If nothing has written status.json for the
+                # stale window, treat the worker as dead and allow a durable resume.
+                age = self._status_age_seconds(status)
+                stale_after = max(60, int(settings.signalyth_stale_running_after_seconds))
+                if current in {"running", "cancelling"} and age is not None and age >= stale_after:
+                    pass  # recoverable orphan: fall through and requeue a resume
+                else:
+                    raise RunStateError(f"Run cannot be started from state: {current}")
 
             self.store.reset_control(run_id)
             status.update({
@@ -73,7 +121,7 @@ class RunManager:
                 try:
                     # Lazy import keeps the local/offline build independent of Celery.
                     from app.worker.tasks import run_signalyth
-                    result = run_signalyth.apply_async(args=[run_id], task_id=run_id)
+                    result = run_signalyth.apply_async(args=[run_id], task_id=f"{run_id}-{uuid4().hex[:8]}")
                     status = self.store.read_status(run_id)
                     status["queue_message_id"] = str(result.id)
                     self.store.write_status(run_id, status)
@@ -95,6 +143,7 @@ class RunManager:
 
     def run_now(self, run_id: str) -> None:
         """Execute one run in the current process (used by the Vercel Celery subscriber)."""
+        self.set_invocation_deadline(settings.signalyth_worker_soft_deadline_seconds)
         self._worker(run_id)
 
     def _worker(self, run_id: str):
@@ -104,6 +153,25 @@ class RunManager:
                 self._mark_cancelled_before_start(run_id)
                 return
             plan = self.store.read_plan(run_id)
+
+            # Durable resume: if an earlier invocation already finished collection and
+            # cleaning, do NOT re-run paid collection. Jump straight to the analysis
+            # chain, which itself resumes cheaply via the per-batch OpenAI cache.
+            cleaning_done = (folder / "cleaning" / "semantic-candidates.json").exists() or (
+                folder / "cleaning" / "trusted.json"
+            ).exists()
+            prior_status = self.store.read_status(run_id)
+            resumable = prior_status.get("status") not in self.store.TERMINAL_STATUSES
+            if cleaning_done and resumable:
+                terminal = prior_status.get("collection_status") or "succeeded"
+                if settings.signalyth_ai_enabled and settings.openai_api_key:
+                    self._run_ai_analysis(run_id, folder, plan, terminal)
+                else:
+                    # AI disabled: re-running cheap deterministic cleaning safely
+                    # re-establishes the terminal state without any paid collection.
+                    self._run_cleaning(run_id, folder, plan)
+                return
+
             collection_status = execute_plan(
                 plan,
                 run_id,
@@ -236,9 +304,48 @@ class RunManager:
                 folder,
                 plan=plan,
                 cancel_check=lambda: self.store.cancel_requested_folder(folder),
+                deadline_check=self._deadline_reached,
             )
         except AIAnalysisCancelled:
             self._mark_cancelled_after_collection(run_id)
+            return
+        except AIAnalysisTimeBudgetExceeded as exc:
+            # Not a failure: every completed OpenAI batch is already durably cached.
+            # Hand the run to a fresh invocation that resumes exactly where we stopped.
+            status = self.store.read_status(run_id)
+            status.update({
+                "status": "queued",
+                "phase": "ai_analysis",
+                "fatal_error": None,
+                "current": {
+                    "source": None,
+                    "code": "ai_analysis_continuation",
+                    "message": "Worker time budget reached; analysis will continue automatically from the last saved batch",
+                },
+                "analysis": {
+                    **(status.get("analysis") or {}),
+                    "status": "running",
+                    "error": None,
+                },
+            })
+            self.store.write_status(run_id, status)
+            try:
+                self.store.checkpoint_run(run_id)
+            except Exception:
+                pass
+            try:
+                self._requeue_continuation(run_id)
+            except Exception as requeue_exc:
+                status = self.store.read_status(run_id)
+                status.update({
+                    "status": "queued",
+                    "current": {
+                        "source": None,
+                        "code": "continuation_requeue_failed",
+                        "message": f"Automatic continuation could not be enqueued ({requeue_exc}); press Start to resume safely",
+                    },
+                })
+                self.store.write_status(run_id, status)
             return
         except Exception as exc:
             status = self.store.read_status(run_id)
@@ -262,15 +369,41 @@ class RunManager:
         # Master30: if semantic relevance leaves a per-source analyzable shortfall,
         # do one bounded source-specific refill pass, then re-clean/re-analyze. OpenAI
         # cache prevents re-paying unchanged records.
-        if plan.get("master_spec_version") == "SIGNALYTH-master30-v1":
+        refill_already_attempted = (folder / "semantic-refill.json").exists()
+        if plan.get("master_spec_version") == "SIGNALYTH-master30-v1" and not refill_already_attempted:
             try:
                 refill = semantic_refill(folder, plan, cancel_check=lambda: self.store.cancel_requested_folder(folder))
                 if int(refill.get("added_normalized", 0) or 0) > 0:
                     clean_run(folder, plan=plan, cancel_check=lambda: self.store.cancel_requested_folder(folder))
-                    report = analyze_run(folder, plan=plan, cancel_check=lambda: self.store.cancel_requested_folder(folder), force=True)
+                    report = analyze_run(
+                        folder,
+                        plan=plan,
+                        cancel_check=lambda: self.store.cancel_requested_folder(folder),
+                        force=True,
+                        deadline_check=self._deadline_reached,
+                    )
                 status_refill = self.store.read_status(run_id)
                 status_refill["semantic_refill"] = {"status": refill.get("status"), "summary": refill, "completed_at": _utcnow()}
                 self.store.write_status(run_id, status_refill)
+            except AIAnalysisTimeBudgetExceeded:
+                # The refill re-analysis ran out of invocation time. All paid batches
+                # are cached durably; requeue and let the continuation finish it.
+                status_refill = self.store.read_status(run_id)
+                status_refill.update({
+                    "status": "queued",
+                    "phase": "ai_analysis",
+                    "current": {"source": None, "code": "ai_analysis_continuation", "message": "Refill analysis will continue automatically from the last saved batch"},
+                })
+                self.store.write_status(run_id, status_refill)
+                try:
+                    self.store.checkpoint_run(run_id)
+                except Exception:
+                    pass
+                try:
+                    self._requeue_continuation(run_id)
+                except Exception:
+                    pass
+                return
             except Exception as exc:
                 # Refill is quality-improving and bounded; a provider failure must not
                 # erase a valid first-pass analysis.

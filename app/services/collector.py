@@ -301,8 +301,24 @@ def execute_plan(
     }
     status["current"] = {"source": None, "code": "starting_collection", "message": "Starting collection"}
 
+    # Durable resume: a source that already reached a terminal state in an earlier
+    # invocation, with its normalized evidence saved, is never re-collected (and
+    # never re-paid). Its prior cost is restored into the global budget guard.
+    resumed_sources: set[str] = set()
     for sp in execution_sources:
         source = sp["source"]
+        prior = status.get("sources", {}).get(source, {}) or {}
+        if prior.get("status") in SOURCE_TERMINAL and (folder / f"normalized-{source}.json").exists():
+            resumed_sources.add(source)
+            prior_cost = max(0.0, float(prior.get("cost_usd", 0.0) or 0.0))
+            guard.spent += prior_cost
+            prior["resumed"] = True
+            status["sources"][source] = prior
+
+    for sp in execution_sources:
+        source = sp["source"]
+        if source in resumed_sources:
+            continue
         existing = status["sources"].get(source, {})
         existing.update({
             "status": "pending",
@@ -403,6 +419,13 @@ def execute_plan(
             return finish_cancelled("Cancelled before the next source started")
 
         source = sp["source"]
+        if source in resumed_sources:
+            prior_norm = store.read(folder / f"normalized-{source}.json", []) or []
+            all_normalized.extend(prior_norm)
+            processed_base_total += int(sp.get("target_items", 0) or 0)
+            collected_total_so_far += len(prior_norm)
+            sync(f"{source}: already completed in a previous invocation; evidence reused", source, code="source_resumed")
+            continue
         base_target = int(sp.get("target_items", 0) or 0)
         carry_in = max(0, processed_base_total - collected_total_so_far) if automatic else 0
         remaining_count = len(execution_sources) - idx
