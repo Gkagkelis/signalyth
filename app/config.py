@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     # A run whose status is "running" but whose status.json has not been updated for
     # this long is treated as orphaned by a killed worker and may be resumed.
     signalyth_stale_running_after_seconds: int = 600
+    # New collection sources are not started when less than this many seconds
+    # remain before the soft deadline, so a typical source (subruns + persist)
+    # finishes before Vercel's hard kill and the run continues in a new worker.
+    signalyth_collection_deadline_margin_seconds: int = 160
     signalyth_dry_run: bool = True
     signalyth_max_parallel_runs: int = 2
     openai_api_key: str = ""

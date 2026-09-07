@@ -499,6 +499,34 @@ def start_run(run_id: str):
         raise HTTPException(status_code=409, detail=str(exc))
 
 
+@app.delete("/api/runs/{run_id}")
+def delete_run(run_id: str):
+    """Permanently delete one run. Active runs must be cancelled first, unless the
+    worker is provably dead (no status write for the stale window)."""
+    try:
+        status = store.read_status(run_id)
+    except RunNotFound:
+        raise HTTPException(status_code=404, detail="Run not found")
+    current = str(status.get("status") or "")
+    if current in {"queued", "running", "cancelling"}:
+        stale_after = max(60, int(settings.signalyth_stale_running_after_seconds))
+        stamp = status.get("updated_at")
+        age = None
+        if stamp:
+            try:
+                from datetime import datetime, timezone
+                updated = datetime.fromisoformat(str(stamp))
+                if updated.tzinfo is None:
+                    updated = updated.replace(tzinfo=timezone.utc)
+                age = (datetime.now(timezone.utc) - updated).total_seconds()
+            except Exception:
+                age = None
+        if age is None or age < stale_after:
+            raise HTTPException(status_code=409, detail="This run is still active. Cancel it first, then delete it.")
+    store.delete_run(run_id)
+    return {"run_id": run_id, "deleted": True}
+
+
 @app.post("/api/runs/{run_id}/cancel")
 def cancel_run(run_id: str):
     try:
