@@ -93,6 +93,27 @@ class CloudPersistence:
         except Exception:
             return None
 
+
+    def delete_run(self, run_id: str) -> None:
+        """Best-effort removal of every stored object for one run."""
+        if not self.enabled:
+            return
+        try:
+            with self._client() as client:
+                paths = []
+                for item in client.iter_objects(prefix=f"{self.RUN_PREFIX}/{run_id}/", limit=1000):
+                    path = str(getattr(item, "pathname", "") or getattr(item, "url", "") or "")
+                    if path:
+                        paths.append(path)
+                for path in paths:
+                    try:
+                        client.delete(path)
+                    except Exception:
+                        pass
+        except Exception:
+            # Deletion is user-facing cleanup; a transient Blob error must not 500 the API.
+            pass
+
     def list_run_ids(self, limit: int = 100) -> list[str]:
         if not self.enabled:
             return []
