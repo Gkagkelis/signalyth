@@ -25,6 +25,14 @@ SENTIMENT = ("positive", "negative", "neutral", "mixed")
 RELEVANCE = ("relevant", "irrelevant", "uncertain")
 
 
+class AIAnalysisTimeBudgetExceeded(RuntimeError):
+    """Raised when the current worker invocation is out of safe execution time.
+
+    All paid batch results completed so far have already been checkpointed
+    durably; the run manager requeues a continuation that resumes via cache hits.
+    """
+
+
 class AIAnalysisCancelled(RuntimeError):
     pass
 
@@ -663,6 +671,8 @@ def analyze_records(
     cancel_check: Callable[[], bool] | None = None,
     batch_size: int | None = None,
     cache: dict | None = None,
+    checkpoint: Callable[[dict], None] | None = None,
+    deadline_check: Callable[[], bool] | None = None,
 ) -> dict:
     source_snapshot = copy.deepcopy(trusted_records)
     ids = [str(r.get("id") or "") for r in trusted_records]
@@ -701,6 +711,13 @@ def analyze_records(
     for start in range(0, len(bulk_missing), batch_size):
         if cancel_check and cancel_check():
             raise AIAnalysisCancelled()
+        if deadline_check and deadline_check():
+            if checkpoint:
+                checkpoint(cache)
+            raise AIAnalysisTimeBudgetExceeded(
+                f"Worker time budget reached before bulk batch {start // batch_size + 1}; "
+                "completed batches are checkpointed and the run will resume."
+            )
         batch = bulk_missing[start:start + batch_size]
         reservation = _batch_reservation_usd(batch, "bulk")
         if ai_budget_usd and ai_spent_usd + reservation > ai_budget_usd:
@@ -715,6 +732,10 @@ def analyze_records(
             bulk_annotations[rid] = a
             if not ({"provider_partial_failure", "ai_budget_guard"} & set(a.get("flags", []))):
                 cache[bulk_key_by_id[rid]] = copy.deepcopy(a)
+        # Paid results must survive a hard worker kill: persist after EVERY batch,
+        # never only at the end of the whole analysis.
+        if checkpoint:
+            checkpoint(cache)
 
     escalation_rows = [
         row for row in trusted_records
@@ -740,6 +761,13 @@ def analyze_records(
     for start in range(0, len(reasoning_missing), reasoning_batch_size):
         if cancel_check and cancel_check():
             raise AIAnalysisCancelled()
+        if deadline_check and deadline_check():
+            if checkpoint:
+                checkpoint(cache)
+            raise AIAnalysisTimeBudgetExceeded(
+                f"Worker time budget reached before reasoning batch {start // reasoning_batch_size + 1}; "
+                "completed batches are checkpointed and the run will resume."
+            )
         batch = reasoning_missing[start:start + reasoning_batch_size]
         reservation = _batch_reservation_usd(batch, "reasoning")
         if ai_budget_usd and ai_spent_usd + reservation > ai_budget_usd:
@@ -756,6 +784,8 @@ def analyze_records(
             reasoning_annotations[rid] = a
             if not ({"provider_partial_failure", "ai_budget_guard"} & set(a.get("flags", []))):
                 cache[reasoning_key_by_id[rid]] = copy.deepcopy(a)
+        if checkpoint:
+            checkpoint(cache)
 
     enriched: list[dict] = []
     audit: list[dict] = []
@@ -881,6 +911,7 @@ def analyze_run(
     provider: AIProvider | None = None,
     cancel_check: Callable[[], bool] | None = None,
     force: bool = False,
+    deadline_check: Callable[[], bool] | None = None,
 ) -> dict:
     store = RunStore()
     plan = plan or store.read(folder / "plan.json") or {}
@@ -897,8 +928,45 @@ def analyze_run(
         return existing
 
     provider = provider or OpenAIResponsesProvider()
+    run_id = folder.name
     cache = store.read(folder / "analysis" / "cache.json", {}) or {}
-    result = analyze_records(trusted, plan, provider, cancel_check=cancel_check, cache=cache if isinstance(cache, dict) else {})
+    if not isinstance(cache, dict):
+        cache = {}
+    # A continuation may run in a fresh serverless instance whose /tmp restore came
+    # from an archive older than the last analysis batches. Merge the durable
+    # per-batch cache mirror so already-paid OpenAI results are never repurchased.
+    if store.cloud.enabled:
+        try:
+            mirrored = store.cloud.get_json(run_id, "analysis-cache.json")
+            if isinstance(mirrored, dict):
+                merged = dict(mirrored)
+                merged.update(cache)
+                cache = merged
+        except Exception:
+            pass
+
+    def _checkpoint(current_cache: dict) -> None:
+        try:
+            store.write(folder / "analysis" / "cache.json", current_cache)
+        except Exception:
+            pass
+        if store.cloud.enabled:
+            try:
+                store.cloud.put_json(run_id, "analysis-cache.json", current_cache)
+            except Exception:
+                # A transient mirror failure must not abort a healthy analysis;
+                # the next batch checkpoint will retry the durable write.
+                pass
+
+    result = analyze_records(
+        trusted,
+        plan,
+        provider,
+        cancel_check=cancel_check,
+        cache=cache,
+        checkpoint=_checkpoint,
+        deadline_check=deadline_check,
+    )
     persist_analysis(folder, result)
     return result["report"]
 
