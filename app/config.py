@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     signalyth_ai_bulk_model: str = "gpt-5.6-luna"
     signalyth_ai_reasoning_model: str = "gpt-5.6-terra"
     signalyth_ai_batch_size: int = 12
+    # Number of concurrent OpenAI batch requests. All parallel batches draw from
+    # ONE shared, lock-protected budget (atomic reserve/settle), so parallelism
+    # can never jointly exceed the hard AI cost guard. 1 = sequential.
+    signalyth_ai_parallel_requests: int = 3
     signalyth_ai_max_text_chars: int = 6000
     signalyth_ai_max_output_tokens: int = 7000
     signalyth_ai_max_cost_usd: float = 3.0
