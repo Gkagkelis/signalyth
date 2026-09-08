@@ -323,6 +323,7 @@ def execute_plan(
     # Durable resume: a source that already reached a terminal state in an earlier
     # invocation, with its normalized evidence saved, is never re-collected (and
     # never re-paid). Its prior cost is restored into the global budget guard.
+    prior_sources = copy.deepcopy(status.get("sources", {}) or {})
     resumed_sources: set[str] = set()
     for sp in execution_sources:
         source = sp["source"]
@@ -499,6 +500,39 @@ def execute_plan(
             }
             for i, sr in enumerate(subruns)
         ]
+        # Durable mid-source resume: paid, persisted subruns of an interrupted source
+        # are NEVER executed (or paid) again. The loop restarts at the first pending route.
+        resume_from_idx = 0
+        prior = prior_sources.get(source) or {}
+        prior_rows = prior.get("subruns") or []
+        if (
+            str(prior.get("status")) in {"running", "interrupted_time_budget"}
+            and len(prior_rows) == len(subruns)
+            and (folder / f"raw-{source}.json").exists()
+        ):
+            try:
+                prior_raw = store.read(folder / f"raw-{source}.json", []) or []
+            except Exception:
+                prior_raw = []
+            done_statuses = {"pending", "running"}
+            resumed_cost = 0.0
+            for i, row in enumerate(prior_rows):
+                if str(row.get("status") or "pending") in done_statuses:
+                    break
+                source_status["subruns"][i] = copy.deepcopy(row)
+                resumed_cost += max(0.0, float(row.get("accounted_cost_usd") or 0.0))
+                resume_from_idx = i + 1
+            if resume_from_idx > 0:
+                source_raw.extend(copy.deepcopy(prior_raw))
+                source_status["subruns_completed"] = resume_from_idx
+                source_status["cost_usd"] = round(resumed_cost, 6)
+                with state_lock:
+                    guard.spent += resumed_cost
+                sync(
+                    f"{source}: resuming from route {resume_from_idx + 1}/{len(subruns)}; {resume_from_idx} completed routes reused without re-payment",
+                    source,
+                    code="source_subrun_resume",
+                )
         sync(f"Collecting {source}", source, code="collecting_source")
 
         cancelled_mid_source = False
@@ -509,10 +543,22 @@ def execute_plan(
         if source_cap <= 0 or (base_cap > 0 and source_cap + 1e-9 < min(base_cap, guard.remaining)):
             source_level_error = "Budget guard left no safe acquisition budget for this source."
         else:
+            interrupted_time_budget = False
             for sr_idx, sr in enumerate(subruns):
+                if sr_idx < resume_from_idx:
+                    continue
                 if cancel_check():
                     status["cancel_requested"] = True
                     cancelled_mid_source = True
+                    break
+                if deadline_check and deadline_check():
+                    # Hand over BEFORE starting a route that may not fit in this worker.
+                    # Everything collected so far is persisted; a fresh worker resumes
+                    # from exactly this route.
+                    interrupted_time_budget = True
+                    store.write(folder / f"raw-{source}.json", source_raw)
+                    source_status["status"] = "interrupted_time_budget"
+                    sync(f"{source}: worker time budget reached before route {sr_idx + 1}; collection continues automatically in a new worker", source, code="collection_continuation")
                     break
                 if violation["hit"] and not own_violation:
                     # Another parallel source hit a provider cost-cap violation: stop
@@ -705,6 +751,8 @@ def execute_plan(
                 )
             )
         )
+        if interrupted_time_budget:
+            return {"cancelled": False, "deadline": True}
         if cancelled_mid_source:
             for later in source_status.get("subruns", []):
                 if later.get("status") == "pending":
@@ -815,6 +863,10 @@ def execute_plan(
             if result["cancelled"]:
                 mark_remaining_cancelled(idx + 1)
                 return finish_cancelled("Cancellation completed; partial data was preserved")
+            if result.get("deadline"):
+                raise CollectionTimeBudgetExceeded(
+                    f"Worker time budget reached inside source {sp.get('source')}; run will continue automatically from the next route."
+                )
     else:
         # Independent per-source collection: run up to N sources at once against ONE
         # atomic budget guard and one locked status writer. Only fixed per-source
@@ -853,8 +905,11 @@ def execute_plan(
                 for fut in done:
                     futures.pop(fut, None)
                     try:
-                        if fut.result().get("cancelled"):
+                        res = fut.result()
+                        if res.get("cancelled"):
                             cancel_box["hit"] = True
+                        if res.get("deadline"):
+                            deadline_stop = True
                     except Exception as exc:
                         sync(f"Source worker failed safely: {exc}", None, code="source_worker_error")
                 if deadline_stop or violation["hit"] or cancel_box["hit"]:
@@ -864,8 +919,11 @@ def execute_plan(
                         for fut in done:
                             futures.pop(fut, None)
                             try:
-                                if fut.result().get("cancelled"):
+                                res = fut.result()
+                                if res.get("cancelled"):
                                     cancel_box["hit"] = True
+                                if res.get("deadline"):
+                                    deadline_stop = True
                             except Exception:
                                 pass
                     break
@@ -878,7 +936,7 @@ def execute_plan(
                 if row.get("status") == "pending":
                     row.update({"status": "skipped_cancelled", "completed_at": _utcnow()})
             return finish_cancelled("Cancellation completed; partial data was preserved")
-        if deadline_stop and qi < len(queue):
+        if deadline_stop:
             sync("Worker time budget reached; collection continues automatically in a new worker", None, code="collection_continuation")
             raise CollectionTimeBudgetExceeded("Worker time budget reached; run will continue automatically.")
 
