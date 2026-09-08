@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     # New collection sources are not started when less than this many seconds
     # remain before the soft deadline, so a typical source (subruns + persist)
     # finishes before Vercel's hard kill and the run continues in a new worker.
-    signalyth_collection_deadline_margin_seconds: int = 160
+    signalyth_collection_deadline_margin_seconds: int = 110
     # Number of collection sources allowed to run at the same time. Sources are
     # independent in fixed per-source plans; they share ONE atomic budget guard
     # and one locked status writer. Automatic elastic rebalancing always runs
