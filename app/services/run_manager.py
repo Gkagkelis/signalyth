@@ -105,13 +105,11 @@ class RunManager:
             existing = self._jobs.get(run_id)
             if existing is not None and not existing.done():
                 return status
-            if current in self.store.TERMINAL_STATUSES:
-                phase = str(status.get("phase") or "")
-                if current == "failed" and phase in {"ai_analysis_failed", "exports_failed"}:
-                    pass  # recoverable stage failure: collection/cleaning are reused for free
-                else:
-                    raise RunStateError(f"Run is already terminal: {current}")
-            if current not in {"planned", "queued"}:
+            phase = str(status.get("phase") or "")
+            recoverable_stage_failure = current == "failed" and phase in {"ai_analysis_failed", "exports_failed"}
+            if current in self.store.TERMINAL_STATUSES and not recoverable_stage_failure:
+                raise RunStateError(f"Run is already terminal: {current}")
+            if current not in {"planned", "queued"} and not recoverable_stage_failure:
                 # A serverless worker can be hard-killed mid-run, leaving the status
                 # permanently "running". If nothing has written status.json for the
                 # stale window, treat the worker as dead and allow a durable resume.
