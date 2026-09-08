@@ -1467,31 +1467,46 @@ def persist_presentation_bundle(folder: Path, result: dict) -> dict:
 
 
 def _analyzed_record_rows(folder: Path) -> list[dict]:
-    """Flat CSV rows: every trusted record with its AI annotation when available."""
-    trusted = RunStore.read(folder / "cleaning" / "trusted.json", []) or []
-    annotations: dict[str, dict] = {}
-    report = RunStore.read(folder / "analysis" / "report.json", {}) or {}
-    for r in (report.get("records") or []):
-        ann = r.get("ai_analysis") or {}
-        annotations[str(r.get("id"))] = ann
+    """Flat CSV rows: every analyzed record with its real AI annotation.
+
+    Source of truth is analysis/analyzed.json, where every row carries the
+    `ai_analysis` block produced by the semantic step. Falling back to the
+    cleaned records keeps the export complete even before analysis runs.
+    """
+    store = RunStore()
+    analyzed = store.read(folder / "analysis" / "analyzed.json", []) or []
+    if not analyzed:
+        analyzed = store.read(folder / "cleaning" / "trusted.json", []) or []
     rows = []
-    for r in trusted:
-        rid = str(r.get("id"))
-        ann = annotations.get(rid, {})
+    for r in analyzed:
+        a = r.get("ai_analysis") or {}
+        cleaning = r.get("cleaning") or {}
+        intel = r.get("intelligence") or {}
+        emotions = a.get("emotions")
+        if isinstance(emotions, list):
+            emotion = ", ".join(str(e.get("label") if isinstance(e, dict) else e) for e in emotions[:3])
+        else:
+            emotion = a.get("primary_emotion") or ""
+        topics = a.get("topics")
+        narratives = a.get("narratives")
         rows.append({
-            "record_id": rid,
+            "record_id": r.get("id") or r.get("record_id"),
             "date": r.get("timestamp") or r.get("date"),
             "platform": r.get("platform") or r.get("source"),
             "author": r.get("author"),
-            "origin_group": (r.get("intelligence") or {}).get("origin_group") or ann.get("origin_group"),
-            "sentiment_label": ann.get("sentiment_label"),
-            "sentiment_score": ann.get("sentiment_score"),
-            "emotion": ann.get("dominant_emotion") or ann.get("emotion"),
-            "topic": (ann.get("topics") or [None])[0] if isinstance(ann.get("topics"), list) else ann.get("topic"),
-            "narrative": (ann.get("narratives") or [None])[0] if isinstance(ann.get("narratives"), list) else ann.get("narrative"),
-            "impact_score": ann.get("impact_score"),
-            "relevance": ann.get("relevance_score") or ann.get("relevance"),
-            "decision": ann.get("decision"),
+            "origin_group": intel.get("origin_group") or cleaning.get("origin_class") or "",
+            "sentiment_label": a.get("sentiment_label", ""),
+            "sentiment_score": a.get("sentiment_score", ""),
+            "stance": (a.get("target_stance") or ""),
+            "emotion": emotion,
+            "sarcasm": (a.get("sarcasm") or {}).get("detected") if isinstance(a.get("sarcasm"), dict) else a.get("sarcasm", ""),
+            "language": a.get("language", ""),
+            "topic": (topics[0] if isinstance(topics, list) and topics else (a.get("topic") or "")),
+            "narrative": (narratives[0] if isinstance(narratives, list) and narratives else (a.get("narrative") or "")),
+            "relevance_score": a.get("relevance_score", cleaning.get("relevance_score", "")),
+            "decision": a.get("decision", ""),
+            "confidence": a.get("overall_confidence", ""),
+            "impact_score": intel.get("impact_score", ""),
             "url": r.get("url"),
             "text": (str(r.get("text") or ""))[:600],
         })
@@ -1534,7 +1549,7 @@ def build_exports(folder: Path, plan: dict, *, force: bool=False, cancel_check: 
     try:
         rec_rows=_analyzed_record_rows(folder)
         with records_csv.open("w",encoding="utf-8-sig",newline="") as f:
-            fields=["record_id","date","platform","author","origin_group","sentiment_label","sentiment_score","emotion","topic","narrative","impact_score","relevance","decision","url","text"]
+            fields=["record_id","date","platform","author","origin_group","sentiment_label","sentiment_score","stance","emotion","sarcasm","language","topic","narrative","relevance_score","decision","confidence","impact_score","url","text"]
             w=csv.DictWriter(f,fieldnames=fields,extrasaction="ignore");w.writeheader();w.writerows(rec_rows)
     except Exception:
         records_csv=None
