@@ -23,6 +23,7 @@ class AnalysisDraft(BaseModel):
     max_budget_usd: float = Field(default=5.0, gt=0, le=10000)
     smart_search: bool = True
     report_language: Literal["English", "Ελληνικά"] = "English"
+    media_handling: Literal["blended", "separate", "exclude"] = "blended"
     additional_context: list[str] = Field(default_factory=list, max_length=50)
     exclusions: list[str] = Field(default_factory=list, max_length=50)
     search_strategy: SearchStrategy = "balanced_smart"
@@ -114,6 +115,8 @@ class CollectionPlan(BaseModel):
     topup_policy: str = "shared_source_target_until_analyzable_or_exhausted"
     master_spec_version: str = "SIGNALYTH-master30-v1"
     benchmark: dict[str, object] | None = None
+    report_language: str = "English"
+    media_handling: Literal["blended", "separate", "exclude"] = "blended"
     sources: list[SourcePlan]
 
 class SourceConfigUpdate(BaseModel):
