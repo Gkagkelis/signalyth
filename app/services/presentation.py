@@ -340,7 +340,7 @@ def _mention_claim(prefix: str, row: dict, *, lang: str, index: int) -> dict:
     )
 
 
-def _gold_standard_audit(slides: list[dict], charts: dict[str, dict], inv: dict[str, dict], investigations: dict[str, dict]) -> dict:
+def _gold_standard_audit(slides: list[dict], charts: dict[str, dict], inv: dict[str, dict], investigations: dict[str, dict], media_handling: str = "blended") -> dict:
     slide_ids = {str(s.get("slide_id")) for s in slides}
     mentions = _top_mentions(inv)
     sentiment_labels = {str(x.get("sentiment_label") or "").lower() for x in mentions if x.get("excerpt")}
@@ -376,8 +376,8 @@ def _gold_standard_audit(slides: list[dict], charts: dict[str, dict], inv: dict[
         "investigations": investigation_material,
         "sources_audiences": bool((inv.get("origin_breakdown") or {}).get("available") or (inv.get("source_breakdown") or {}).get("available")),
         "influence": bool((inv.get("media_influence") or {}).get("available") or (inv.get("people_influence") or {}).get("available")),
-        "media_evidence": len(media_mentions) >= 2,
-        "media_implications": bool(media_implication_ids),
+        "media_evidence": media_handling != "exclude" and len(media_mentions) >= 2,
+        "media_implications": media_handling != "exclude" and bool(media_implication_ids),
         "quality": any(bool((inv.get(k) or {}).get("available")) for k in ("data_quality","source_coverage","sample_achievement","authenticity_risk","coordination")),
         "evidence_traceability": bool(mentions),
         "strategic_synthesis": bool((inv.get("positive_narrative_drivers") or {}).get("available") or (inv.get("negative_narrative_drivers") or {}).get("available") or investigations),
@@ -486,8 +486,16 @@ def build_presentation_plan(visual_pack: dict, evidence_pack: dict, plan: dict |
     if rep_charts:
         slides.append(_slide("reputation_sentiment", "metrics", "Reputation & sentiment" if lang == "en" else "Φήμη & συναίσθημα", chart_ids=rep_charts, priority=98, section="perception"))
 
-    positive_mentions = [m for m in mentions if str(m.get("sentiment_label") or "").lower() == "positive" and m.get("excerpt")]
-    negative_mentions = [m for m in mentions if str(m.get("sentiment_label") or "").lower() == "negative" and m.get("excerpt")]
+    media_handling = str(plan.get("media_handling") or "blended").lower()
+    if media_handling not in {"blended", "separate", "exclude"}:
+        media_handling = "blended"
+    def _is_media(m: dict) -> bool:
+        return str(m.get("origin_group") or "").lower() == "media"
+    # In "separate"/"exclude" mode the organic story is analysed clean of media voices.
+    evidence_pool = mentions if media_handling == "blended" else [m for m in mentions if not _is_media(m)]
+
+    positive_mentions = [m for m in evidence_pool if str(m.get("sentiment_label") or "").lower() == "positive" and m.get("excerpt")]
+    negative_mentions = [m for m in evidence_pool if str(m.get("sentiment_label") or "").lower() == "negative" and m.get("excerpt")]
     if positive_mentions and negative_mentions:
         evidence_claims = []
         pos_sorted = sorted(positive_mentions, key=lambda m: _safe_float(m.get("impact_score")), reverse=True)
@@ -572,20 +580,25 @@ def build_presentation_plan(visual_pack: dict, evidence_pack: dict, plan: dict |
     if source_chart or "origin_breakdown" in charts:
         slides.append(_slide("sources_audiences", "sources", "Sources & audiences" if lang == "en" else "Πηγές & κοινά", chart_ids=[x for x in ["source_comparison", "origin_breakdown"] if x in charts], priority=88, section="context"))
 
-    influence = [x for x in ["media_influence", "people_influence"] if x in charts]
+    influence_pool = ["people_influence"] if media_handling in {"separate", "exclude"} else ["media_influence", "people_influence"]
+    influence = [x for x in influence_pool if x in charts]
     if influence:
         slides.append(_slide("influence", "influence", "Who shapes the conversation" if lang == "en" else "Ποιοι διαμορφώνουν τη συζήτηση", chart_ids=influence, priority=80, section="context"))
 
-    media_mentions = [m for m in mentions if str(m.get("origin_group") or "").lower() == "media" and m.get("excerpt")]
-    if len(media_mentions) >= 2:
-        media_claims = [_mention_claim("media-evidence", m, lang=lang, index=i) for i,m in enumerate(media_mentions[:5], start=1)]
-        slides.append(_slide("media_evidence", "evidence_cards", "Media coverage & message" if lang == "en" else "Media κάλυψη & μήνυμα", claims=media_claims, priority=82, section="context"))
+    media_mentions = [m for m in mentions if _is_media(m) and m.get("excerpt")]
+    if media_handling != "exclude" and len(media_mentions) >= 2:
+        media_sorted = sorted(media_mentions, key=lambda m: _safe_float(m.get("impact_score")), reverse=True)
+        media_claims = [_mention_claim("media-evidence", m, lang=lang, index=i) for i,m in enumerate(media_sorted[:5], start=1)]
+        media_title = ("Media coverage & message" if lang == "en" else "Media κάλυψη & μήνυμα") if media_handling == "blended" else ("Media, analysed separately" if lang == "en" else "Τα ΜΜΕ ξεχωριστά: κάλυψη & μήνυμα")
+        media_charts = ["media_influence"] if (media_handling == "separate" and "media_influence" in charts) else []
+        media_sub = "" if media_handling == "blended" else ("Media are reported in their own section; organic voices are analysed separately." if lang == "en" else "Τα ΜΜΕ παρουσιάζονται σε δική τους ενότητα· οι οργανικές φωνές αναλύονται ξεχωριστά.")
+        slides.append(_slide("media_evidence", "evidence_cards", media_title, subtitle=media_sub, chart_ids=media_charts, claims=media_claims, priority=82, section="context"))
 
     # Voices of the conversation: the leading voice per sentiment, then a ranked
     # appendix of up to 30 voices so the client sees WHO is talking, not just numbers.
     people_rows = [r for r in (_indicator_value(inv, "people_influence") or []) if isinstance(r, dict) and r.get("name")]
     leader_by_sent: dict[str, dict] = {}
-    for m in mentions:
+    for m in evidence_pool:
         lbl = str(m.get("sentiment_label") or "").lower()
         if lbl in {"positive", "negative", "neutral", "mixed"} and m.get("author"):
             cur = leader_by_sent.get(lbl)
@@ -709,7 +722,11 @@ def build_presentation_plan(visual_pack: dict, evidence_pack: dict, plan: dict |
         _claim("method-visibility", "Owned/promotional and factual not-applicable content can remain visible for dissemination analysis while being excluded from Reputation weighting.", ["origin_breakdown","stance","impact_attention"], claim_type="methodology"),
         _claim("method-causality", "Association ≠ proven causality. Automatic investigations surface evidence-linked associations, deterministic contributions and risk signals only.", ["numeric_anomalies","time_trends","top_mentions"], claim_type="guardrail", causal_status="not_proven"),
     ]
-    slides.append(_slide("methodology", "methodology", "Methodology & reading guide" if lang=="en" else "Μεθοδολογία & οδηγός ανάγνωσης", claims=methodology_claims, priority=70, required=True, section="appendix"))
+    methodology_sub = ""
+    if media_handling == "exclude":
+        methodology_sub = ("Media (news) evidence was excluded from this report by explicit client configuration; it remains available in the evidence pack." if lang=="en"
+                           else "Τα ΜΜΕ (news) εξαιρέθηκαν από αυτό το report με ρητή επιλογή ρύθμισης· παραμένουν διαθέσιμα στο evidence pack.")
+    slides.append(_slide("methodology", "methodology", "Methodology & reading guide" if lang=="en" else "Μεθοδολογία & οδηγός ανάγνωσης", subtitle=methodology_sub, claims=methodology_claims, priority=70, required=True, section="appendix"))
 
     # Deterministic closing: not generic AI prose. It is assembled from the highest-priority evidence.
     closing_claims = []
@@ -788,7 +805,7 @@ def build_presentation_plan(visual_pack: dict, evidence_pack: dict, plan: dict |
 
     claim_ledger = [copy.deepcopy(cl) | {"slide_id": s["slide_id"]} for s in slides for cl in s.get("claims") or []]
     _validate_claim_ledger(claim_ledger, expected)
-    gold_standard_audit = _gold_standard_audit(slides, charts, inv, investigations)
+    gold_standard_audit = _gold_standard_audit(slides, charts, inv, investigations, media_handling)
     missing_caps = [r["capability_id"] for r in gold_standard_audit["capabilities"] if r["applicable"] and r["status"] == "missing"]
     if missing_caps:
         # Documented (never silent) omission: the export still ships, and the gap is
@@ -1277,6 +1294,12 @@ def generate_pptx(presentation_plan: dict, visual_pack: dict, output_path: Path,
                     _add_text(slide,str(i+1),1.12,yy+ch/2-0.21,0.42,0.42,size=15,color=WHITE,bold=True,align=PP_ALIGN.CENTER,valign=MSO_ANCHOR.MIDDLE)
                     txt=str(cl.get("text") or "").replace(" | ","\n")
                     _add_claim_card(slide,txt,1.72,yy,10.5,ch,font_size=10.5 if n<=4 else 9.5)
+            elif typ == "evidence_cards" and spec.get("slide_id") == "media_evidence" and (spec.get("chart_ids") or []):
+                for i,cl in enumerate(claims[:4]):
+                    _add_claim_card(slide,str(cl.get("text") or "").replace(" | ","\n"),1.12,1.95+i*1.2,5.45,1.06,font_size=8.8)
+                cid=(spec.get("chart_ids") or [])[0]
+                if cid in charts:
+                    _render_chart_spec(slide, charts[cid], 6.78, 1.95, 5.45, 4.6, lang)
             elif typ == "evidence_cards":
                 for i,cl in enumerate(claims[:4]):
                     col=i%2; row=i//2
@@ -1326,7 +1349,7 @@ def generate_pptx(presentation_plan: dict, visual_pack: dict, output_path: Path,
                 for cl in claims[:5]:
                     _add_claim_card(slide,cl.get("text"),1.15,y,10.9,.82,font_size=12.5)
                     y+=1.0
-            if claims and cids and typ not in {"executive_summary","methodology"}:
+            if claims and cids and typ not in {"executive_summary","methodology"} and spec.get("slide_id") not in {"media_evidence","sentiment_evidence","evidence"}:
                 # Plain-language takeaway strip: what this slide means, in one sentence.
                 strip = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(1.12), Inches(6.42), Inches(11.1), Inches(0.62))
                 strip.adjustments[0] = 0.14
