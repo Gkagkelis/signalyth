@@ -977,12 +977,20 @@ def get_presentation_visual_pack(run_id: str):
 
 
 @app.post("/api/runs/{run_id}/exports")
-def build_run_exports(run_id: str, force: bool = Query(default=False)):
+def build_run_exports(run_id: str, force: bool = Query(default=False), media_handling: str | None = Query(default=None)):
     try:
         folder = store.folder_for(run_id)
         plan = store.read_plan(run_id)
     except RunNotFound:
         raise HTTPException(status_code=404, detail="Run not found")
+    if media_handling:
+        choice = str(media_handling).strip().lower()
+        if choice not in {"blended", "separate", "exclude"}:
+            raise HTTPException(status_code=422, detail="media_handling must be one of: blended, separate, exclude")
+        # Export-time override: re-render the report with a different media policy
+        # without touching the stored research plan or re-running collection.
+        plan = {**plan, "media_handling": choice}
+        force = True
     visual = load_visualization_summary(folder)
     if visual is None:
         raise HTTPException(status_code=409, detail="This run has no Step 7 Presentation Visual Pack yet.")
