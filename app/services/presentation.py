@@ -326,8 +326,13 @@ def _top_mentions(inv: dict[str, dict]) -> list[dict]:
 def _mention_claim(prefix: str, row: dict, *, lang: str, index: int) -> dict:
     label = str(row.get("sentiment_label") or "evidence").lower()
     author = _clean_text(row.get("author") or row.get("platform") or "Source", 80)
-    excerpt = _clean_text(row.get("excerpt") or "", 260)
-    text = f"{author}: {excerpt}" if excerpt else author
+    excerpt = _clean_text(row.get("excerpt") or "", 230)
+    meta_bits = [b for b in (row.get("platform"), row.get("date")) if b]
+    score = row.get("sentiment_score"); impact = row.get("impact_score")
+    if score is not None: meta_bits.append(f"sentiment {_safe_float(score):+.2f}")
+    if impact is not None: meta_bits.append(f"impact {_safe_float(impact):.2f}")
+    meta = " · ".join(str(b) for b in meta_bits)
+    text = (f"{author}: {excerpt}" if excerpt else author) + (f" | {meta}" if meta else "")
     return _claim(
         f"{prefix}-{index}", text, ["top_mentions"], evidence_refs=[row.get("record_id")],
         claim_type="evidence_example", confidence=row.get("evidence_confidence"),
@@ -485,11 +490,13 @@ def build_presentation_plan(visual_pack: dict, evidence_pack: dict, plan: dict |
     negative_mentions = [m for m in mentions if str(m.get("sentiment_label") or "").lower() == "negative" and m.get("excerpt")]
     if positive_mentions and negative_mentions:
         evidence_claims = []
-        for i,m in enumerate(positive_mentions[:3], start=1):
+        pos_sorted = sorted(positive_mentions, key=lambda m: _safe_float(m.get("impact_score")), reverse=True)
+        neg_sorted = sorted(negative_mentions, key=lambda m: _safe_float(m.get("impact_score")), reverse=True)
+        for i,m in enumerate(pos_sorted[:5], start=1):
             evidence_claims.append(_mention_claim("positive-evidence", m, lang=lang, index=i))
-        for i,m in enumerate(negative_mentions[:3], start=1):
+        for i,m in enumerate(neg_sorted[:5], start=1):
             evidence_claims.append(_mention_claim("negative-evidence", m, lang=lang, index=i))
-        slides.append(_slide("sentiment_evidence", "evidence_split", "What people are saying" if lang == "en" else "Τι λέει το κοινό", claims=evidence_claims, priority=92, section="perception", notes={"split_by":"sentiment"}))
+        slides.append(_slide("sentiment_evidence", "evidence_split", "Top 5 positive & negative mentions" if lang == "en" else "Top 5 θετικές & αρνητικές αναφορές", claims=evidence_claims, priority=92, section="perception", notes={"split_by":"sentiment"}))
 
     if emotion_chart:
         emo_label, emo_value = _largest_distribution(emotion_chart)
@@ -573,6 +580,38 @@ def build_presentation_plan(visual_pack: dict, evidence_pack: dict, plan: dict |
     if len(media_mentions) >= 2:
         media_claims = [_mention_claim("media-evidence", m, lang=lang, index=i) for i,m in enumerate(media_mentions[:5], start=1)]
         slides.append(_slide("media_evidence", "evidence_cards", "Media coverage & message" if lang == "en" else "Media κάλυψη & μήνυμα", claims=media_claims, priority=82, section="context"))
+
+    # Voices of the conversation: the leading voice per sentiment, then a ranked
+    # appendix of up to 30 voices so the client sees WHO is talking, not just numbers.
+    people_rows = [r for r in (_indicator_value(inv, "people_influence") or []) if isinstance(r, dict) and r.get("name")]
+    leader_by_sent: dict[str, dict] = {}
+    for m in mentions:
+        lbl = str(m.get("sentiment_label") or "").lower()
+        if lbl in {"positive", "negative", "neutral", "mixed"} and m.get("author"):
+            cur = leader_by_sent.get(lbl)
+            if cur is None or _safe_float(m.get("impact_score")) > _safe_float(cur.get("impact_score")):
+                leader_by_sent[lbl] = m
+    if leader_by_sent:
+        lead_claims = []
+        order = ["positive", "negative", "neutral", "mixed"]
+        names_el = {"positive": "Κορυφαία θετική φωνή", "negative": "Κορυφαία αρνητική φωνή", "neutral": "Κορυφαία ουδέτερη φωνή", "mixed": "Κορυφαία μικτή φωνή"}
+        names_en = {"positive": "Top positive voice", "negative": "Top negative voice", "neutral": "Top neutral voice", "mixed": "Top mixed voice"}
+        for li, lbl in enumerate([x for x in order if x in leader_by_sent], start=1):
+            m = leader_by_sent[lbl]
+            head = names_en[lbl] if lang == "en" else names_el[lbl]
+            body = f"{head}: {_clean_text(m.get('author'), 70)} — “{_clean_text(m.get('excerpt'), 170)}” | {m.get('platform')} · {m.get('date')} · impact {_safe_float(m.get('impact_score')):.2f}"
+            lead_claims.append(_claim(f"voice-leader-{li}", body, ["top_mentions", "people_influence" if (inv.get("people_influence") or {}).get("available") else "top_mentions"], evidence_refs=[m.get("record_id")], claim_type="evidence_example", source_values={"sentiment": lbl, "valence": lbl}))
+        slides.append(_slide("voices_leaders", "narratives", "Leading voices per sentiment" if lang == "en" else "Οι κορυφαίες φωνές ανά sentiment", claims=lead_claims, priority=79, section="context"))
+    if people_rows:
+        ranked = sorted(people_rows, key=lambda r: _safe_float(r.get("attention")), reverse=True)[:30]
+        page_size = 12
+        pages = [ranked[i:i + page_size] for i in range(0, len(ranked), page_size)]
+        for pi, page in enumerate(pages, start=1):
+            title = ("Voices of the conversation" if lang == "en" else "Οι φωνές της συζήτησης") + (f" ({pi}/{len(pages)})" if len(pages) > 1 else "")
+            slides.append(_slide(f"voices_ranking_{pi}", "voices_table", title, priority=40, section="appendix", notes={"rows": [
+                {"rank": (pi - 1) * page_size + i + 1, "name": _clean_text(r.get("name"), 60), "records": _safe_int(r.get("records")), "attention": _safe_float(r.get("attention")), "weighted_sentiment": _safe_float(r.get("weighted_sentiment"))}
+                for i, r in enumerate(page)
+            ], "denominator": len(people_rows)}))
 
     if _material_quality_warning(evidence_pack):
         qcharts = [x for x in ["quality_matrix", "market_relevance", "impact_coverage", "authenticity_coordination", "story_syndication"] if x in charts]
@@ -1183,10 +1222,33 @@ def generate_pptx(presentation_plan: dict, visual_pack: dict, output_path: Path,
             elif typ == "evidence_split":
                 pos=[c for c in claims if str((c.get("source_values") or {}).get("sentiment"))=="positive"]
                 neg=[c for c in claims if str((c.get("source_values") or {}).get("sentiment"))=="negative"]
-                _add_text(slide,"Positive evidence" if lang=="en" else "Θετικό evidence",1.12,1.55,5.2,.35,size=11,color=POS,bold=True)
-                _add_text(slide,"Critical / negative evidence" if lang=="en" else "Κριτικό / αρνητικό evidence",6.82,1.55,5.2,.35,size=11,color=NEG,bold=True)
-                for i,cl in enumerate(pos[:3]): _add_claim_card(slide,cl.get("text"),1.12,2.0+i*1.42,5.35,1.22,accent=POS,font_size=9.5)
-                for i,cl in enumerate(neg[:3]): _add_claim_card(slide,cl.get("text"),6.82,2.0+i*1.42,5.35,1.22,accent=NEG,font_size=9.5)
+                _add_text(slide,"Top 5 positive" if lang=="en" else "Top 5 θετικές",1.12,1.5,5.3,.32,size=11.5,color=POS,bold=True)
+                _add_text(slide,"Top 5 negative" if lang=="en" else "Top 5 αρνητικές",6.82,1.5,5.3,.32,size=11.5,color=NEG,bold=True)
+                def _rank_card(cl, x, yy, accent, rank):
+                    txt=str(cl.get("text") or "").replace(" | ","\n")
+                    badge = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(x), Inches(yy+0.06), Inches(0.3), Inches(0.3))
+                    badge.fill.solid(); badge.fill.fore_color.rgb=_rgb(accent); badge.line.fill.background(); badge.shadow.inherit=False
+                    _add_text(slide,str(rank),x,yy+0.06,0.3,0.3,size=11,color=WHITE,bold=True,align=PP_ALIGN.CENTER,valign=MSO_ANCHOR.MIDDLE)
+                    _add_claim_card(slide,txt,x+0.4,yy,4.95,0.93,font_size=8.6)
+                for i,cl in enumerate(pos[:5]): _rank_card(cl,1.12,1.92+i*1.03,POS,i+1)
+                for i,cl in enumerate(neg[:5]): _rank_card(cl,6.82,1.92+i*1.03,NEG,i+1)
+            elif typ == "voices_table":
+                rows=((spec.get("notes") or {}).get("rows") or [])
+                headers=["#", "Voice" if lang=="en" else "Φωνή", "Mentions" if lang=="en" else "Αναφορές", "Attention" if lang=="en" else "Προσοχή", "Sentiment"]
+                body=[[str(r.get("rank")), str(r.get("name")), str(r.get("records")), f"{r.get('attention'):.2f}", f"{r.get('weighted_sentiment'):+.2f}"] for r in rows]
+                _add_editable_table(slide, headers, body, 1.12, 1.6, 11.1, min(5.0, 0.42+0.31*len(body)), font_size=9, col_widths=[0.55, 5.6, 1.55, 1.6, 1.8])
+                note=("Attention = observed digital attention share; weighted sentiment in [-1, +1]." if lang=="en" else "Προσοχή = παρατηρούμενο ψηφιακό μερίδιο προσοχής· σταθμισμένο sentiment σε κλίμακα [-1, +1].")
+                _add_text(slide, note, 1.12, 6.75, 11.0, .3, size=8.5, color=MUTED)
+            elif typ == "narratives" and spec.get("slide_id") == "voices_leaders":
+                col_map={"positive":POS,"negative":NEG,"neutral":NEUTRAL,"mixed":MIXED}
+                for i,cl in enumerate(claims[:4]):
+                    col=i%2; row=i//2
+                    x0=1.12+col*5.72; y0=1.7+row*2.45
+                    lbl=str((cl.get("source_values") or {}).get("valence") or "")
+                    dot = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(x0), Inches(y0+0.1), Inches(0.2), Inches(0.2))
+                    dot.fill.solid(); dot.fill.fore_color.rgb=_rgb(col_map.get(lbl,NEUTRAL)); dot.line.fill.background(); dot.shadow.inherit=False
+                    txt=str(cl.get("text") or "").replace(" | ","\n").replace(": ",":\n",1)
+                    _add_claim_card(slide,txt,x0+0.32,y0,5.25,2.2,font_size=10)
             elif typ == "narratives":
                 n=min(3,len(claims)); block=(4.95-(n-1)*0.18)/max(1,n)
                 val_col={"positive":POS,"negative":NEG,"mixed":MIXED}
