@@ -35,6 +35,10 @@ class AIAnalysisTimeBudgetExceeded(RuntimeError):
     """
 
 
+class AIAnalysisProviderOutage(RuntimeError):
+    """Every OpenAI batch failed: quota/key/model access problem. Carries the real error."""
+
+
 class AIAnalysisCancelled(RuntimeError):
     pass
 
@@ -745,6 +749,17 @@ def _analysis_report(enriched: list[dict], trusted_input_hash: str, context: dic
     review = [r for r in enriched if r["ai_analysis"]["decision"] == "review"]
     excluded = [r for r in enriched if r["ai_analysis"]["decision"] == "excluded"]
     failed = [r for r in enriched if "provider_partial_failure" in r["ai_analysis"].get("flags", [])]
+    if enriched and failed and len(failed) == len(enriched) and len(enriched) > max(1, int(settings.signalyth_ai_batch_size)):
+        # TOTAL, systemic provider failure (more than one full batch, zero successes):
+        # this is a quota/key/model-access outage, never a per-record hiccup.
+        errors = []
+        for r in failed:
+            e = str(r["ai_analysis"].get("provider_error") or "").strip()
+            if e and e not in errors:
+                errors.append(e)
+            if len(errors) >= 2:
+                break
+        raise AIAnalysisProviderOutage("; ".join(errors) or "Every OpenAI request failed without a recorded message.")
     escalated = [r for r in enriched if r["ai_analysis"].get("analysis_tier") == "reasoning"]
     disagreements = [r for r in enriched if "model_disagreement" in r["ai_analysis"].get("flags", [])]
     avg_conf = sum(float(r["ai_analysis"].get("overall_confidence", 0)) for r in enriched) / max(1, len(enriched))

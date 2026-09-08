@@ -12,7 +12,7 @@ from app.services.apify_service import CollectionNotConfigured
 from app.services.collector import CollectionTimeBudgetExceeded, execute_plan
 from app.services.cleaning import CleaningCancelled, clean_run
 from app.services.relevance_expansion import adaptive_expand_after_cleaning
-from app.services.ai_analysis import AIAnalysisCancelled, AIAnalysisTimeBudgetExceeded, analyze_run
+from app.services.ai_analysis import AIAnalysisCancelled, AIAnalysisProviderOutage, AIAnalysisTimeBudgetExceeded, analyze_run
 from app.services.intelligence import build_intelligence
 from app.services.investigations import InvestigationCancelled, build_investigations
 from app.services.visualizations import VisualizationCancelled, build_visualizations
@@ -106,7 +106,11 @@ class RunManager:
             if existing is not None and not existing.done():
                 return status
             if current in self.store.TERMINAL_STATUSES:
-                raise RunStateError(f"Run is already terminal: {current}")
+                phase = str(status.get("phase") or "")
+                if current == "failed" and phase in {"ai_analysis_failed", "exports_failed"}:
+                    pass  # recoverable stage failure: collection/cleaning are reused for free
+                else:
+                    raise RunStateError(f"Run is already terminal: {current}")
             if current not in {"planned", "queued"}:
                 # A serverless worker can be hard-killed mid-run, leaving the status
                 # permanently "running". If nothing has written status.json for the
@@ -353,6 +357,24 @@ class RunManager:
             )
         except AIAnalysisCancelled:
             self._mark_cancelled_after_collection(run_id)
+            return
+        except AIAnalysisProviderOutage as exc:
+            # Every OpenAI call failed — say the TRUE cause on the run card and stop
+            # cleanly. All collected/cleaned evidence stays saved; a Resume retries
+            # the analysis for free once the OpenAI account issue is fixed.
+            status = self.store.read_status(run_id)
+            status.update({
+                "status": "failed", "phase": "ai_analysis_failed", "completed_at": _utcnow(),
+                "fatal_error": f"OpenAI analysis failed for every batch: {exc}",
+                "analysis": {**(status.get("analysis") or {}), "status": "failed", "error": str(exc)},
+                "current": {"source": None, "code": "ai_provider_outage",
+                             "message": f"Η ανάλυση OpenAI απέτυχε για ΟΛΑ τα πακέτα — αιτία: {str(exc)[:220]}. Συνήθης λόγος: εξαντλημένη πίστωση ή άκυρο OPENAI_API_KEY. Διόρθωσε το OpenAI account και πάτα Συνέχιση."},
+            })
+            self.store.write_status(run_id, status)
+            try:
+                self.store.checkpoint_run(run_id)
+            except Exception:
+                pass
             return
         except AIAnalysisTimeBudgetExceeded as exc:
             # Not a failure: every completed OpenAI batch is already durably cached.
