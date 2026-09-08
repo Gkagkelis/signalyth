@@ -496,7 +496,7 @@ def build_presentation_plan(visual_pack: dict, evidence_pack: dict, plan: dict |
 
     positive_mentions = [m for m in evidence_pool if str(m.get("sentiment_label") or "").lower() == "positive" and m.get("excerpt")]
     negative_mentions = [m for m in evidence_pool if str(m.get("sentiment_label") or "").lower() == "negative" and m.get("excerpt")]
-    if positive_mentions and negative_mentions:
+    if positive_mentions or negative_mentions:
         evidence_claims = []
         pos_sorted = sorted(positive_mentions, key=lambda m: _safe_float(m.get("impact_score")), reverse=True)
         neg_sorted = sorted(negative_mentions, key=lambda m: _safe_float(m.get("impact_score")), reverse=True)
