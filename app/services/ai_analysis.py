@@ -21,6 +21,8 @@ AI_RULESET_VERSION = "0.9.0"
 PROMPT_VERSION = "signalyth-semantic-v1.0"
 # Below this absolute sentiment score a polarity claim is not considered supported.
 NEUTRAL_BAND = 0.10
+# A reasoning-tier verdict at or above this confidence resolves a tier disagreement.
+ADJUDICATION_CONFIDENCE = 0.78
 
 EMOTIONS = ("joy", "anger", "sadness", "fear", "disgust", "surprise", "neutral")
 LANGUAGES = ("greek", "english", "greeklish", "mixed", "other")
@@ -492,12 +494,28 @@ def _final_decision(annotation: dict) -> tuple[str, list[str]]:
     impact = float(annotation.get("impact_score", 0))
 
     critical = {
-        "model_disagreement", "sentiment_label_score_conflict", "deterministic_ai_relevance_conflict",
-        "provider_partial_failure", "weak_sarcasm_claim", "ai_budget_guard", "reasoning_skipped_budget", "insufficient_text_for_ai",
+        "sentiment_label_score_conflict", "deterministic_ai_relevance_conflict",
+        "provider_partial_failure", "weak_sarcasm_claim", "ai_budget_guard",
+        "reasoning_skipped_budget", "insufficient_text_for_ai",
     }
     if critical & set(flags):
         reasons.append("conflicting_or_fragile_semantic_signal")
         return "review", reasons
+
+    # Adjudicated disagreement: when the bulk and reasoning tiers disagreed, the
+    # reasoning tier already acted as the adjudicator on the full text. Its verdict
+    # is accepted when it is confident; otherwise the record still goes to review.
+    # Discarding a confident adjudicated verdict is what silenced ~40% of records.
+    if "model_disagreement" in flags:
+        adjudicated = (
+            str(annotation.get("analysis_tier") or "") == "reasoning"
+            and confidence >= ADJUDICATION_CONFIDENCE
+            and not annotation.get("cache_hit_conflict")
+        )
+        if not adjudicated:
+            reasons.append("conflicting_or_fragile_semantic_signal")
+            return "review", reasons
+        reasons.append("model_disagreement_adjudicated_by_reasoning_tier")
     if rel == "uncertain":
         reasons.append("semantic_relevance_uncertain")
         return "review", reasons
@@ -515,6 +533,15 @@ def _final_decision(annotation: dict) -> tuple[str, list[str]]:
         return "review", reasons
     reasons.append("semantic_analysis_ready")
     return "ready", reasons
+
+
+REVIEW_REASON_LABELS = {
+    "conflicting_or_fragile_semantic_signal": "Αντικρουόμενα ή εύθραυστα σήματα",
+    "semantic_relevance_uncertain": "Αβέβαιη συνάφεια με το θέμα",
+    "irrelevance_requires_review_due_to_confidence_or_impact": "Πιθανώς άσχετο, αλλά με βαρύτητα",
+    "low_semantic_confidence": "Χαμηλή βεβαιότητα ταξινόμησης",
+    "sarcasm_requires_review": "Πιθανός σαρκασμός χωρίς βεβαιότητα",
+}
 
 
 def _safe_failure_annotation(row: dict, error: str) -> dict:
