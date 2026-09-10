@@ -20,6 +20,7 @@ from app.registry import (
 from app.services.query_planner import build_collection_plan
 from app.services import validation as validation_service
 from app.services import review_queue as review_service
+from app.services import trends as trends_service
 from app.services.run_manager import RunManager, RunStateError
 from app.services.cleaning import clean_run, apply_review_decision, load_cleaning_summary, load_review_queue
 from app.services.ai_analysis import analyze_run, apply_ai_review_decision, load_analysis_summary, load_analysis_review_queue
@@ -1052,6 +1053,27 @@ def get_run_exports(run_id: str):
         raise HTTPException(status_code=404, detail="Exports are not available for this run")
     manifest = load_export_manifest(folder) or {"files": []}
     return {"summary": summary, "manifest": manifest}
+
+
+@app.get("/api/series")
+def get_series(key: str | None = Query(default=None)):
+    """Runs of the same brand grouped into a time series, with period-over-period change."""
+    runs = store.list_runs()
+    detailed = []
+    for row in runs:
+        if str(row.get("status")) not in {"succeeded", "completed", "completed_shortfall"}:
+            continue
+        try:
+            detailed.append(store.read_status(row["run_id"]))
+        except Exception:
+            continue
+    series = trends_service.build_series(detailed)
+    if key:
+        one = next((s for s in series if s["series_key"] == key), None)
+        if not one:
+            raise HTTPException(status_code=404, detail="Series not found")
+        return one
+    return {"series": series, "count": len(series)}
 
 
 @app.get("/api/runs/{run_id}/review-queue")
