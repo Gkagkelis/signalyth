@@ -221,13 +221,84 @@ def _normalise_handle(value) -> str:
     return text.lstrip("@").replace(" ", "")
 
 
-def _origin_group(row: dict, owned_handles: frozenset[str] = frozenset()) -> str:
+# Outlet handles look like publications, not people. These markers are checked on
+# the ACCOUNT NAME only, never on the post text, so a citizen discussing a news
+# site is never reclassified as media.
+_MEDIA_SUFFIXES = (".gr", ".com", ".net", "gr_official", "_official")
+_MEDIA_MARKERS = (
+    "news", "ειδησ", "εφημερ", "εφημεριδα", "tvnews", "webtv", "radio", "ραδιο",
+    "tanea", "tovima", "vima", "protothema", "kathimerini", "efsyn", "documento",
+    "iefimerida", "newsit", "newsbomb", "newsbeast", "zougla", "parapolitika",
+    "skai", "cnn", "ant1", "star channel", "open tv", "amna",
+    "in.gr", "news247", "reader.gr", "cnn greece", "mononews", "capital.gr",
+    "naftemporiki", "ethnos", "real.gr", "libre", "topontiki", "avgi", "rizospastis",
+)
+
+
+_GREEK_TO_LATIN = str.maketrans({
+    "α": "a", "β": "v", "γ": "g", "δ": "d", "ε": "e", "ζ": "z", "η": "i", "θ": "th",
+    "ι": "i", "κ": "k", "λ": "l", "μ": "m", "ν": "n", "ξ": "x", "ο": "o", "π": "p",
+    "ρ": "r", "σ": "s", "ς": "s", "τ": "t", "υ": "y", "φ": "f", "χ": "ch", "ψ": "ps",
+    "ω": "o", "ά": "a", "έ": "e", "ή": "i", "ί": "i", "ό": "o", "ύ": "y", "ώ": "o",
+})
+
+
+# Short names that are only outlets when they stand alone.
+_MEDIA_EXACT = ("ert", "ana", "ape", "mega", "alpha", "star", "open", "action24", "kontra")
+
+
+def _flatten_handle(value: str) -> str:
+    """Separator-free, transliterated handle for outlet-name matching."""
+    text = str(value or "").lower().translate(_GREEK_TO_LATIN)
+    return "".join(ch for ch in text if ch.isalnum())
+
+
+def _looks_like_media(author) -> bool:
+    """Deterministic outlet detection on the account handle.
+
+    Publications acting as social accounts (in.gr, protothema, tovimagr) must not be
+    counted as independent people. This complements the AI classification, which was
+    observed to label a majority of outlet handles as ordinary persons.
+    """
+    handle = _normalise_handle(author)
+    if not handle:
+        return False
+    # Compare on a flattened form too: "ΤΟ ΒΗΜΑ" and "ta_nea" are the same outlet
+    # names as "tovima" and "tanea" once separators and accents are removed.
+    flat = _flatten_handle(handle)
+    if any(handle.endswith(sfx) for sfx in _MEDIA_SUFFIXES):
+        return True
+    if any(marker in handle for marker in _MEDIA_MARKERS):
+        return True
+    # Short, ambiguous outlet names only count as a whole handle or a clear prefix,
+    # so "ert" never turns "laertis1972" into a media account.
+    if flat in _MEDIA_EXACT or any(flat.startswith(x) and len(flat) <= len(x) + 4 for x in _MEDIA_EXACT):
+        return True
+    if any(_flatten_handle(marker) in flat for marker in _MEDIA_MARKERS if len(marker) > 4):
+        return True
+    # "tovimagr", "protothemagr": outlet name followed by a country suffix.
+    if len(handle) > 5 and handle.endswith("gr") and not handle.endswith("agr"):
+        for marker in _MEDIA_MARKERS:
+            if marker in handle[:-2]:
+                return True
+    return False
+
+
+def _origin_group(row: dict, owned_handles: frozenset[str] = frozenset(),
+                  media_handles: frozenset[str] = frozenset()) -> str:
     # Client-declared official accounts are authoritative: a brand never counts
     # as an independent voice about itself (§9/§15 of the methodology).
     if owned_handles:
         for candidate in (row.get("author"), row.get("author_handle"), row.get("author_id"), row.get("account")):
             if _normalise_handle(candidate) in owned_handles:
                 return "brand_owned"
+    # Client-declared outlets are authoritative, then deterministic handle detection.
+    for candidate in (row.get("author"), row.get("author_handle"), row.get("account")):
+        norm = _normalise_handle(candidate)
+        if norm and norm in media_handles:
+            return "media"
+    if _looks_like_media(row.get("author")):
+        return "media"
     cleaning = row.get("cleaning") or {}
     origin = str(cleaning.get("origin_class") or "unknown")
     if origin in {"media", "earned_media"}:
@@ -692,14 +763,28 @@ def compute_intelligence(analysis_ready_records: list[dict], plan: dict, cleanin
     owned_handles = frozenset(
         h for h in (_normalise_handle(x) for x in (plan.get("owned_accounts") or [])) if h
     )
-    refs = _metric_reference(analysis_ready_records)
+    media_handles = frozenset(
+        h for h in (_normalise_handle(x) for x in (plan.get("media_accounts") or [])) if h
+    )
+    media_handling = str(plan.get("media_handling") or "blended").lower()
+    source_records = analysis_ready_records
+    if media_handling == "exclude":
+        # Explicit client configuration: outlet voices leave every aggregate, not just
+        # the slides. Step 4 evidence is never mutated — a filtered view is used.
+        kept = [r for r in analysis_ready_records
+                if _origin_group(r, owned_handles, media_handles) != "media"]
+        media_excluded_count = len(analysis_ready_records) - len(kept)
+        source_records = kept
+    else:
+        media_excluded_count = 0
+    refs = _metric_reference(source_records)
     enriched = []
-    for row in analysis_ready_records:
+    for row in source_records:
         impact = _impact_components(row, refs)
         weights = _record_weights(row, impact)
         intel = {
             "ruleset_version": INTELLIGENCE_RULESET_VERSION,
-            "origin_group": _origin_group(row, owned_handles),
+            "origin_group": _origin_group(row, owned_handles, media_handles),
             **impact,
             **weights,
         }
@@ -731,6 +816,8 @@ def compute_intelligence(analysis_ready_records: list[dict], plan: dict, cleanin
             "date_to": plan.get("date_to"),
         },
         "records": len(enriched),
+        "media_handling": media_handling,
+        "media_records_excluded": media_excluded_count,
         "reputation_eligible_records": int(brand_rep.get("eligible_records") or 0),
         "organic_opinion_records": sum(1 for r in enriched if (r.get("ai_analysis") or {}).get("opinion_eligible")),
         "effective_independent_voices": round(sum(_safe_float((r.get("intelligence") or {}).get("independent_voice_weight"), 0.0) for r in enriched), 3),
