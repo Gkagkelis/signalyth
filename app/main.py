@@ -19,6 +19,7 @@ from app.registry import (
 )
 from app.services.query_planner import build_collection_plan
 from app.services import validation as validation_service
+from app.services import review_queue as review_service
 from app.services.run_manager import RunManager, RunStateError
 from app.services.cleaning import clean_run, apply_review_decision, load_cleaning_summary, load_review_queue
 from app.services.ai_analysis import analyze_run, apply_ai_review_decision, load_analysis_summary, load_analysis_review_queue
@@ -1051,6 +1052,79 @@ def get_run_exports(run_id: str):
         raise HTTPException(status_code=404, detail="Exports are not available for this run")
     manifest = load_export_manifest(folder) or {"files": []}
     return {"summary": summary, "manifest": manifest}
+
+
+@app.get("/api/runs/{run_id}/review-queue")
+def get_review_queue(run_id: str, limit: int = Query(default=200, ge=1, le=500)):
+    try:
+        folder = store.folder_for(run_id)
+    except RunNotFound:
+        raise HTTPException(status_code=404, detail="Run not found")
+    items = review_service.queue_items(store, folder, limit=limit)
+    report = store.read(folder / "analysis" / "human-review-report.json", None)
+    return {"run_id": run_id, "items": items, "count": len(items), "last_apply": report}
+
+
+@app.post("/api/runs/{run_id}/review-queue")
+def post_review_decision(run_id: str, payload: dict):
+    try:
+        folder = store.folder_for(run_id)
+    except RunNotFound:
+        raise HTTPException(status_code=404, detail="Run not found")
+    record_id = str(payload.get("record_id") or "").strip()
+    if not record_id:
+        raise HTTPException(status_code=422, detail="record_id is required")
+    try:
+        review_service.save_decision(
+            store, folder, record_id, payload.get("verdict"),
+            payload.get("sentiment"), payload.get("reviewer"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    try:
+        store.checkpoint_run(run_id)
+    except Exception:
+        pass
+    return {"ok": True}
+
+
+@app.delete("/api/runs/{run_id}/review-queue")
+def delete_review_decisions(run_id: str):
+    try:
+        folder = store.folder_for(run_id)
+    except RunNotFound:
+        raise HTTPException(status_code=404, detail="Run not found")
+    review_service.clear_decisions(store, folder)
+    return {"ok": True}
+
+
+@app.post("/api/runs/{run_id}/review-queue/apply")
+def apply_review_decisions(run_id: str):
+    """Rebuild the evidence base with human decisions, then recompute downstream."""
+    try:
+        folder = store.folder_for(run_id)
+        plan = store.read_plan(run_id)
+    except RunNotFound:
+        raise HTTPException(status_code=404, detail="Run not found")
+    try:
+        report = review_service.apply_reviews(store, folder)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    from app.services.intelligence import build_intelligence
+    from app.services.investigations import build_investigations
+    from app.services.visualizations import build_visualizations
+    build_intelligence(folder, plan, force=True)
+    build_investigations(folder, plan, force=True)
+    build_visualizations(folder, plan, force=True)
+    status = store.read_status(run_id)
+    status["human_review"] = report
+    status["exports"] = {**(status.get("exports") or {}), "stale": True}
+    store.write_status(run_id, status)
+    try:
+        store.checkpoint_run(run_id)
+    except Exception:
+        pass
+    return {"ok": True, "report": report}
 
 
 @app.get("/api/runs/{run_id}/validation")
