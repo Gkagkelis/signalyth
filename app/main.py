@@ -66,6 +66,16 @@ async def persist_cloud_run_mutations(request: Request, call_next):
     return response
 
 
+@app.middleware("http")
+async def _fresh_ui_after_deploys(request, call_next):
+    """A plain reload always fetches the newest UI — hard refresh never required."""
+    response = await call_next(request)
+    if request.url.path == "/":
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+    return response
+
+
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request):
     html=(BASE_DIR / "app" / "templates" / "index.html").read_text(encoding="utf-8")
