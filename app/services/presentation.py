@@ -1490,10 +1490,15 @@ def _analyzed_record_rows(folder: Path) -> list[dict]:
         cleaning = r.get("cleaning") or {}
         intel = r.get("intelligence") or {}
         emotions = a.get("emotions")
-        if isinstance(emotions, list):
+        if isinstance(emotions, list) and emotions:
             emotion = ", ".join(str(e.get("label") if isinstance(e, dict) else e) for e in emotions[:3])
         else:
-            emotion = a.get("primary_emotion") or ""
+            # Multi-label view: primary + secondary, with the model's intensity.
+            parts = [a.get("primary_emotion")]
+            second = a.get("secondary_emotion")
+            if second and str(second).lower() != "none":
+                parts.append(second)
+            emotion = ", ".join(str(x) for x in parts if x)
         topics = a.get("topics")
         narratives = a.get("narratives")
         rows.append({
@@ -1503,9 +1508,11 @@ def _analyzed_record_rows(folder: Path) -> list[dict]:
             "author": r.get("author"),
             "origin_group": intel.get("origin_group") or cleaning.get("origin_class") or "",
             "sentiment_label": a.get("sentiment_label", ""),
+            "sentiment_label_model": a.get("sentiment_label_model", ""),
             "sentiment_score": a.get("sentiment_score", ""),
             "stance": (a.get("target_stance") or ""),
             "emotion": emotion,
+            "emotion_intensity": a.get("emotion_intensity", ""),
             "sarcasm": (a.get("sarcasm") or {}).get("detected") if isinstance(a.get("sarcasm"), dict) else a.get("sarcasm", ""),
             "language": a.get("language", ""),
             "topic": (topics[0] if isinstance(topics, list) and topics else (a.get("topic") or "")),
@@ -1556,7 +1563,7 @@ def build_exports(folder: Path, plan: dict, *, force: bool=False, cancel_check: 
     try:
         rec_rows=_analyzed_record_rows(folder)
         with records_csv.open("w",encoding="utf-8-sig",newline="") as f:
-            fields=["record_id","date","platform","author","origin_group","sentiment_label","sentiment_score","stance","emotion","sarcasm","language","topic","narrative","relevance_score","decision","confidence","impact_score","url","text"]
+            fields=["record_id","date","platform","author","origin_group","sentiment_label","sentiment_label_model","sentiment_score","stance","emotion","emotion_intensity","sarcasm","language","topic","narrative","relevance_score","decision","confidence","impact_score","url","text"]
             w=csv.DictWriter(f,fieldnames=fields,extrasaction="ignore");w.writeheader();w.writerows(rec_rows)
     except Exception:
         records_csv=None

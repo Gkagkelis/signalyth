@@ -211,7 +211,23 @@ def _impact_components(row: dict, refs: dict[str, dict[str, float | None]]) -> d
     }
 
 
-def _origin_group(row: dict) -> str:
+def _normalise_handle(value) -> str:
+    """Comparable form of an account handle: lowercase, no @, no url, no spaces."""
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    if "/" in text:
+        text = text.rstrip("/").rsplit("/", 1)[-1]
+    return text.lstrip("@").replace(" ", "")
+
+
+def _origin_group(row: dict, owned_handles: frozenset[str] = frozenset()) -> str:
+    # Client-declared official accounts are authoritative: a brand never counts
+    # as an independent voice about itself (§9/§15 of the methodology).
+    if owned_handles:
+        for candidate in (row.get("author"), row.get("author_handle"), row.get("author_id"), row.get("account")):
+            if _normalise_handle(candidate) in owned_handles:
+                return "brand_owned"
     cleaning = row.get("cleaning") or {}
     origin = str(cleaning.get("origin_class") or "unknown")
     if origin in {"media", "earned_media"}:
@@ -673,6 +689,9 @@ def compute_intelligence(analysis_ready_records: list[dict], plan: dict, cleanin
     if len(ids) != len(set(ids)):
         raise RuntimeError("Analysis-ready sample contains duplicate record ids; Step 5 stopped before aggregation.")
 
+    owned_handles = frozenset(
+        h for h in (_normalise_handle(x) for x in (plan.get("owned_accounts") or [])) if h
+    )
     refs = _metric_reference(analysis_ready_records)
     enriched = []
     for row in analysis_ready_records:
@@ -680,7 +699,7 @@ def compute_intelligence(analysis_ready_records: list[dict], plan: dict, cleanin
         weights = _record_weights(row, impact)
         intel = {
             "ruleset_version": INTELLIGENCE_RULESET_VERSION,
-            "origin_group": _origin_group(row),
+            "origin_group": _origin_group(row, owned_handles),
             **impact,
             **weights,
         }

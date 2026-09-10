@@ -18,7 +18,9 @@ from app.config import settings
 from app.services.storage import RunStore
 
 AI_RULESET_VERSION = "0.9.0"
-PROMPT_VERSION = "signalyth-semantic-v0.9"
+PROMPT_VERSION = "signalyth-semantic-v1.0"
+# Below this absolute sentiment score a polarity claim is not considered supported.
+NEUTRAL_BAND = 0.10
 
 EMOTIONS = ("joy", "anger", "sadness", "fear", "disgust", "surprise", "neutral")
 LANGUAGES = ("greek", "english", "greeklish", "mixed", "other")
@@ -131,7 +133,30 @@ For evidence_quotes, copy at most three short exact substrings from the supplied
 Use neutral when emotion is not clearly expressed. Use not_applicable stance for factual/news/owned content without a stance toward the target.
 If context is insufficient, use uncertain relevance or lower confidence instead of guessing.
 Topic should be a short reusable category. Narrative should be a concise proposition/theme expressed by the content, not a causal explanation beyond the text.
-Return one result for every record_id and no extra record ids."""
+Return one result for every record_id and no extra record ids.
+
+TARGET-DIRECTED SENTIMENT (critical rule).
+sentiment_label and sentiment_score describe evaluation OF THE TARGET ENTITY only.
+Hostile, vulgar or angry language aimed at someone OTHER than the target (a rival, a journalist, another commenter, a different party) does not make the record negative for the target. If the author attacks the target's critics or opponents while defending the target, that is positive or neutral for the target, never negative. Judge who the hostility is pointed at before choosing a label.
+
+NEUTRAL BAND.
+Use neutral whenever the text reports, announces, quotes or informs without the author evaluating the target: news reports, headlines, programme announcements, agendas, factual summaries and neutral questions are neutral even when the underlying subject matter is charged. Reserve positive/negative for a discernible evaluative stance by the author. When the evaluation is genuinely faint, prefer neutral with |sentiment_score| <= 0.10 rather than forcing a polarity.
+
+MIXED means the same author expresses both praise and criticism of the target in the same record. Do not use mixed for merely ambiguous or unclear records; use neutral with lower confidence for those.
+
+EMOTIONS: primary_emotion is the dominant emotion of the author. When a second emotion is clearly present, set secondary_emotion; otherwise "none". emotion_intensity reflects how strongly the emotion is expressed (0 = barely, 1 = extreme).
+
+GREEK CODEBOOK — worked examples (these are calibration examples, not records to classify):
+1) "Δεν ξεχνάμε το 2015. Η εμπιστοσύνη δεν ξαναχτίζεται με ένα βίντεο." -> stance critical, sentiment negative (author evaluates the target).
+2) "Ακόμα δεν το διάβασαν και το κοστολόγησαν. Ποιοι; Οι απατεώνες της αντιπολίτευσης." -> the insult targets the target's OPPONENTS, and the author defends the target: stance supportive, sentiment positive. Not negative.
+3) "Τα 24αρια στον ΦΠΑ ο Χ τα έβαλε, ουρλιάζει ο Ψ. Και οκτώ χρόνια ο Ζ τα κράτησε." -> author rebuts a criticism of the target: stance supportive, sentiment positive or neutral. Not negative.
+4) "Ο Χ παρουσιάζει το σχέδιο διακυβέρνησης - Νέα εθνική στρατηγική" -> news/announcement, no authorial evaluation: sentiment neutral, stance not_applicable.
+5) "Μειώνουμε τον ΦΠΑ στα βασικά αγαθά" posted by the target's own account/party -> owned announcement: sentiment neutral, stance not_applicable.
+6) "Θάψτε τα βραχιόλια σας στις γλάστρες να μην τα βρει ο Χ 😅" -> mockery of the target's tax policy: sarcasm true, sentiment negative.
+7) "Εγώ τον βρήκα πολύ συγκρατημένο! Αν ήμουν στη θέση του θα έταζα πολλά περισσότερα. #παπατζα" -> ironic praise contradicted by the hashtag: sarcasm true, sentiment negative.
+8) "Kalos o Tsipras alla den ton pistevo" (Greeklish) -> language greeklish, mixed praise and distrust of the target: sentiment mixed.
+9) "Ο Χ έδωσε λύση στο θέμα των πυροσβεστών, μπράβο του." -> stance supportive, sentiment positive.
+10) "Συνέντευξη του υπουργού για οικονομία και εκλογές· αναφέρθηκε και στον Χ." -> the target is mentioned in passing without evaluation: relevance uncertain or irrelevant, sentiment neutral."""
 
 
 @dataclass
@@ -387,6 +412,25 @@ def _postprocess_annotation(row: dict, raw_annotation: dict, tier: str, model: s
     if input_truncated:
         flags.append("model_input_truncated")
 
+    # Neutrality band (§6 of the methodology): a polarity claim must clear a real
+    # threshold. Faint scores are recorded as neutral, with the original label kept
+    # for audit. This targets the documented neutral -> positive/negative error mode.
+    score = float(annotation.get("sentiment_score") or 0.0)
+    label = str(annotation.get("sentiment_label") or "")
+    if label in {"positive", "negative"} and abs(score) <= NEUTRAL_BAND:
+        annotation["sentiment_label_model"] = label
+        annotation["sentiment_label"] = "neutral"
+        flags.append("neutral_band_applied")
+
+    # Target-directed sentiment: hostility aimed at third parties must not be
+    # charged to the target. A supportive stance with a negative label and no
+    # sarcasm is contradictory, so it is flagged and escalated rather than trusted.
+    stance = str(annotation.get("target_stance") or "")
+    if stance == "supportive" and annotation.get("sentiment_label") == "negative" and not annotation.get("sarcasm"):
+        flags.append("stance_sentiment_contradiction")
+    if stance == "critical" and annotation.get("sentiment_label") == "positive" and not annotation.get("sarcasm"):
+        flags.append("stance_sentiment_contradiction")
+
     deterministic_rel = float((row.get("cleaning") or {}).get("relevance_score") or 0)
     if deterministic_rel >= 0.75 and annotation["semantic_relevance"] == "irrelevant":
         flags.append("deterministic_ai_relevance_conflict")
@@ -421,6 +465,7 @@ def _needs_reasoning(annotation: dict) -> bool:
         "sentiment_label_score_conflict",
         "deterministic_ai_relevance_conflict",
         "weak_sarcasm_claim",
+        "stance_sentiment_contradiction",
     )):
         return True
     return False
@@ -616,7 +661,10 @@ def _run_tier_batches(
                 if not ({"provider_partial_failure", "ai_budget_guard"} & set(a.get("flags", []))):
                     cache[key_by_id[rid]] = copy.deepcopy(a)
             if checkpoint:
-                checkpoint(cache)
+                try:
+                    checkpoint(cache, len(outputs))
+                except TypeError:
+                    checkpoint(cache)
 
     def _worker(batch: list[dict], reservation: float) -> list[dict]:
         try:
@@ -1072,7 +1120,9 @@ def analyze_run(
         except Exception:
             pass
 
-    def _checkpoint(current_cache: dict) -> None:
+    progress = {"done": 0, "total": max(1, len(trusted))}
+
+    def _checkpoint(current_cache: dict, batch_done: int = 0) -> None:
         try:
             store.write(folder / "analysis" / "cache.json", current_cache)
         except Exception:
@@ -1083,6 +1133,23 @@ def analyze_run(
             except Exception:
                 # A transient mirror failure must not abort a healthy analysis;
                 # the next batch checkpoint will retry the durable write.
+                pass
+        if batch_done:
+            # Live, visible progress: the run card and the details dialog show
+            # exactly how many records the AI has finished, batch by batch.
+            progress["done"] = min(progress["total"], progress["done"] + batch_done)
+            try:
+                st = store.read(folder / "status.json", {}) or {}
+                st.setdefault("analysis", {})["progress"] = {"done": progress["done"], "total": progress["total"]}
+                st["current"] = {
+                    "source": None,
+                    "code": "ai_analysis_progress",
+                    "message": f"AI ανάλυση σε εξέλιξη — {progress['done']}/{progress['total']} records",
+                }
+                pct = 92 + int(4 * progress["done"] / progress["total"])
+                st.setdefault("progress", {})["percent"] = max(int(st.get("progress", {}).get("percent") or 0), min(96, pct))
+                store.write_status_folder(folder, st)
+            except Exception:
                 pass
 
     result = analyze_records(
