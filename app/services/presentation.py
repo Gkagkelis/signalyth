@@ -498,8 +498,15 @@ def build_presentation_plan(visual_pack: dict, evidence_pack: dict, plan: dict |
     negative_mentions = [m for m in evidence_pool if str(m.get("sentiment_label") or "").lower() == "negative" and m.get("excerpt")]
     if positive_mentions or negative_mentions:
         evidence_claims = []
-        pos_sorted = sorted(positive_mentions, key=lambda m: _safe_float(m.get("impact_score")), reverse=True)
-        neg_sorted = sorted(negative_mentions, key=lambda m: _safe_float(m.get("impact_score")), reverse=True)
+        # Intensity-aware ranking: how negative/positive it is matters as much as
+        # how far it travelled. A brutal comment from a small account outranks a
+        # lukewarm one from a big account; a strong post with big reach tops both.
+        def _evidence_rank(m):
+            intensity = abs(_safe_float(m.get("sentiment_score")))
+            impact = _safe_float(m.get("impact_score"))
+            return intensity * (0.5 + 0.5 * impact)
+        pos_sorted = sorted(positive_mentions, key=_evidence_rank, reverse=True)
+        neg_sorted = sorted(negative_mentions, key=_evidence_rank, reverse=True)
         for i,m in enumerate(pos_sorted[:5], start=1):
             evidence_claims.append(_mention_claim("positive-evidence", m, lang=lang, index=i))
         for i,m in enumerate(neg_sorted[:5], start=1):

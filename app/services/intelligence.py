@@ -590,18 +590,40 @@ def _clean_excerpt(value, limit: int = 320) -> str:
     return text[:limit]
 
 
-def _top_mentions(records: list[dict], limit: int = 15) -> list[dict]:
-    ranked = sorted(
-        records,
-        key=lambda r: (
-            _safe_float((r.get("intelligence") or {}).get("impact_score"), 0.0),
-            abs(_safe_float((r.get("ai_analysis") or {}).get("sentiment_score"), 0.0)),
-            _safe_float((r.get("intelligence") or {}).get("evidence_confidence"), 0.0),
-        ),
-        reverse=True,
-    )
+def _top_mentions(records: list[dict], limit: int = 20) -> list[dict]:
+    """Evidence pool balancing materiality and intensity.
+
+    Ranking uses a composite of impact AND sentiment intensity, so a strongly
+    worded post from a small account competes fairly with a mild post from a
+    large one. The most intense positive and negative posts additionally get
+    reserved slots, so extremes are never silently dropped from the pool.
+    """
+    def _impact(r):
+        return _safe_float((r.get("intelligence") or {}).get("impact_score"), 0.0)
+
+    def _intensity(r):
+        return abs(_safe_float((r.get("ai_analysis") or {}).get("sentiment_score"), 0.0))
+
+    def _composite(r):
+        return _intensity(r) * (0.45 + 0.55 * _impact(r)) + 0.15 * _impact(r)
+
+    ranked = sorted(records, key=lambda r: (_composite(r), _impact(r), _intensity(r)), reverse=True)
+    chosen: list[dict] = list(ranked[:limit])
+    chosen_ids = {id(r) for r in chosen}
+    # Reserved slots: top-2 most intense per polarity always make the pool.
+    for polarity in ("negative", "positive"):
+        extremes = sorted(
+            (r for r in records
+             if str((r.get("ai_analysis") or {}).get("sentiment_label") or "").lower() == polarity),
+            key=_intensity, reverse=True,
+        )[:2]
+        for r in extremes:
+            if id(r) not in chosen_ids:
+                chosen.append(r)
+                chosen_ids.add(id(r))
+    chosen = chosen[: limit + 4]
     out = []
-    for row in ranked[:limit]:
+    for row in chosen:
         ai = row.get("ai_analysis") or {}
         intel = row.get("intelligence") or {}
         out.append({
