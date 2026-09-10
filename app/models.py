@@ -25,6 +25,7 @@ class AnalysisDraft(BaseModel):
     report_language: Literal["English", "Ελληνικά"] = "English"
     media_handling: Literal["blended", "separate", "exclude"] = "blended"
     owned_accounts: list[str] = Field(default_factory=list, max_length=60)
+    media_accounts: list[str] = Field(default_factory=list, max_length=120)
     additional_context: list[str] = Field(default_factory=list, max_length=50)
     exclusions: list[str] = Field(default_factory=list, max_length=50)
     search_strategy: SearchStrategy = "balanced_smart"
@@ -119,6 +120,7 @@ class CollectionPlan(BaseModel):
     report_language: str = "English"
     media_handling: Literal["blended", "separate", "exclude"] = "blended"
     owned_accounts: list[str] = Field(default_factory=list, max_length=60)
+    media_accounts: list[str] = Field(default_factory=list, max_length=120)
     sources: list[SourcePlan]
 
 class SourceConfigUpdate(BaseModel):
