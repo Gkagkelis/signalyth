@@ -1559,6 +1559,22 @@ def build_exports(folder: Path, plan: dict, *, force: bool=False, cancel_check: 
         fields=list(evidence_rows[0].keys()) if evidence_rows else ["record_id","platform","author","date","url","excerpt"]
         writer=csv.DictWriter(f,fieldnames=fields);writer.writeheader();writer.writerows([{k:(json.dumps(v,ensure_ascii=False) if isinstance(v,(dict,list)) else v) for k,v in r.items()} for r in evidence_rows])
 
+    # Interactive client dashboard: the same evidence, explorable, offline, no licence.
+    dashboard_path=base/f"{stem}_Dashboard.html"
+    try:
+        from app.services.dashboard_html import build_dashboard_html
+        intel_summary=RunStore.read(folder/"intelligence"/"summary.json", {}) or {}
+        dash_records=RunStore.read(folder/"analysis"/"analysis-ready.json", []) or []
+        if not dash_records:
+            dash_records=RunStore.read(folder/"analysis"/"analyzed.json", []) or []
+        dashboard_path.write_text(
+            build_dashboard_html(plan={**plan, **ctx}, intelligence=intel_summary,
+                                 records=dash_records, language=lang),
+            encoding="utf-8",
+        )
+    except Exception:
+        dashboard_path=None
+
     records_csv=base/f"{stem}_Records.csv"
     try:
         rec_rows=_analyzed_record_rows(folder)
@@ -1569,6 +1585,7 @@ def build_exports(folder: Path, plan: dict, *, force: bool=False, cancel_check: 
         records_csv=None
 
     files=[pptx_path,docx_path,evidence_json,evidence_csv]
+    if dashboard_path: files.append(dashboard_path)
     if records_csv: files.append(records_csv)
     if presentation_pdf: files.append(presentation_pdf)
     if internal_pdf: files.append(internal_pdf)
