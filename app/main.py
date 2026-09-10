@@ -18,6 +18,7 @@ from app.registry import (
     commit_comment_route_verification, clear_comment_route_verification,
 )
 from app.services.query_planner import build_collection_plan
+from app.services import validation as validation_service
 from app.services.run_manager import RunManager, RunStateError
 from app.services.cleaning import clean_run, apply_review_decision, load_cleaning_summary, load_review_queue
 from app.services.ai_analysis import analyze_run, apply_ai_review_decision, load_analysis_summary, load_analysis_review_queue
@@ -1050,6 +1051,65 @@ def get_run_exports(run_id: str):
         raise HTTPException(status_code=404, detail="Exports are not available for this run")
     manifest = load_export_manifest(folder) or {"files": []}
     return {"summary": summary, "manifest": manifest}
+
+
+@app.get("/api/runs/{run_id}/validation")
+def get_validation(run_id: str, size: int = Query(default=60, ge=10, le=300)):
+    """Blind gold-set items plus current metrics.
+
+    Items are served without any model label so the annotator is not anchored.
+    """
+    try:
+        folder = store.folder_for(run_id)
+    except RunNotFound:
+        raise HTTPException(status_code=404, detail="Run not found")
+    records = store.read(folder / "analysis" / "analyzed.json", []) or []
+    if not records:
+        raise HTTPException(status_code=409, detail="Analysis has not produced records for this run yet.")
+    gold = validation_service.load_gold(store, folder)
+    items = validation_service.blind_items(records, run_id, size=size)
+    labelled = gold.get("labels") or {}
+    return {
+        "run_id": run_id,
+        "total_records": len(records),
+        "items": [{**item, "labelled": labelled.get(item["record_id"], {}).get("sentiment")} for item in items],
+        "metrics": validation_service.score(records, gold),
+    }
+
+
+@app.post("/api/runs/{run_id}/validation")
+def post_validation_label(run_id: str, payload: dict):
+    try:
+        folder = store.folder_for(run_id)
+    except RunNotFound:
+        raise HTTPException(status_code=404, detail="Run not found")
+    record_id = str(payload.get("record_id") or "").strip()
+    if not record_id:
+        raise HTTPException(status_code=422, detail="record_id is required")
+    try:
+        validation_service.save_label(
+            store, folder, record_id,
+            payload.get("sentiment"), payload.get("relevance"), payload.get("annotator"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    records = store.read(folder / "analysis" / "analyzed.json", []) or []
+    gold = validation_service.load_gold(store, folder)
+    try:
+        store.checkpoint_run(run_id)
+    except Exception:
+        pass
+    return {"ok": True, "metrics": validation_service.score(records, gold)}
+
+
+@app.delete("/api/runs/{run_id}/validation")
+def delete_validation(run_id: str):
+    try:
+        folder = store.folder_for(run_id)
+    except RunNotFound:
+        raise HTTPException(status_code=404, detail="Run not found")
+    validation_service.clear_gold(store, folder)
+    return {"ok": True}
 
 
 @app.get("/api/runs/{run_id}/exports/{filename}")
