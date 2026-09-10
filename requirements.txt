@@ -9,4 +9,5 @@ openai>=2.0,<3
 python-pptx>=1.0,<2
 python-docx>=1.1,<2
 celery==5.6.3
-vercel>=0.6.0
+vercel==0.9.0
+vercel-celery==0.7.4
