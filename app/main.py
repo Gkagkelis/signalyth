@@ -21,6 +21,7 @@ from app.services.query_planner import build_collection_plan
 from app.services import validation as validation_service
 from app.services import review_queue as review_service
 from app.services import trends as trends_service
+from app.services import comparison as comparison_service
 from app.services.run_manager import RunManager, RunStateError
 from app.services.cleaning import clean_run, apply_review_decision, load_cleaning_summary, load_review_queue
 from app.services.ai_analysis import analyze_run, apply_ai_review_decision, load_analysis_summary, load_analysis_review_queue
@@ -1053,6 +1054,38 @@ def get_run_exports(run_id: str):
         raise HTTPException(status_code=404, detail="Exports are not available for this run")
     manifest = load_export_manifest(folder) or {"files": []}
     return {"summary": summary, "manifest": manifest}
+
+
+def _completed_statuses() -> list[dict]:
+    detailed = []
+    for row in store.list_runs():
+        if str(row.get("status")) not in {"succeeded", "completed", "completed_shortfall"}:
+            continue
+        try:
+            detailed.append(store.read_status(row["run_id"]))
+        except Exception:
+            continue
+    return detailed
+
+
+@app.get("/api/comparison/candidates")
+def comparison_candidates():
+    return {"runs": comparison_service.comparable_runs(_completed_statuses())}
+
+
+@app.get("/api/comparison")
+def get_comparison(a: str = Query(...), b: str = Query(...)):
+    if a == b:
+        raise HTTPException(status_code=422, detail="Pick two different runs to compare.")
+    try:
+        run_a = store.read_status(a)
+        run_b = store.read_status(b)
+    except RunNotFound:
+        raise HTTPException(status_code=404, detail="Run not found")
+    try:
+        return comparison_service.compare_runs(run_a, run_b)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
 
 
 @app.get("/api/series")
