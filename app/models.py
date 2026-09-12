@@ -26,6 +26,8 @@ class AnalysisDraft(BaseModel):
     media_handling: Literal["blended", "separate", "exclude"] = "blended"
     owned_accounts: list[str] = Field(default_factory=list, max_length=60)
     media_accounts: list[str] = Field(default_factory=list, max_length=120)
+    client_logo: str | None = Field(default=None, max_length=2_200_000)
+    brand_accent: str | None = Field(default=None, max_length=16)
     additional_context: list[str] = Field(default_factory=list, max_length=50)
     exclusions: list[str] = Field(default_factory=list, max_length=50)
     search_strategy: SearchStrategy = "balanced_smart"
@@ -121,6 +123,8 @@ class CollectionPlan(BaseModel):
     media_handling: Literal["blended", "separate", "exclude"] = "blended"
     owned_accounts: list[str] = Field(default_factory=list, max_length=60)
     media_accounts: list[str] = Field(default_factory=list, max_length=120)
+    client_logo: str | None = Field(default=None, max_length=2_200_000)
+    brand_accent: str | None = Field(default=None, max_length=16)
     sources: list[SourcePlan]
 
 class SourceConfigUpdate(BaseModel):
