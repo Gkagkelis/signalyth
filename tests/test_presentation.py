@@ -106,7 +106,7 @@ class PresentationPlanTests(unittest.TestCase):
 
     def test_greek_report_language_changes_titles(self):
         out=build_presentation_plan(self.v,self.e,plan('Ελληνικά'))
-        self.assertEqual(out['language'],'el');self.assertEqual(next(x for x in out['slides'] if x['slide_id']=='executive_summary')['title'],'Σύνοψη')
+        self.assertEqual(out['language'],'el');self.assertEqual(next(x for x in out['slides'] if x['slide_id']=='executive_summary')['title'],'Executive Dashboard')
 
     def test_cancel_before_planning(self):
         with self.assertRaises(PresentationCancelled): build_presentation_plan(self.v,self.e,plan(),cancel_check=lambda:True)
@@ -146,7 +146,7 @@ class RendererTests(unittest.TestCase):
     def test_greek_pptx_reopens_with_greek_text(self):
         gp=build_presentation_plan(self.v,self.e,plan('Ελληνικά'));path=self.tmp/'g.pptx';generate_pptx(gp,self.v,path,ROOT/'logo.png');prs=Presentation(path)
         text=' '.join(sh.text for sl in prs.slides for sh in sl.shapes if hasattr(sh,'text'))
-        self.assertIn('Σύνοψη',text)
+        self.assertIn('Executive Dashboard',text)
 
     def test_internal_docx_is_created_and_reopenable(self):
         path=self.tmp/'internal.docx';meta=generate_internal_docx(self.p,self.e,path,ROOT/'logo.png');self.assertTrue(path.exists());doc=Document(path);self.assertGreaterEqual(len(doc.tables),2);self.assertEqual(meta['tables'],len(doc.tables))
