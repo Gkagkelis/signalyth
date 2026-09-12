@@ -33,7 +33,7 @@ from app.services.storage import RunStore
 from app.services.visualizations import load_presentation_visual_pack, load_visualization_summary
 from app.services.report_synthesis import build_report_synthesis, final_consistency_qa
 
-PRESENTATION_RULESET_VERSION = "1.6.0"
+PRESENTATION_RULESET_VERSION = "1.7.0"
 PRESENTATION_METHODOLOGY_VERSION = "signalyth-presentation-intelligence-v1.4"
 PRESENTATION_CONTRACT_VERSION = "signalyth-presentation-pack-v1.4"
 
@@ -2077,10 +2077,377 @@ def _render_reputation_timeline(slide, tl: dict, lang: str, ctx: dict) -> None:
         _add_text(slide, label, x + 0.06, ky + 0.72, kw_ - 0.12, 0.8, size=8, color=MUTED, align=PP_ALIGN.CENTER)
 
 
+# ---------- Top 10 comments (slides 4-5) & client-facing display policy ----------
+# Locked design: per-comment cards ranked by RAW sentiment score (never weighted
+# impact), the score always visible in a coloured chip, dynamic card heights so
+# no comment ever loses a word, and an AI analyst commentary written in the
+# run's research persona (market vs political). Display policy: platform names
+# never appear in the client deck; in political research third-party commenter
+# names are replaced by stable pseudonyms drawn from the whole dataset's
+# chronological order (so numbers read as organic, e.g. "Χρήστης 417"), while
+# the internal evidence pack keeps every real detail.
+
+_KNOWN_PLATFORMS = ["twitter", "tiktok", "instagram", "facebook", "youtube",
+                    "reddit", "linkedin", "threads", "news", "x"]
+
+
+def _norm_handle(value) -> str:
+    return str(value or "").strip().lstrip("@").casefold()
+
+
+def _pseudo_label(idx: int, lang: str) -> str:
+    return f"{'Χρήστης' if lang == 'el' else 'User'} {idx}"
+
+
+def _top_comments_data(folder: Path, plan: dict, lang: str) -> dict | None:
+    """Top 10 positive + top 10 negative comments by raw sentiment score.
+    Owned/official accounts are excluded entirely — self-comments are not
+    opinions. Builds the run-wide pseudonym index at the same time."""
+    try:
+        records = None
+        for rel in (("intelligence", "records.json"), ("analysis", "analysis-ready.json")):
+            try:
+                data = RunStore.read(folder / rel[0] / rel[1], None)
+            except Exception:
+                data = None
+            if isinstance(data, list) and data:
+                records = data
+                break
+        if not records:
+            return None
+        owned = {_norm_handle(x) for x in (plan.get("owned_accounts") or [])}
+
+        def is_owned(r: dict) -> bool:
+            if str(((r.get("cleaning") or {}).get("origin_class")) or "") == "brand_owned":
+                return True
+            return _norm_handle(r.get("author")) in owned if r.get("author") else False
+
+        # Stable pseudonyms: chronological first appearance across the WHOLE
+        # dataset, so Top-10 numbers come out scattered (Χρήστης 417, 88, …)
+        # and witness the breadth of the sample instead of implying 10 users.
+        dated = []
+        for r in records:
+            if not isinstance(r, dict) or not r.get("author"):
+                continue
+            dt = _parse_dt(r.get("date"))
+            dated.append((dt or datetime.max.replace(tzinfo=timezone.utc), _norm_handle(r.get("author"))))
+        dated.sort(key=lambda x: x[0])
+        name_index: dict[str, int] = {}
+        for _, a in dated:
+            if a and a not in name_index:
+                name_index[a] = len(name_index) + 1
+
+        platforms = sorted({str(r.get("platform") or "").strip().casefold()
+                            for r in records if isinstance(r, dict) and r.get("platform")})
+
+        candidates = []
+        for r in records:
+            if not isinstance(r, dict) or is_owned(r):
+                continue
+            score = (r.get("ai_analysis") or {}).get("sentiment_score")
+            text = _clean_text(r.get("text"), 2000)
+            if score is None or len(text) < 5:
+                continue
+            impact = _safe_float((r.get("intelligence") or {}).get("impact_score"), 0.0)
+            dt = _parse_dt(r.get("date"))
+            candidates.append({
+                "author": str(r.get("author") or ("—" if lang != "el" else "—")),
+                "author_idx": name_index.get(_norm_handle(r.get("author")), 0),
+                "platform": str(r.get("platform") or ""),
+                "date": f"{dt.day}/{dt.month}" if dt else "",
+                "score": round(_safe_float(score), 2),
+                "impact": impact,
+                "text": text,
+            })
+        positive = sorted([c for c in candidates if c["score"] > 0],
+                          key=lambda c: (-c["score"], -c["impact"]))[:10]
+        negative = sorted([c for c in candidates if c["score"] < 0],
+                          key=lambda c: (c["score"], -c["impact"]))[:10]
+        if not positive and not negative:
+            return None
+        return {"positive": positive, "negative": negative,
+                "name_index": name_index, "platforms": platforms,
+                "unique_authors": len(name_index)}
+    except Exception:
+        return None
+
+
+def _commentary_fallback(entries: list[dict], polarity: str, lang: str) -> list[dict]:
+    el = lang == "el"
+    if not entries:
+        return []
+    vals = [e["score"] for e in entries]
+    n = len(entries)
+    voices = len({_norm_handle(e["author"]) for e in entries})
+    avg = sum(vals) / n
+    pos = polarity == "positive"
+    out = [{
+        "lead": ("Η ένταση του ρεύματος." if el else "Strength of the current.") if pos
+                 else ("Η ένταση της κριτικής." if el else "Intensity of the criticism."),
+        "body": (f"Τα {n} κορυφαία {'θετικά' if pos else 'αρνητικά'} σχόλια κινούνται από {vals[-1]:+.2f} έως {vals[0]:+.2f} "
+                 f"(μ.ο. {avg:+.2f}) και προέρχονται από {voices} διαφορετικές φωνές." if el else
+                 f"The top {n} {'positive' if pos else 'negative'} comments range from {vals[-1]:+.2f} to {vals[0]:+.2f} "
+                 f"(avg {avg:+.2f}) and come from {voices} distinct voices."),
+    }]
+    strong = sum(1 for v in vals if abs(v) >= 0.85)
+    if strong:
+        out.append({
+            "lead": "Βαθμός βεβαιότητας. " if el else "Degree of conviction. ",
+            "body": (f"{strong} από τα {n} σχόλια ξεπερνούν το {'+' if pos else '−'}0.85 — "
+                     f"{'ισχυρή, ξεκάθαρη αποδοχή χωρίς επιφυλάξεις.' if pos else 'απορριπτικός λόγος υψηλής έντασης, όχι ήπιες ενστάσεις.'}" if el else
+                     f"{strong} of the {n} comments exceed {'+' if pos else '−'}0.85 — "
+                     f"{'strong, unreserved approval.' if pos else 'high-intensity rejection rather than mild objection.'}"),
+        })
+    return out
+
+
+def _analyst_commentary(top: dict, plan: dict, lang: str) -> dict:
+    """Short analyst read of the two Top-10 lists. Written by OpenAI in the
+    run's research persona; deterministic fallback keeps the deck shipping."""
+    result = {"positive": _commentary_fallback(top.get("positive") or [], "positive", lang),
+              "negative": _commentary_fallback(top.get("negative") or [], "negative", lang),
+              "provider": "deterministic"}
+    try:
+        from app.config import settings
+        if not (settings.signalyth_ai_enabled and settings.openai_api_key):
+            return result
+        from openai import OpenAI
+        client = OpenAI(api_key=settings.openai_api_key, max_retries=0, timeout=60.0)
+        political = str(plan.get("research_type") or "market") == "political"
+        language = "Greek" if lang == "el" else "English"
+        persona = ("a senior political communications analyst reading public political discourse"
+                   if political else "a senior market/brand analyst reading consumer opinion")
+
+        def pack(entries):
+            return [{"author": _pseudo_label(e["author_idx"] or (i + 1), lang),
+                     "date": e["date"], "sentiment": e["score"], "text": e["text"][:400]}
+                    for i, e in enumerate(entries)]
+
+        payload = {"client": plan.get("client"), "topic": plan.get("topic"),
+                   "positive_top10": pack(top.get("positive") or []),
+                   "negative_top10": pack(top.get("negative") or [])}
+        schema = {"type": "object", "additionalProperties": False,
+                  "required": ["positive", "negative"],
+                  "properties": {k: {"type": "array", "maxItems": 3, "items": {
+                      "type": "object", "additionalProperties": False,
+                      "required": ["lead", "body"],
+                      "properties": {"lead": {"type": "string"}, "body": {"type": "string"}}}}
+                      for k in ("positive", "negative")}}
+        response = client.responses.create(
+            model=settings.signalyth_ai_reasoning_model, store=False,
+            instructions=(f"You are {persona}. Write in {language}. You receive the 10 most positive and 10 most negative "
+                          "public comments about the subject, ranked by raw sentiment score. For EACH list write 2-3 short, "
+                          "serious analyst observations: `lead` is a bold 2-5 word heading ending with a period; `body` is one "
+                          "or two dense sentences (max ~240 chars). Identify converging narratives, what the criticism or "
+                          "praise actually targets, and any escalation risk or exploitable strength. Use ONLY the supplied "
+                          "comments; never invent facts, names or numbers beyond simple counts of the supplied items; refer "
+                          "to commenters only by the supplied anonymous labels or not at all. No generic filler."),
+            input=json.dumps(payload, ensure_ascii=False, default=str),
+            text={"format": {"type": "json_schema", "name": "signalyth_top_comments_commentary",
+                             "schema": schema, "strict": True}},
+            max_output_tokens=1200)
+        decoded = json.loads(response.output_text or "{}")
+        cleaned = {}
+        for k in ("positive", "negative"):
+            items = []
+            for it in (decoded.get(k) or [])[:3]:
+                lead = _clean_text((it or {}).get("lead"), 60)
+                body = _clean_text((it or {}).get("body"), 300)
+                if lead and body:
+                    items.append({"lead": lead if lead.endswith((".", ":", "!")) else lead + ".", "body": body})
+            if items:
+                cleaned[k] = items
+        if cleaned.get("positive") or cleaned.get("negative"):
+            result.update(cleaned)
+            result["provider"] = "openai"
+    except Exception as exc:
+        result["provider_error"] = _clean_text(exc, 300)
+    return result
+
+
+def _scrub_display_text(text: str, policy: dict) -> str:
+    """Client-deck scrub: platform names never show; in political research,
+    third-party commenter names become their stable pseudonyms."""
+    out = str(text or "")
+    for p in policy.get("platforms") or []:
+        out = re.sub(rf"(?i)\b{re.escape(p)}\b\s*·\s*", "", out)
+        out = re.sub(rf"(?i)\s*·\s*\b{re.escape(p)}\b", "", out)
+    if policy.get("anonymize"):
+        lang = policy.get("lang") or "en"
+        for name, idx in policy.get("names_by_len") or []:
+            out = re.sub(rf"(?i)(?<![\w@]){re.escape(name)}(?![\w])", _pseudo_label(idx, lang), out)
+    return out
+
+
+def _scrubbed_plan_for_display(presentation_plan: dict, charts: dict) -> tuple[dict, dict]:
+    """Deep-copied plan+charts with the display policy applied. The originals
+    stay untouched so the INTERNAL docx and evidence pack keep real names."""
+    policy = presentation_plan.get("display_policy") or {}
+    if not policy:
+        return presentation_plan, charts
+    pplan = copy.deepcopy(presentation_plan)
+    charts = copy.deepcopy(charts)
+    scrub = lambda t: _scrub_display_text(t, policy)
+    anonymize = bool(policy.get("anonymize"))
+    lang = policy.get("lang") or "en"
+    idx_of = {k: v for k, v in (policy.get("name_index") or {}).items()}
+
+    def scrub_author(value):
+        if not anonymize:
+            return value
+        idx = idx_of.get(_norm_handle(value))
+        return _pseudo_label(idx, lang) if idx else value
+
+    for spec in pplan.get("slides") or []:
+        for cl in spec.get("claims") or []:
+            if cl.get("text"):
+                cl["text"] = scrub(cl["text"])
+            sv = cl.get("source_values") or {}
+            if sv.get("author"):
+                sv["author"] = scrub_author(sv["author"])
+            for q in sv.get("quotes") or []:
+                if isinstance(q, dict):
+                    q["platform"] = ""
+        notes = spec.get("notes") or {}
+        for row in notes.get("rows") or []:
+            if isinstance(row, dict) and row.get("name"):
+                row["name"] = scrub_author(row["name"])
+        if spec.get("subtitle"):
+            spec["subtitle"] = scrub(spec["subtitle"])
+        for key in ("final_takeaway",):
+            if notes.get(key):
+                notes[key] = scrub(notes[key])
+        prm = notes.get("priorities") or {}
+        for k, items in list(prm.items()):
+            if isinstance(items, list):
+                prm[k] = [scrub(v) for v in items]
+    for cl in pplan.get("claim_ledger") or []:
+        if cl.get("text"):
+            cl["text"] = scrub(cl["text"])
+    for chart in charts.values():
+        data = chart.get("data") or {}
+        for row in data.get("rows") or []:
+            if isinstance(row, dict):
+                if row.get("author"):
+                    row["author"] = scrub_author(row["author"])
+                if row.get("name") and str(chart.get("chart_id")) in {"people_influence"}:
+                    row["name"] = scrub_author(row["name"])
+                if "platform" in row:
+                    row["platform"] = ""
+                for key in ("excerpt", "text", "title"):
+                    if row.get(key):
+                        row[key] = scrub(row[key])
+    return pplan, charts
+
+
+def _render_top_comments(slide, entries: list[dict], commentary: list[dict],
+                         polarity: str, lang: str, ctx: dict, policy: dict) -> None:
+    el = lang == "el"
+    is_pos = polarity == "positive"
+    accent = POS if is_pos else NEG
+    soft = "E7F2EC" if is_pos else "FBE9EA"
+    anonymize = bool(policy.get("anonymize"))
+
+    client = _clean_text(ctx.get("client") or "", 60)
+    topic = _clean_text(ctx.get("topic") or "", 60)
+    who = " · ".join(x for x in (client, topic) if x)
+    ranked = "κατάταξη με sentiment score" if el else "ranked by sentiment score"
+    when = " · ".join(x for x in (_period_label(ctx.get("date_from"), ctx.get("date_to"), lang), ranked) if x)
+    if who:
+        _add_text(slide, who, 7.35, 0.36, 5.38, 0.28, size=12, color=INK, bold=True, align=PP_ALIGN.RIGHT)
+    _add_text(slide, when, 7.35, 0.66, 5.38, 0.24, size=9.5, color=MUTED, align=PP_ALIGN.RIGHT)
+
+    # --- Comment cards: line-count based heights, proven to fit before drawing,
+    # so no comment ever loses a word. A font ladder shrinks type only as far
+    # as the densest run actually requires.
+    lx, lw = 0.58, 8.10
+    total_h, gap = 5.44, 0.055
+    n = max(1, len(entries))
+    text_w = lw - 1.42  # after rank badge and value chip
+    avail = total_h - gap * (n - 1)
+    chosen_font, needs = 6.4, None
+    for font in (8.3, 7.9, 7.5, 7.1, 6.7, 6.4):
+        cpl = max(30, int(text_w * 12.2 * 8.3 / font))       # chars per line at this size
+        line_h = 0.0172 * font
+        trial = [0.245 + max(1, math.ceil(len(e["text"]) / cpl)) * line_h for e in entries]
+        if sum(trial) <= avail:
+            chosen_font, needs = font, trial
+            break
+    if needs is None:  # pathological volume: floor font, scale but keep ratios
+        font = 6.4
+        cpl = max(30, int(text_w * 12.2 * 8.3 / font))
+        needs = [0.245 + max(1, math.ceil(len(e["text"]) / cpl)) * 0.0172 * font for e in entries]
+        k = avail / sum(needs)
+        needs = [h * k for h in needs]
+    else:
+        k = avail / sum(needs)  # distribute the leftover as breathing room
+        needs = [h * k for h in needs]
+    base_font = chosen_font
+    y = 1.42
+    for i, e in enumerate(entries):
+        h = needs[i]
+        card = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(lx), Inches(y), Inches(lw), Inches(h))
+        card.adjustments[0] = min(0.5, 0.055 / max(h, 0.2))
+        card.fill.solid(); card.fill.fore_color.rgb = _rgb(DASH_CARD_BG)
+        card.line.color.rgb = _rgb(STONE_DARK); card.line.width = Pt(0.75)
+        card.shadow.inherit = False
+        badge = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(lx + 0.12), Inches(y + h / 2 - 0.115), Inches(0.23), Inches(0.23))
+        badge.fill.solid(); badge.fill.fore_color.rgb = _rgb(accent)
+        badge.line.fill.background(); badge.shadow.inherit = False
+        num = _add_text(slide, str(i + 1), lx + 0.035, y + h / 2 - 0.115, 0.40, 0.23, size=9 if i < 9 else 7.5,
+                        color=WHITE, bold=True, align=PP_ALIGN.CENTER, valign=MSO_ANCHOR.MIDDLE)
+        num.text_frame.margin_left = num.text_frame.margin_right = 0
+        chip_w = 0.74
+        chip = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(lx + lw - chip_w - 0.12), Inches(y + h / 2 - 0.13), Inches(chip_w), Inches(0.26))
+        chip.adjustments[0] = 0.5; chip.fill.solid(); chip.fill.fore_color.rgb = _rgb(soft)
+        chip.line.fill.background(); chip.shadow.inherit = False
+        sign = "+" if e["score"] > 0 else "−"
+        _add_text(slide, f"{sign}{abs(e['score']):.2f}", lx + lw - chip_w - 0.12, y + h / 2 - 0.13, chip_w, 0.26,
+                  size=9.5, color=accent, bold=True, align=PP_ALIGN.CENTER, valign=MSO_ANCHOR.MIDDLE)
+        shown_author = _pseudo_label(e["author_idx"] or (i + 1), lang) if anonymize else str(e["author"])
+        meta = " · ".join(x for x in (_upper_label(shown_author), e["date"]) if x)
+        _add_text(slide, meta, lx + 0.46, y + 0.045, lw - 1.42, 0.16, size=6.8, color=NEUTRAL, bold=True, font=LABEL_FONT)
+        _add_text(slide, e["text"], lx + 0.46, y + 0.205, lw - 1.42, max(0.18, h - 0.245),
+                  size=base_font, color=INK)
+        y += h + gap
+
+    # --- Analyst commentary card ---
+    nx, nw_ = 8.88, 3.85
+    _dash_card(slide, nx, 1.42, nw_, 4.30)
+    _add_text(slide, ("Η ΜΑΤΙΑ ΤΟΥ ΑΝΑΛΥΤΗ" if el else "THE ANALYST'S VIEW"),
+              nx + 0.28, 1.62, nw_ - 0.56, 0.24, size=9.5, color=MUTED, bold=True, font=LABEL_FONT)
+    paras = (commentary or [])[:3]
+    block = (4.30 - 0.72) / max(1, len(paras) or 1)
+    py = 1.98
+    for item in paras:
+        lead = item.get("lead") or ""
+        _add_rich(slide, [(lead + " ", True), (item.get("body") or "", False)],
+                  nx + 0.28, py, nw_ - 0.56, block, size=9.3)
+        py += block
+    _add_text(slide, ("Γράφεται αυτόματα από την AI ανάλυση του run" if el else "Written automatically by the run's AI analysis"),
+              nx + 0.28, 5.42, nw_ - 0.56, 0.2, size=7, color=NEUTRAL)
+
+    # --- Range chips ---
+    vals = [e["score"] for e in entries] or [0.0]
+    ky, kh_ = 5.90, 0.96
+    kw_ = (nw_ - 0.12) / 2
+    sgn = lambda v: ("+" if v > 0 else "−") + f"{abs(v):.2f}"
+    chips = [(sgn(sum(vals) / len(vals)), ("Μ.Ο. Top " if el else "Avg Top ") + str(len(vals))),
+             (f"{sgn(vals[-1])} → {sgn(vals[0])}", "Εύρος τιμών" if el else "Value range")]
+    for i, (value, label) in enumerate(chips):
+        x = nx + i * (kw_ + 0.12)
+        _dash_card(slide, x, ky, kw_, kh_)
+        _add_text(slide, value, x, ky + 0.12, kw_, 0.34, size=10.5 if len(value) > 8 else 14, bold=True,
+                  color=accent, align=PP_ALIGN.CENTER)
+        _add_text(slide, label, x, ky + 0.52, kw_, 0.3, size=8, color=MUTED, align=PP_ALIGN.CENTER)
+
+
 def generate_pptx(presentation_plan: dict, visual_pack: dict, output_path: Path, logo_path: Path) -> dict:
     prs = Presentation(); prs.slide_width = Inches(13.333333); prs.slide_height = Inches(7.5)
     blank = prs.slide_layouts[6]
     charts = _chart_map(visual_pack); lang = presentation_plan.get("language") or "en"; ctx = presentation_plan.get("research_context") or {}
+    # Client-deck display policy (platform hiding; pseudonyms in political runs).
+    presentation_plan, charts = _scrubbed_plan_for_display(presentation_plan, charts)
     render_audit=[]
     for idx, spec in enumerate(presentation_plan.get("slides") or [], start=1):
         slide=prs.slides.add_slide(blank); _set_bg(slide)
@@ -2114,6 +2481,13 @@ def generate_pptx(presentation_plan: dict, visual_pack: dict, output_path: Path,
                 tl = presentation_plan.get("reputation_timeline")
                 if isinstance(tl, dict) and tl.get("points"):
                     _render_reputation_timeline(slide, tl, lang, ctx)
+            elif typ in ("top_comments_positive", "top_comments_negative"):
+                tc = presentation_plan.get("top_comments") or {}
+                polarity = "positive" if typ.endswith("positive") else "negative"
+                entries = tc.get(polarity) or []
+                if entries:
+                    _render_top_comments(slide, entries, (tc.get("commentary") or {}).get(polarity) or [],
+                                         polarity, lang, ctx, presentation_plan.get("display_policy") or {})
             elif typ == "evidence_split":
                 pos=[c for c in claims if str((c.get("source_values") or {}).get("sentiment"))=="positive"]
                 neg=[c for c in claims if str((c.get("source_values") or {}).get("sentiment"))=="negative"]
@@ -2424,6 +2798,35 @@ def build_exports(folder: Path, plan: dict, *, force: bool=False, cancel_check: 
         slides_list=pplan.get("slides") or []
         idx=next((i for i,sp in enumerate(slides_list) if sp.get("slide_id")=="executive_summary"),None)
         slides_list.insert((idx+1) if idx is not None else 1,spec)
+    # Slides 4-5: Top 10 comments by raw sentiment score + analyst commentary.
+    top=_top_comments_data(folder,plan,pplan.get("language") or "en")
+    lang_now=pplan.get("language") or "en"
+    if top:
+        top["commentary"]=_analyst_commentary(top,plan,lang_now)
+        pplan["top_comments"]=top
+        slides_list=pplan.get("slides") or []
+        anchor_idx=next((i for i,sp in enumerate(slides_list) if sp.get("slide_id")=="reputation_timeline"),None)
+        if anchor_idx is None:
+            anchor_idx=next((i for i,sp in enumerate(slides_list) if sp.get("slide_id")=="executive_summary"),0)
+        insert_at=anchor_idx+1
+        for pol,count in (("positive",len(top.get("positive") or [])),("negative",len(top.get("negative") or []))):
+            if not count:
+                continue
+            adjective=("Θετικά" if pol=="positive" else "Αρνητικά") if lang_now=="el" else ("Positive" if pol=="positive" else "Negative")
+            noun="Σχόλια" if lang_now=="el" else "Comments"
+            slides_list.insert(insert_at,{"slide_id":f"top_comments_{pol}","slide_type":f"top_comments_{pol}",
+                "title":f"Top {count} {adjective} {noun}","chart_ids":[],"claims":[],
+                "section":"opening","priority":97,"required":False,"notes":{}})
+            insert_at+=1
+    # Display policy for the client deck (internal docx keeps real details).
+    policy_names=sorted(((top or {}).get("name_index") or {}).items(),key=lambda kv:-len(kv[0]))
+    pplan["display_policy"]={
+        "anonymize":str(plan.get("research_type") or "market")=="political",
+        "lang":pplan.get("language") or "en",
+        "platforms":sorted(set(((top or {}).get("platforms") or []))|set(_KNOWN_PLATFORMS),key=len,reverse=True),
+        "name_index":dict(((top or {}).get("name_index") or {})),
+        "names_by_len":[(k,v) for k,v in policy_names if len(k)>=3],
+    }
     base=folder/"exports"; base.mkdir(parents=True,exist_ok=True)
     lang=pplan["language"]; ctx=pplan["research_context"]
     stem=re.sub(r"[^A-Za-z0-9Α-Ωα-ω_-]+","_",f"{ctx.get('client','')}_{ctx.get('topic','')}_{ctx.get('date_from','')}_{ctx.get('date_to','')}").strip("_")[:140] or "SIGNALYTH_Report"
