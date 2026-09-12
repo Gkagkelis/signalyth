@@ -33,7 +33,7 @@ from app.services.storage import RunStore
 from app.services.visualizations import load_presentation_visual_pack, load_visualization_summary
 from app.services.report_synthesis import build_report_synthesis, final_consistency_qa
 
-PRESENTATION_RULESET_VERSION = "1.4.0"
+PRESENTATION_RULESET_VERSION = "1.5.0"
 PRESENTATION_METHODOLOGY_VERSION = "signalyth-presentation-intelligence-v1.4"
 PRESENTATION_CONTRACT_VERSION = "signalyth-presentation-pack-v1.4"
 
@@ -477,7 +477,7 @@ def build_presentation_plan(visual_pack: dict, evidence_pack: dict, plan: dict |
         finding = _txt(top.get("finding"), lang)
         if finding:
             exec_claims.append(_claim("exec-investigation", finding, _resolve_investigation_indicator_ids(top), evidence_refs=top.get("evidence_record_ids") or [], claim_type=str(top.get("conclusion_type") or "investigation"), confidence=(top.get("confidence") or {}).get("score"), causal_status=str(top.get("causal_status") or "not_proven"), source_values=(top.get("metrics") or {})))
-    slides.append(_slide("executive_summary", "executive_summary", "Executive summary" if lang == "en" else "Σύνοψη", chart_ids=[x for x in ["brand_reputation", "evidence_confidence"] if x in charts], claims=exec_claims, priority=100, required=True, section="opening"))
+    slides.append(_slide("executive_summary", "executive_summary", "Executive Dashboard", chart_ids=[x for x in ["brand_reputation", "evidence_confidence"] if x in charts], claims=exec_claims, priority=100, required=True, section="opening"))
 
     # Gold-standard scope: period/sample/audience context must be explicit, not hidden in notes.
     scope_charts = [x for x in ["sample_overview", "origin_breakdown", "market_relevance", "impact_coverage"] if x in charts]
@@ -1420,6 +1420,315 @@ def _render_cover(slide, spec: dict, ctx: dict, lang: str, logo_path: Path, plan
             pass
 
 
+# ---------- Executive dashboard (slide 2) ----------
+# Locked design "Version B (light)": gauge + sentiment bars + source donut +
+# five KPI cards, every value computed from the run's own data. Rendered with
+# pure python-pptx shapes so it works on any deployment without new libraries.
+
+DASH_CARD_BG = "FAFAFA"
+DASH_TRACK = "ECEFF1"
+DASH_CHIP_NEG_BG = "FBE9EA"
+DASH_CHIP_NEG_TX = "B3262E"
+DASH_CHIP_POS_BG = "E8F3EC"
+DASH_CHIP_POS_TX = "1E7F4F"
+
+_EL_MONTHS_GEN = ["Ιανουαρίου", "Φεβρουαρίου", "Μαρτίου", "Απριλίου", "Μαΐου", "Ιουνίου",
+                  "Ιουλίου", "Αυγούστου", "Σεπτεμβρίου", "Οκτωβρίου", "Νοεμβρίου", "Δεκεμβρίου"]
+_EN_MONTHS = ["January", "February", "March", "April", "May", "June",
+              "July", "August", "September", "October", "November", "December"]
+
+
+def _upper_label(text: str) -> str:
+    """Uppercase for small-caps labels; Greek uppercase never keeps the tonos."""
+    plain = str(text or "").translate(str.maketrans("άέήίόύώΐΰϊϋ", "αεηιουωιυιυ"))
+    return plain.upper()
+
+
+def _period_label(date_from, date_to, lang: str) -> str:
+    """Human date range: «2 – 10 Σεπτεμβρίου 2026» instead of ISO."""
+    try:
+        d0 = datetime.strptime(str(date_from)[:10], "%Y-%m-%d")
+        d1 = datetime.strptime(str(date_to)[:10], "%Y-%m-%d")
+    except (TypeError, ValueError):
+        return f"{date_from or ''} — {date_to or ''}".strip(" —")
+    months = _EL_MONTHS_GEN if lang == "el" else _EN_MONTHS
+    if (d0.year, d0.month) == (d1.year, d1.month):
+        return f"{d0.day} – {d1.day} {months[d1.month - 1]} {d1.year}"
+    if d0.year == d1.year:
+        return f"{d0.day} {months[d0.month - 1]} – {d1.day} {months[d1.month - 1]} {d1.year}"
+    return f"{d0.day} {months[d0.month - 1]} {d0.year} – {d1.day} {months[d1.month - 1]} {d1.year}"
+
+
+def _compact_number(value) -> str:
+    n = _safe_float(value, 0.0)
+    for limit, suffix in ((1e9, "B"), (1e6, "M"), (1e3, "K")):
+        if abs(n) >= limit:
+            txt = f"{n / limit:.1f}".rstrip("0").rstrip(".")
+            return f"{txt}{suffix}"
+    return f"{int(round(n))}"
+
+
+def _ring_segment(slide, cx, cy, r_out, r_in, a0, a1, color, *, steps=None):
+    """Filled ring segment (thick arc) as a freeform. Angles in degrees,
+    0 = 12 o'clock, clockwise. Coordinates in inches."""
+    span = float(a1) - float(a0)
+    if span <= 0.1:
+        return None
+    steps = steps or max(10, int(span / 5))
+
+    def pt(r, ang):
+        rad = math.radians(ang)
+        return (cx + r * math.sin(rad), cy - r * math.cos(rad))
+
+    pts = [pt(r_out, a0 + span * i / steps) for i in range(steps + 1)]
+    pts += [pt(r_in, a1 - span * i / steps) for i in range(steps + 1)]
+    # FreeformBuilder rounds local coordinates to integers before scaling, so
+    # inches are passed as integer 1/100000-inch units with a matching scale.
+    unit = 100000
+    ipts = [(int(round(x * unit)), int(round(y * unit))) for x, y in pts]
+    try:
+        fb = slide.shapes.build_freeform(ipts[0][0], ipts[0][1], scale=914400.0 / unit)
+        fb.add_line_segments(ipts[1:], close=True)
+        shp = fb.convert_to_shape()
+        shp.fill.solid(); shp.fill.fore_color.rgb = _rgb(color)
+        shp.line.fill.background(); shp.shadow.inherit = False
+        return shp
+    except Exception:
+        return None
+
+
+def _dash_dot(slide, x, y, d, color):
+    dot = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(x), Inches(y), Inches(d), Inches(d))
+    dot.fill.solid(); dot.fill.fore_color.rgb = _rgb(color)
+    dot.line.fill.background(); dot.shadow.inherit = False
+    return dot
+
+
+def _dash_card(slide, x, y, w, h):
+    shape = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(x), Inches(y), Inches(w), Inches(h))
+    shape.adjustments[0] = 0.055
+    shape.fill.solid(); shape.fill.fore_color.rgb = _rgb(DASH_CARD_BG)
+    shape.line.color.rgb = _rgb(STONE_DARK)
+    shape.shadow.inherit = False
+    return shape
+
+
+def _reach_totals(folder: Path) -> tuple[int | None, int | None]:
+    """(followers_total, views_total) from the run's own records.
+    Views: plain sum over analysis-ready records. Followers: summed once per
+    unique author (max seen), so repeated posts never double-count reach."""
+    records = None
+    for rel in (("intelligence", "records.json"), ("analysis", "analysis-ready.json")):
+        try:
+            data = RunStore.read(folder / rel[0] / rel[1], None)
+        except Exception:
+            data = None
+        if isinstance(data, list) and data:
+            records = data
+            break
+    if not records:
+        return None, None
+    views_total = 0
+    followers_by_author: dict[str, int] = {}
+    for r in records:
+        if not isinstance(r, dict):
+            continue
+        views_total += _safe_int(r.get("views"))
+        author = str(r.get("author") or "").strip().casefold()
+        key = f"{r.get('platform') or ''}::{author}" if author else f"::{id(r)}"
+        followers_by_author[key] = max(followers_by_author.get(key, 0), _safe_int(r.get("followers")))
+    return sum(followers_by_author.values()), views_total
+
+
+def _executive_dashboard_data(folder: Path, visual_pack: dict) -> dict | None:
+    """Everything slide 2 shows, computed from this run's charts and records.
+    Returns None when the essentials are missing so the caller can fall back
+    to the legacy executive-summary layout instead of shipping a broken slide."""
+    try:
+        charts = _chart_map(visual_pack)
+        rep = (charts.get("brand_reputation") or {}).get("data") or {}
+        if rep.get("value") is None:
+            return None
+        dash: dict = {"score": round(_safe_float(rep.get("value")), 1)}
+
+        conf = (charts.get("evidence_confidence") or {}).get("data") or {}
+        dash["evidence_score"] = None if conf.get("value") is None else round(_safe_float(conf.get("value")))
+
+        cats = ((charts.get("sentiment_distribution") or {}).get("data") or {}).get("categories") or []
+        sentiment = [{"key": _cat_key(c.get("label")), "value": round(_safe_float(c.get("value")), 1)} for c in cats]
+        sentiment = [s for s in sentiment if s["key"] in SENTIMENT_COLORS]
+        sentiment.sort(key=lambda s: -s["value"])
+        dash["sentiment"] = sentiment
+
+        # Source composition donut: people, media and unknown only (locked scope);
+        # owned/organisation activity stays out of this chart by design.
+        rows = ((charts.get("origin_breakdown") or {}).get("data") or {}).get("rows") or []
+        wanted = {"person", "media", "unknown"}
+        comp = {_cat_key(r.get("name")): _safe_int(r.get("records")) for r in rows if _cat_key(r.get("name")) in wanted}
+        total = sum(comp.values())
+        dash["composition"] = [
+            {"key": k, "share": round(100.0 * comp.get(k, 0) / total, 1) if total else 0.0}
+            for k in ("person", "media", "unknown")
+        ] if total else []
+
+        items = ((charts.get("sample_overview") or {}).get("data") or {}).get("items") or []
+        by_key = {str(i.get("key")): i.get("value") for i in items}
+        dash["records_ready"] = _safe_int(by_key.get("analysis_ready")) or None
+        dash["voices"] = None if by_key.get("effective_voices") is None else int(round(_safe_float(by_key.get("effective_voices"))))
+
+        trend_rows = ((charts.get("time_trends") or {}).get("data") or {}).get("rows") or []
+        series = [_safe_float(r.get("brand_reputation_index"), None) for r in trend_rows
+                  if isinstance(r, dict) and r.get("brand_reputation_index") is not None]
+        dash["delta"] = round(series[-1] - series[0], 1) if len(series) >= 2 else None
+
+        followers, views = _reach_totals(folder)
+        dash["followers_total"] = followers
+        dash["views_total"] = views
+        return dash
+    except Exception:
+        return None
+
+
+def _render_executive_dashboard(slide, dash: dict, lang: str, ctx: dict) -> None:
+    el = lang == "el"
+
+    # Client + period, top right, mirroring the cover's identity block.
+    client = _clean_text(ctx.get("client") or "", 60)
+    topic = _clean_text(ctx.get("topic") or "", 60)
+    who = " · ".join(x for x in (client, topic) if x)
+    period = _period_label(ctx.get("date_from"), ctx.get("date_to"), lang)
+    market = _clean_text(ctx.get("market") or "", 40)
+    when = " · ".join(x for x in (period, market) if x)
+    if who:
+        _add_text(slide, who, 8.35, 0.36, 4.38, 0.28, size=12, color=INK, bold=True, align=PP_ALIGN.RIGHT)
+    if when:
+        _add_text(slide, when, 8.35, 0.66, 4.38, 0.24, size=9.5, color=MUTED, align=PP_ALIGN.RIGHT)
+
+    row_y, row_h = 1.42, 3.22
+
+    # --- Card A: Brand Reputation gauge ---
+    ax, aw = 0.58, 4.12
+    _dash_card(slide, ax, row_y, aw, row_h)
+    _add_text(slide, "BRAND REPUTATION", ax + 0.28, row_y + 0.18, aw - 0.56, 0.24, size=9.5, color=MUTED, bold=True, font=LABEL_FONT)
+    cx, cy = ax + aw / 2, row_y + 1.52
+    r_out, r_in = 1.00, 0.79
+    r_mid, cap = (r_out + r_in) / 2, r_out - r_in
+    score = max(0.0, min(100.0, _safe_float(dash.get("score"))))
+    a0, span = -135.0, 270.0
+    a_val = a0 + span * score / 100.0
+    _ring_segment(slide, cx, cy, r_out, r_in, a0, a0 + span, DASH_TRACK)
+    for ang in (a0, a0 + span):
+        _dash_dot(slide, cx + r_mid * math.sin(math.radians(ang)) - cap / 2,
+                  cy - r_mid * math.cos(math.radians(ang)) - cap / 2, cap, DASH_TRACK)
+    _ring_segment(slide, cx, cy, r_out, r_in, a0, a_val, AEGEAN)
+    _dash_dot(slide, cx + r_mid * math.sin(math.radians(a0)) - cap / 2,
+              cy - r_mid * math.cos(math.radians(a0)) - cap / 2, cap, AEGEAN)
+    knob_d = cap + 0.10
+    knob = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(cx + r_mid * math.sin(math.radians(a_val)) - knob_d / 2),
+                                  Inches(cy - r_mid * math.cos(math.radians(a_val)) - knob_d / 2), Inches(knob_d), Inches(knob_d))
+    knob.fill.solid(); knob.fill.fore_color.rgb = _rgb(DASH_CARD_BG)
+    knob.line.color.rgb = _rgb(AEGEAN); knob.line.width = Pt(2.4); knob.shadow.inherit = False
+    _add_text(slide, f"{score:.1f}", cx - 1.0, cy - 0.44, 2.0, 0.56, size=33, color=INK, bold=True, align=PP_ALIGN.CENTER)
+    _add_text(slide, "/ 100", cx - 1.0, cy + 0.14, 2.0, 0.24, size=10.5, color=MUTED, align=PP_ALIGN.CENTER)
+
+    delta = dash.get("delta")
+    chip_y = row_y + 2.66
+    if delta is not None and abs(_safe_float(delta)) >= 0.05:
+        d = _safe_float(delta)
+        up = d > 0
+        chip_bg, chip_tx, arrow = (DASH_CHIP_POS_BG, DASH_CHIP_POS_TX, "▲") if up else (DASH_CHIP_NEG_BG, DASH_CHIP_NEG_TX, "▼")
+        label = (f"{arrow}  {abs(d):.1f} pts in period" if not el else f"{arrow}  {abs(d):.1f} μον. στην περίοδο")
+        cw = 2.0
+        chip = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(cx - cw / 2), Inches(chip_y), Inches(cw), Inches(0.32))
+        chip.adjustments[0] = 0.5; chip.fill.solid(); chip.fill.fore_color.rgb = _rgb(chip_bg)
+        chip.line.fill.background(); chip.shadow.inherit = False
+        _add_text(slide, label, cx - cw / 2, chip_y, cw, 0.32, size=9, color=chip_tx, bold=True, align=PP_ALIGN.CENTER, valign=MSO_ANCHOR.MIDDLE)
+    # §9 scope subtitle stays with the score wherever it appears.
+    _add_text(slide, "Digital conversation signal — not a public-opinion poll" if not el
+              else "Δείκτης ψηφιακής συζήτησης — όχι μέτρηση κοινής γνώμης",
+              ax + 0.2, row_y + 3.0 - 0.06, aw - 0.4, 0.22, size=8, color=NEUTRAL, align=PP_ALIGN.CENTER)
+
+    # --- Card B: weighted sentiment bars ---
+    bx, bw = 4.90, 4.12
+    _dash_card(slide, bx, row_y, bw, row_h)
+    _add_text(slide, "WEIGHTED SENTIMENT" if not el else "ΣΤΑΘΜΙΣΜΕΝΟ SENTIMENT",
+              bx + 0.28, row_y + 0.18, bw - 0.56, 0.24, size=9.5, color=MUTED, bold=True, font=LABEL_FONT)
+    inner_x, inner_w = bx + 0.30, bw - 0.60
+    bar_h, y0 = 0.20, row_y + 0.58
+    rows_s = (dash.get("sentiment") or [])[:4]
+    step = 0.60 if len(rows_s) >= 4 else 0.72
+    for i, s in enumerate(rows_s):
+        yy = y0 + i * step
+        color = SENTIMENT_COLORS.get(s["key"], NEUTRAL)
+        _add_text(slide, _cat_label(s["key"], lang), inner_x, yy, 1.7, 0.22, size=10, color=INK)
+        _add_text(slide, f"{s['value']:.1f}%", inner_x + inner_w - 0.95, yy, 0.95, 0.22, size=10.5, color=color, bold=True, align=PP_ALIGN.RIGHT)
+        ty = yy + 0.26
+        track = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(inner_x), Inches(ty), Inches(inner_w), Inches(bar_h))
+        track.adjustments[0] = 0.5; track.fill.solid(); track.fill.fore_color.rgb = _rgb(DASH_TRACK)
+        track.line.fill.background(); track.shadow.inherit = False
+        vw = max(inner_w * max(0.0, min(100.0, _safe_float(s["value"]))) / 100.0, bar_h)
+        bar = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(inner_x), Inches(ty), Inches(vw), Inches(bar_h))
+        bar.adjustments[0] = 0.5; bar.fill.solid(); bar.fill.fore_color.rgb = _rgb(color)
+        bar.line.fill.background(); bar.shadow.inherit = False
+
+    # --- Card C: source composition donut ---
+    dx, dw = 9.22, 3.51
+    _dash_card(slide, dx, row_y, dw, row_h)
+    _add_text(slide, "SOURCE MIX" if not el else "ΣΥΝΘΕΣΗ ΠΗΓΩΝ",
+              dx + 0.28, row_y + 0.18, dw - 0.56, 0.24, size=9.5, color=MUTED, bold=True, font=LABEL_FONT)
+    comp = dash.get("composition") or []
+    comp_colors = {"person": AEGEAN, "media": MIXED, "unknown": NEUTRAL}
+    ccx, ccy = dx + dw / 2, row_y + 1.28
+    ro, ri = 0.74, 0.47
+    if comp:
+        ang = 0.0
+        for c in comp:
+            sweep = 360.0 * max(0.0, _safe_float(c["share"])) / 100.0
+            _ring_segment(slide, ccx, ccy, ro, ri, ang, min(ang + sweep, 359.9), comp_colors.get(c["key"], NEUTRAL))
+            ang += sweep
+        top = max(comp, key=lambda c: c["share"])
+        top_txt = f"{top['share']:.1f}".rstrip("0").rstrip(".") + "%"
+        _add_text(slide, top_txt, ccx - 0.55, ccy - 0.24, 1.1, 0.32, size=15, color=INK, bold=True, align=PP_ALIGN.CENTER)
+        _add_text(slide, _cat_label(top["key"], lang), ccx - 0.6, ccy + 0.07, 1.2, 0.2, size=7.5, color=MUTED, align=PP_ALIGN.CENTER)
+        for i, c in enumerate(comp):
+            ly = row_y + 2.28 + i * 0.25
+            _dash_dot(slide, dx + 0.34, ly + 0.05, 0.11, comp_colors.get(c["key"], NEUTRAL))
+            _add_text(slide, _cat_label(c["key"], lang), dx + 0.54, ly, 1.7, 0.22, size=9, color=INK)
+            _add_text(slide, f"{c['share']:.1f}%", dx + dw - 1.28, ly, 1.0, 0.22, size=9, color=MUTED, bold=True, align=PP_ALIGN.RIGHT)
+
+    # --- KPI row: five cards, everything from this run ---
+    k_y, k_h, gap = 4.86, 1.38, 0.18
+    k_w = (12.15 - 4 * gap) / 5
+    ev_score = dash.get("evidence_score")
+    ev_label = None
+    if ev_score is not None:
+        ev_label = ("High" if ev_score >= 70 else "Medium" if ev_score >= 40 else "Low") if not el else \
+                   ("Υψηλή" if ev_score >= 70 else "Μέτρια" if ev_score >= 40 else "Χαμηλή")
+    followers = dash.get("followers_total")
+    views = dash.get("views_total")
+    kpis = [
+        ("—" if not dash.get("records_ready") else f"{dash['records_ready']:,}".replace(",", "."),
+         "Analysis-ready records" if not el else "Αναφορές έτοιμες για ανάλυση", None),
+        ("—" if dash.get("voices") is None else f"{dash['voices']:,}".replace(",", "."),
+         "Independent voices" if not el else "Ανεξάρτητες φωνές", None),
+        ("—" if ev_score is None else f"{ev_score:.0f}/100",
+         "Evidence confidence" if not el else "Βεβαιότητα evidence", ev_label),
+        ("—" if followers is None else _compact_number(followers),
+         "Source followers (unique)" if not el else "Followers πηγών (μοναδικοί)", None),
+        ("—" if views is None else _compact_number(views),
+         "Total views" if not el else "Συνολικά views", None),
+    ]
+    for i, (value, label, sub) in enumerate(kpis):
+        x = 0.58 + i * (k_w + gap)
+        _dash_card(slide, x, k_y, k_w, k_h)
+        accent = AEGEAN if i == 2 else INK
+        _add_text(slide, value, x + 0.06, k_y + 0.16, k_w - 0.12, 0.5, size=22 if len(value) <= 7 else 18,
+                  color=accent, bold=True, align=PP_ALIGN.CENTER)
+        if sub:
+            _add_text(slide, _upper_label(sub), x + 0.06, k_y + 0.64, k_w - 0.12, 0.2, size=8, color=POS, bold=True, align=PP_ALIGN.CENTER, font=LABEL_FONT)
+        _add_text(slide, label, x + 0.12, k_y + (0.86 if sub else 0.74), k_w - 0.24, 0.46, size=8.5, color=MUTED, align=PP_ALIGN.CENTER)
+
+
 def generate_pptx(presentation_plan: dict, visual_pack: dict, output_path: Path, logo_path: Path) -> dict:
     prs = Presentation(); prs.slide_width = Inches(13.333333); prs.slide_height = Inches(7.5)
     blank = prs.slide_layouts[6]
@@ -1439,12 +1748,20 @@ def generate_pptx(presentation_plan: dict, visual_pack: dict, output_path: Path,
             claims=spec.get("claims") or []
             chart_modes=[]
             if typ == "executive_summary":
-                if len(cids) >= 1:
-                    chart_modes.append((cids[0],_render_chart_spec(slide,charts[cids[0]],1.12,1.55,5.35,2.15,lang)))
-                if len(cids) >= 2:
-                    chart_modes.append((cids[1],_render_chart_spec(slide,charts[cids[1]],6.82,1.55,5.35,2.15,lang)))
-                for i,cl in enumerate(claims[:3]):
-                    _add_claim_card(slide,cl.get("text"),1.12+i*3.72,4.15,3.47,1.62,font_size=10.5)
+                dash = presentation_plan.get("executive_dashboard")
+                if isinstance(dash, dict) and dash.get("score") is not None:
+                    # Locked "Version B" executive dashboard; claims stay in the
+                    # ledger/docx — here the visuals carry the same findings.
+                    _render_executive_dashboard(slide, dash, lang, ctx)
+                    chart_modes.extend((cid, "editable_shapes") for cid in cids)
+                else:
+                    # Legacy layout: keeps old runs and thin datasets rendering.
+                    if len(cids) >= 1:
+                        chart_modes.append((cids[0],_render_chart_spec(slide,charts[cids[0]],1.12,1.55,5.35,2.15,lang)))
+                    if len(cids) >= 2:
+                        chart_modes.append((cids[1],_render_chart_spec(slide,charts[cids[1]],6.82,1.55,5.35,2.15,lang)))
+                    for i,cl in enumerate(claims[:3]):
+                        _add_claim_card(slide,cl.get("text"),1.12+i*3.72,4.15,3.47,1.62,font_size=10.5)
             elif typ == "evidence_split":
                 pos=[c for c in claims if str((c.get("source_values") or {}).get("sentiment"))=="positive"]
                 neg=[c for c in claims if str((c.get("source_values") or {}).get("sentiment"))=="negative"]
@@ -1735,7 +2052,7 @@ def build_exports(folder: Path, plan: dict, *, force: bool=False, cancel_check: 
     if visual_summary.get("stale"): raise RuntimeError("Step 7 is stale; rebuild Charts & Dashboard before exports.")
     visual_pack=load_presentation_visual_pack(folder); evidence_pack=load_evidence_pack(folder)
     _validate_inputs(visual_pack,evidence_pack,plan)
-    input_hash=_hash_payload({"visual_pack":visual_pack,"evidence_contract":evidence_pack.get("contract_version"),"research_context":evidence_pack.get("research_context"),"report_language":plan.get("report_language"),"search_strategy":plan.get("search_strategy"),"keyword_roles":plan.get("keyword_roles"),"benchmark":plan.get("benchmark"),"master_spec_version":plan.get("master_spec_version")})
+    input_hash=_hash_payload({"visual_pack":visual_pack,"evidence_contract":evidence_pack.get("contract_version"),"research_context":evidence_pack.get("research_context"),"report_language":plan.get("report_language"),"search_strategy":plan.get("search_strategy"),"keyword_roles":plan.get("keyword_roles"),"benchmark":plan.get("benchmark"),"master_spec_version":plan.get("master_spec_version"),"presentation_ruleset":PRESENTATION_RULESET_VERSION})
     old=RunStore.read(folder/"exports"/"summary.json")
     if old and not force and old.get("input_hash")==input_hash and not old.get("stale"):
         return old
@@ -1743,6 +2060,8 @@ def build_exports(folder: Path, plan: dict, *, force: bool=False, cancel_check: 
     synthesis=build_report_synthesis(folder,plan,visual_pack,evidence_pack)
     visual_pack=copy.deepcopy(visual_pack); visual_pack["analyst_synthesis"]=synthesis
     pplan=build_presentation_plan(visual_pack,evidence_pack,plan,cancel_check=cancel_check)
+    # Slide 2 executive dashboard: computed per run; None falls back to legacy.
+    pplan["executive_dashboard"]=_executive_dashboard_data(folder,visual_pack)
     base=folder/"exports"; base.mkdir(parents=True,exist_ok=True)
     lang=pplan["language"]; ctx=pplan["research_context"]
     stem=re.sub(r"[^A-Za-z0-9Α-Ωα-ω_-]+","_",f"{ctx.get('client','')}_{ctx.get('topic','')}_{ctx.get('date_from','')}_{ctx.get('date_to','')}").strip("_")[:140] or "SIGNALYTH_Report"
@@ -1844,7 +2163,7 @@ def load_export_summary(folder: Path) -> dict | None:
     if not isinstance(current,dict) or not isinstance(evidence,dict):
         return {**summary,"stale":True}
     try:
-        now_hash=_hash_payload({"visual_pack":current,"evidence_contract":evidence.get("contract_version"),"research_context":evidence.get("research_context"),"report_language":plan.get("report_language"),"search_strategy":plan.get("search_strategy"),"keyword_roles":plan.get("keyword_roles"),"benchmark":plan.get("benchmark"),"master_spec_version":plan.get("master_spec_version")})
+        now_hash=_hash_payload({"visual_pack":current,"evidence_contract":evidence.get("contract_version"),"research_context":evidence.get("research_context"),"report_language":plan.get("report_language"),"search_strategy":plan.get("search_strategy"),"keyword_roles":plan.get("keyword_roles"),"benchmark":plan.get("benchmark"),"master_spec_version":plan.get("master_spec_version"),"presentation_ruleset":PRESENTATION_RULESET_VERSION})
     except Exception:
         return {**summary,"stale":True}
     return {**summary,"stale":summary.get("input_hash")!=now_hash}
