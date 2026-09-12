@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 import copy
+import tempfile
 import csv
 import hashlib
 import json
@@ -1266,22 +1268,75 @@ def _flatten_greek(value: str) -> str:
     return str(value or "").lower().translate(_GREEK_LATIN)
 
 
+def _asset_dirs(logo_path: Path | None) -> list[Path]:
+    """Where brand assets may live, most specific first.
+
+    ``presentation_assets/`` is the intended home; the repository root is kept as a
+    fallback because that is where logo.png already lives.
+    """
+    roots: list[Path] = []
+    if logo_path:
+        roots.append(logo_path.parent / "presentation_assets")
+        roots.append(logo_path.parent)
+    here = Path(__file__).resolve().parents[2]
+    roots.append(here / "presentation_assets")
+    roots.append(here)
+    seen, out = set(), []
+    for r in roots:
+        key = str(r)
+        if key not in seen and r.is_dir():
+            seen.add(key)
+            out.append(r)
+    return out
+
+
 def _cover_background(logo_path: Path) -> Path | None:
     """Full-bleed studio artwork for the cover, if the brand asset is present."""
-    base = logo_path.parent if logo_path else Path("assets")
-    for name in ("cover.png", "cover.jpg", "cover-16x9.png", "report-cover.png"):
-        candidate = base / name
-        if candidate.exists():
-            return candidate
+    for base in _asset_dirs(logo_path):
+        for name in ("cover.png", "cover.jpg", "cover-16x9.png", "report-cover.png"):
+            candidate = base / name
+            if candidate.exists():
+                return candidate
     return None
+
+
+def _client_logo_from_plan(plan: dict) -> Path | None:
+    """Client logo saved in the app's Client Profile, carried inside the plan.
+
+    The profile screen stores the image as a data URL, so the report can be branded
+    without anyone touching the repository.
+    """
+    raw = str((plan or {}).get("client_logo") or "")
+    if not raw.startswith("data:image"):
+        return None
+    try:
+        header, _, payload = raw.partition(",")
+        if not payload:
+            return None
+        ext = "png"
+        if "jpeg" in header or "jpg" in header:
+            ext = "jpg"
+        elif "webp" in header:
+            ext = "webp"
+        elif "svg" in header:
+            return None  # python-pptx cannot place SVG
+        data = base64.b64decode(payload, validate=False)
+        if not data or len(data) > 4_000_000:
+            return None
+        tmp = Path(tempfile.gettempdir()) / f"signalyth-client-logo.{ext}"
+        tmp.write_bytes(data)
+        return tmp
+    except Exception:
+        return None
 
 
 def _client_logo(logo_path: Path, client: str) -> Path | None:
     """Per-client logo, looked up by a filesystem-safe form of the client name."""
     if not client:
         return None
-    base = (logo_path.parent if logo_path else Path("assets")) / "clients"
-    if not base.is_dir():
+    bases = [d / "clients" for d in _asset_dirs(logo_path)]
+    bases = [b for b in bases if b.is_dir()]
+    if not bases:
         return None
 
     def _slugs(value: str) -> set[str]:
@@ -1298,7 +1353,8 @@ def _client_logo(logo_path: Path, client: str) -> Path | None:
         return out
 
     wanted = _slugs(client)
-    files = [f for f in base.iterdir() if f.is_file() and f.suffix.lower() in {".png", ".jpg", ".jpeg"}]
+    files = [f for b in bases for f in b.iterdir()
+             if f.is_file() and f.suffix.lower() in {".png", ".jpg", ".jpeg"}]
     for candidate in files:
         if _slugs(candidate.stem) & wanted:
             return candidate
@@ -1310,7 +1366,7 @@ def _client_logo(logo_path: Path, client: str) -> Path | None:
     return None
 
 
-def _render_cover(slide, spec: dict, ctx: dict, lang: str, logo_path: Path) -> None:
+def _render_cover(slide, spec: dict, ctx: dict, lang: str, logo_path: Path, plan: dict | None = None) -> None:
     """Editorial cover: full-bleed artwork, tracked kicker, display serif title.
 
     The 2026 editorial-serif direction is deliberate: neutral geometric sans faces
@@ -1349,7 +1405,7 @@ def _render_cover(slide, spec: dict, ctx: dict, lang: str, logo_path: Path) -> N
                      font=LABEL_FONT, tracking=2.0)
 
     # Client mark, bottom right, introduced by a quiet label.
-    client_logo = _client_logo(logo_path, ctx.get("client"))
+    client_logo = _client_logo_from_plan(plan or {}) or _client_logo(logo_path, ctx.get("client"))
     if client_logo:
         _add_display(slide, "PREPARED FOR" if not el else "ΓΙΑ ΤΟΝ ΠΕΛΑΤΗ",
                      9.05, 5.92, 3.4, .26, size=8, color="7A8699", font=LABEL_FONT,
@@ -1371,7 +1427,7 @@ def generate_pptx(presentation_plan: dict, visual_pack: dict, output_path: Path,
         slide=prs.slides.add_slide(blank); _set_bg(slide)
         typ=spec.get("slide_type")
         if typ=="cover":
-            _render_cover(slide, spec, ctx, lang, logo_path)
+            _render_cover(slide, spec, ctx, lang, logo_path, presentation_plan)
         else:
             _add_header(slide,spec.get("title"),idx-1)
             _add_footer(slide,idx,ctx)

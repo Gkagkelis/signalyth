@@ -559,7 +559,7 @@ def build_collection_plan(draft: AnalysisDraft) -> CollectionPlan:
     else: source_budgets={}
     plans=[make_source_plan(s,targets[s],draft,queries,registry,source_budgets[s]) for s in selected]
     preview={p.source:p.query_preview for p in plans}
-    return CollectionPlan(client=draft.client,topic=draft.topic,market=draft.market,date_from=draft.date_from,date_to=draft.date_to,report_language=draft.report_language,media_handling=draft.media_handling,owned_accounts=list(draft.owned_accounts or []),media_accounts=list(draft.media_accounts or []),
+    return CollectionPlan(client=draft.client,topic=draft.topic,market=draft.market,date_from=draft.date_from,date_to=draft.date_to,report_language=draft.report_language,media_handling=draft.media_handling,owned_accounts=list(draft.owned_accounts or []),media_accounts=list(draft.media_accounts or []),client_logo=draft.client_logo,brand_accent=draft.brand_accent,
                           sample_mode=draft.sample_mode,target_total=sum(p.target_items for p in plans),estimated_cost_usd=None if has_unknown else round(known_total,4),
                           max_budget_usd=draft.max_budget_usd,comments_requested=draft.comments,deepening_strategy="important_content_only" if draft.comments else "disabled",
                           budget_check=budget_check,rebalancing_enabled=(draft.sample_mode=="automatic"),rebalance_max_rounds=2,
