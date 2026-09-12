@@ -23,6 +23,7 @@ class AnalysisDraft(BaseModel):
     max_budget_usd: float = Field(default=5.0, gt=0, le=10000)
     smart_search: bool = True
     report_language: Literal["English", "Ελληνικά"] = "English"
+    research_type: Literal["market", "political"] = "market"
     media_handling: Literal["blended", "separate", "exclude"] = "blended"
     owned_accounts: list[str] = Field(default_factory=list, max_length=60)
     media_accounts: list[str] = Field(default_factory=list, max_length=120)
@@ -120,6 +121,7 @@ class CollectionPlan(BaseModel):
     master_spec_version: str = "SIGNALYTH-master30-v1"
     benchmark: dict[str, object] | None = None
     report_language: str = "English"
+    research_type: Literal["market", "political"] = "market"
     media_handling: Literal["blended", "separate", "exclude"] = "blended"
     owned_accounts: list[str] = Field(default_factory=list, max_length=60)
     media_accounts: list[str] = Field(default_factory=list, max_length=120)
