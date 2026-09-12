@@ -48,6 +48,13 @@ NEUTRAL = "9AA0A6"
 MIXED = "C98A2B"
 WARN = "B26A00"
 FONT = "Inter"
+# Editorial display face for covers and section titles. Georgia ships with both
+# Windows and macOS and has real Greek coverage, so the cover renders identically
+# on a client machine instead of silently falling back to a default.
+DISPLAY_FONT = "Georgia"
+LABEL_FONT = "Segoe UI"
+COVER_INK = "16365C"
+COVER_ACCENT = "FD9D08"
 
 # Stable semantic colors: the same sentiment/emotion always gets the same color
 # in dashboard, PPTX, PDF and Word, as the methodology requires.
@@ -904,6 +911,38 @@ def _add_footer(slide, page, context):
     _add_text(slide, str(page), 12.05, 7.12, 0.65, 0.18, size=7.5, color=MUTED, align=PP_ALIGN.RIGHT)
 
 
+def _track(run, points: float) -> None:
+    """Letter-spacing on a run. python-pptx has no API for it, so the OOXML
+    attribute is set directly. Tracked small caps are what separates an editorial
+    cover from a default deck."""
+    try:
+        run.font._rPr.set("spc", str(int(points * 100)))
+    except Exception:
+        pass
+
+
+def _add_display(slide, text, x, y, w, h, *, size, color, font=None, bold=False,
+                 tracking=0.0, align=PP_ALIGN.LEFT, line_spacing=None):
+    """Display typography block used by the cover."""
+    box = slide.shapes.add_textbox(Inches(x), Inches(y), Inches(w), Inches(h))
+    tf = box.text_frame
+    tf.word_wrap = True
+    tf.margin_left = tf.margin_right = tf.margin_top = tf.margin_bottom = 0
+    para = tf.paragraphs[0]
+    para.alignment = align
+    if line_spacing:
+        para.line_spacing = line_spacing
+    run = para.add_run()
+    run.text = _clean_text(text, 300)
+    run.font.size = Pt(size)
+    run.font.bold = bold
+    run.font.name = font or DISPLAY_FONT
+    run.font.color.rgb = _rgb(color)
+    if tracking:
+        _track(run, tracking)
+    return box
+
+
 def _add_logo(slide, logo_path: Path, x, y, w):
     if logo_path.exists():
         try:
@@ -1214,6 +1253,115 @@ def _role_label(role: str, lang: str) -> str:
     return el if lang == "el" else en
 
 
+_GREEK_LATIN = str.maketrans({
+    "α": "a", "β": "v", "γ": "g", "δ": "d", "ε": "e", "ζ": "z", "η": "i", "θ": "th",
+    "ι": "i", "κ": "k", "λ": "l", "μ": "m", "ν": "n", "ξ": "x", "ο": "o", "π": "p",
+    "ρ": "r", "σ": "s", "ς": "s", "τ": "t", "υ": "y", "φ": "f", "χ": "ch", "ψ": "ps",
+    "ω": "o", "ά": "a", "έ": "e", "ή": "i", "ί": "i", "ό": "o", "ύ": "y", "ώ": "o",
+    "ϊ": "i", "ϋ": "y", "ΐ": "i", "ΰ": "y",
+})
+
+
+def _flatten_greek(value: str) -> str:
+    return str(value or "").lower().translate(_GREEK_LATIN)
+
+
+def _cover_background(logo_path: Path) -> Path | None:
+    """Full-bleed studio artwork for the cover, if the brand asset is present."""
+    base = logo_path.parent if logo_path else Path("assets")
+    for name in ("cover.png", "cover.jpg", "cover-16x9.png", "report-cover.png"):
+        candidate = base / name
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _client_logo(logo_path: Path, client: str) -> Path | None:
+    """Per-client logo, looked up by a filesystem-safe form of the client name."""
+    if not client:
+        return None
+    base = (logo_path.parent if logo_path else Path("assets")) / "clients"
+    if not base.is_dir():
+        return None
+
+    def _slugs(value: str) -> set[str]:
+        """Both the raw and the transliterated slug, so a Greek client name
+        matches a Latin filename and vice versa."""
+        raw = "".join(ch if ch.isalnum() else "-" for ch in str(value).lower())
+        latin = "".join(ch if ch.isalnum() else "-" for ch in _flatten_greek(str(value)))
+        out = set()
+        for form in (raw, latin):
+            cleaned = "-".join(part for part in form.split("-") if part)
+            if cleaned:
+                out.add(cleaned)
+                out.add(cleaned.replace("-", ""))
+        return out
+
+    wanted = _slugs(client)
+    files = [f for f in base.iterdir() if f.is_file() and f.suffix.lower() in {".png", ".jpg", ".jpeg"}]
+    for candidate in files:
+        if _slugs(candidate.stem) & wanted:
+            return candidate
+    # Prefix match: "elas" also serves "ΕΛΑΣ 2".
+    for candidate in files:
+        for cand_slug in _slugs(candidate.stem):
+            if any(w.startswith(cand_slug) for w in wanted if len(cand_slug) >= 3):
+                return candidate
+    return None
+
+
+def _render_cover(slide, spec: dict, ctx: dict, lang: str, logo_path: Path) -> None:
+    """Editorial cover: full-bleed artwork, tracked kicker, display serif title.
+
+    The 2026 editorial-serif direction is deliberate: neutral geometric sans faces
+    are what every listening platform uses, so a serif display reads as research
+    studio rather than dashboard vendor.
+    """
+    el = lang == "el"
+    background = _cover_background(logo_path)
+    if background:
+        slide.shapes.add_picture(str(background), 0, 0, width=Inches(13.333333), height=Inches(7.5))
+    else:
+        _add_logo(slide, logo_path, .72, .62, 4.2)
+
+    topic = _clean_text(spec.get("title") or ctx.get("topic") or "", 90)
+    client = _clean_text(ctx.get("client") or "", 90)
+    market = _clean_text(ctx.get("market") or "", 60)
+    period = f"{ctx.get('date_from') or ''} — {ctx.get('date_to') or ''}".strip(" —")
+
+    # Kicker: tracked, uppercase, small. Sets the register before the title lands.
+    _add_display(slide, "BRAND INTELLIGENCE REPORT" if not el else "ΑΝΑΦΟΡΑ BRAND INTELLIGENCE",
+                 .95, 2.62, 6.6, .3, size=10.5, color=COVER_ACCENT, font=LABEL_FONT,
+                 bold=True, tracking=3.2)
+    _add_rule(slide, .95, 3.02, 1.15, color=COVER_ACCENT, width=2.5)
+
+    # The subject of the report, set large. This is the element the client remembers.
+    title_size = 54 if len(topic) <= 18 else 44 if len(topic) <= 28 else 34
+    _add_display(slide, topic, .92, 3.16, 7.4, 1.45, size=title_size, color=COVER_INK,
+                 bold=True, line_spacing=0.92)
+
+    if client:
+        _add_display(slide, client, .95, 4.62, 7.0, .42, size=15, color="44506B",
+                     font=LABEL_FONT)
+    meta = " · ".join(x for x in (market, period) if x)
+    if meta:
+        _add_display(slide, meta.upper(), .95, 5.12, 7.0, .32, size=9.5, color="7A8699",
+                     font=LABEL_FONT, tracking=2.0)
+
+    # Client mark, bottom right, introduced by a quiet label.
+    client_logo = _client_logo(logo_path, ctx.get("client"))
+    if client_logo:
+        _add_display(slide, "PREPARED FOR" if not el else "ΓΙΑ ΤΟΝ ΠΕΛΑΤΗ",
+                     9.05, 5.92, 3.4, .26, size=8, color="7A8699", font=LABEL_FONT,
+                     bold=True, tracking=2.6, align=PP_ALIGN.RIGHT)
+        try:
+            pic = slide.shapes.add_picture(str(client_logo), Inches(9.05), Inches(6.24), height=Inches(0.72))
+            # Right-align the mark against the 12.4in margin.
+            pic.left = Inches(12.4) - pic.width
+        except Exception:
+            pass
+
+
 def generate_pptx(presentation_plan: dict, visual_pack: dict, output_path: Path, logo_path: Path) -> dict:
     prs = Presentation(); prs.slide_width = Inches(13.333333); prs.slide_height = Inches(7.5)
     blank = prs.slide_layouts[6]
@@ -1223,11 +1371,7 @@ def generate_pptx(presentation_plan: dict, visual_pack: dict, output_path: Path,
         slide=prs.slides.add_slide(blank); _set_bg(slide)
         typ=spec.get("slide_type")
         if typ=="cover":
-            _add_logo(slide,logo_path,.72,.7,5.4)
-            _add_text(slide,spec.get("title"),.75,3.35,11.8,1.05,size=38,bold=True)
-            _add_text(slide,spec.get("subtitle"),.78,4.48,10.8,.45,size=13,color=MUTED)
-            _add_rule(slide,.78,5.25,2.05,color=INK,width=2)
-            _add_text(slide,"Brand intelligence report" if lang=="en" else "Αναφορά brand intelligence",.78,5.5,5,.4,size=10,color=MUTED,bold=True)
+            _render_cover(slide, spec, ctx, lang, logo_path)
         else:
             _add_header(slide,spec.get("title"),idx-1)
             _add_footer(slide,idx,ctx)
