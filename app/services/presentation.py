@@ -835,6 +835,8 @@ def build_presentation_plan(visual_pack: dict, evidence_pack: dict, plan: dict |
         "ruleset_version": PRESENTATION_RULESET_VERSION,
         "methodology_version": PRESENTATION_METHODOLOGY_VERSION,
         "generated_at": _utcnow(),
+        "client_logo": plan.get("client_logo"),
+        "brand_accent": plan.get("brand_accent"),
         "language": lang,
         "research_context": ctx,
         "slides": slides,
