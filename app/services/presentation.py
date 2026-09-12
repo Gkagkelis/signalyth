@@ -33,7 +33,7 @@ from app.services.storage import RunStore
 from app.services.visualizations import load_presentation_visual_pack, load_visualization_summary
 from app.services.report_synthesis import build_report_synthesis, final_consistency_qa
 
-PRESENTATION_RULESET_VERSION = "1.5.0"
+PRESENTATION_RULESET_VERSION = "1.6.0"
 PRESENTATION_METHODOLOGY_VERSION = "signalyth-presentation-intelligence-v1.4"
 PRESENTATION_CONTRACT_VERSION = "signalyth-presentation-pack-v1.4"
 
@@ -1729,6 +1729,354 @@ def _render_executive_dashboard(slide, dash: dict, lang: str, ctx: dict) -> None
         _add_text(slide, label, x + 0.12, k_y + (0.86 if sub else 0.74), k_w - 0.24, 0.46, size=8.5, color=MUTED, align=PP_ALIGN.CENTER)
 
 
+# ---------- Brand Reputation Timeline (slide 3) ----------
+# Locked design: value-coloured line (deep green -> amber -> red, saturated
+# around the methodology's neutral band), value on every dot, Peak/Low badges,
+# auto-written narrative, three mini-KPIs. Granularity adapts to the run:
+# daily for multi-day reports, hourly for crisis/debate runs measured in hours.
+
+TL_SCALE_NEG = (197, 48, 58)    # C5303A
+TL_SCALE_MID = (217, 138, 43)   # D98A2B
+TL_SCALE_POS = (30, 107, 69)    # 1E6B45
+TL_AREA = "EAF0F2"
+
+_EL_DAYS = ["Δευτέρα", "Τρίτη", "Τετάρτη", "Πέμπτη", "Παρασκευή", "Σάββατο", "Κυριακή"]
+_EL_DAYS_AB = ["Δε", "Τρ", "Τε", "Πε", "Πα", "Σα", "Κυ"]
+_EN_DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+_EN_DAYS_AB = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+
+def _val_color(v) -> str:
+    """Value -> hex on the reputation palette. Saturates at 30 (full red) and
+    70 (full green) so movement around the 45-55 neutral band stays visible."""
+    t = max(0.0, min(1.0, (_safe_float(v) - 30.0) / 40.0))
+    if t <= 0.5:
+        a, b, tt = TL_SCALE_NEG, TL_SCALE_MID, t * 2
+    else:
+        a, b, tt = TL_SCALE_MID, TL_SCALE_POS, (t - 0.5) * 2
+    return "".join(f"{int(round(a[i] + (b[i] - a[i]) * tt)):02X}" for i in range(3))
+
+
+def _parse_dt(value):
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _tl_day_labels(dt, lang):
+    ab = (_EL_DAYS_AB if lang == "el" else _EN_DAYS_AB)[dt.weekday()]
+    full = (_EL_DAYS if lang == "el" else _EN_DAYS)[dt.weekday()]
+    dm = f"{dt.day}/{dt.month}"
+    return f"{ab} {dm}", f"{full} {dm}"
+
+
+def _reputation_timeline_data(folder: Path, visual_pack: dict, lang: str) -> dict | None:
+    """Timeline points + narrative facts for slide 3, all from this run.
+    Daily: the run's own brand_reputation_index series. Hourly (short runs):
+    per-hour impact-weighted sentiment mapped to 0-100 with the methodology's
+    own transform ((s+1)/2*100). Returns None when there is nothing to plot."""
+    try:
+        charts = _chart_map(visual_pack)
+        rows = ((charts.get("time_trends") or {}).get("data") or {}).get("rows") or []
+        daily = []
+        for r in rows:
+            if not isinstance(r, dict) or r.get("brand_reputation_index") is None:
+                continue
+            dt = _parse_dt(str(r.get("date"))[:10] + "T00:00:00+00:00")
+            if dt is None:
+                continue
+            daily.append((dt, round(_safe_float(r.get("brand_reputation_index")), 1), _safe_int(r.get("records"))))
+        daily.sort(key=lambda x: x[0])
+
+        points = []
+        granularity = None
+        if len(daily) >= 2:
+            granularity = "daily"
+            for dt, v, vol in daily:
+                ab, full = _tl_day_labels(dt, lang)
+                points.append({"label": ab, "full": full, "value": v, "volume": vol})
+        else:
+            # Crisis / debate mode: bucket the run's records per hour.
+            records = None
+            for rel in (("intelligence", "records.json"), ("analysis", "analysis-ready.json")):
+                try:
+                    data = RunStore.read(folder / rel[0] / rel[1], None)
+                except Exception:
+                    data = None
+                if isinstance(data, list) and data:
+                    records = data
+                    break
+            if not records:
+                return None
+            buckets: dict = {}
+            for r in records:
+                if not isinstance(r, dict):
+                    continue
+                dt = _parse_dt(r.get("date"))
+                s = ((r.get("ai_analysis") or {}).get("sentiment_score"))
+                if dt is None or s is None:
+                    continue
+                w = max(0.05, _safe_float((r.get("intelligence") or {}).get("impact_score"), 0.5))
+                key = dt.replace(minute=0, second=0, microsecond=0)
+                b = buckets.setdefault(key, {"num": 0.0, "den": 0.0, "n": 0})
+                b["num"] += w * _safe_float(s)
+                b["den"] += w
+                b["n"] += 1
+            hours = sorted(buckets.items())
+            if len(hours) < 2:
+                return None
+            span_h = (hours[-1][0] - hours[0][0]).total_seconds() / 3600.0
+            if span_h > 72:
+                return None  # long run without a daily series: nothing honest to plot
+            granularity = "hourly"
+            multiday = hours[0][0].date() != hours[-1][0].date()
+            for dt, b in hours:
+                v = round(((b["num"] / b["den"]) + 1.0) / 2.0 * 100.0, 1) if b["den"] else 50.0
+                hh = dt.strftime("%H:00")
+                lbl = f"{dt.day}/{dt.month} {hh}" if multiday else hh
+                points.append({"label": hh if not multiday else lbl, "full": lbl, "value": v, "volume": b["n"]})
+
+        if len(points) < 2:
+            return None
+        vals = [p["value"] for p in points]
+        i_peak = max(range(len(vals)), key=lambda i: vals[i])
+        i_low = min(range(len(vals)), key=lambda i: vals[i])
+        steep = None
+        if len(vals) >= 3:
+            j = max(range(1, len(vals)), key=lambda i: abs(vals[i] - vals[i - 1]))
+            steep = {"i": j, "change": round(vals[j] - vals[j - 1], 1),
+                     "from": points[j - 1]["full"], "to": points[j]["full"],
+                     "volume": points[j]["volume"],
+                     "is_busiest": points[j]["volume"] == max(p["volume"] for p in points)}
+        return {"granularity": granularity, "points": points, "i_peak": i_peak, "i_low": i_low,
+                "delta": round(vals[-1] - vals[0], 1), "first": vals[0], "last": vals[-1], "steep": steep}
+    except Exception:
+        return None
+
+
+def _timeline_narrative(tl: dict, lang: str) -> list[tuple[str, str]]:
+    el = lang == "el"
+    pts = tl["points"]
+    delta, first, last = tl["delta"], tl["first"], tl["last"]
+    hourly = tl["granularity"] == "hourly"
+    out: list[tuple[str, str]] = []
+
+    if delta <= -3:
+        head = "Πτωτική πορεία. " if el else "Downward trajectory. "
+        body = (f"Το Brand Reputation έχασε {abs(delta):.1f} μονάδες μέσα στην περίοδο — από {first:.1f} στις {last:.1f}."
+                if el else f"Brand Reputation lost {abs(delta):.1f} points over the period — from {first:.1f} to {last:.1f}.")
+    elif delta >= 3:
+        head = "Ανοδική πορεία. " if el else "Upward trajectory. "
+        body = (f"Το Brand Reputation κέρδισε {delta:.1f} μονάδες μέσα στην περίοδο — από {first:.1f} στις {last:.1f}."
+                if el else f"Brand Reputation gained {delta:.1f} points over the period — from {first:.1f} to {last:.1f}.")
+    else:
+        head = "Σταθερή εικόνα. " if el else "Stable picture. "
+        body = (f"Το Brand Reputation μεταβλήθηκε μόλις κατά {delta:+.1f} μονάδες στην περίοδο ({first:.1f} → {last:.1f})."
+                if el else f"Brand Reputation moved only {delta:+.1f} points over the period ({first:.1f} → {last:.1f}).")
+    out.append((head, body))
+
+    def edge_note(i):
+        if i == 0:
+            return ("στην εκκίνηση της μέτρησης" if el else "at the start of measurement")
+        if i == len(pts) - 1:
+            return ("στο κλείσιμο της περιόδου" if el else "at the close of the period")
+        return None
+
+    pk, lo = tl["i_peak"], tl["i_low"]
+    note = edge_note(pk)
+    out.append(("Κορύφωση: " if el else "Peak: ",
+                f"{pts[pk]['full']}" + (f", {note}" if note else "") + f" ({pts[pk]['value']:.1f})."))
+    note = edge_note(lo)
+    out.append(("Χαμηλό: " if el else "Low: ",
+                f"{pts[lo]['full']}" + (f", {note}" if note else "") + f" ({pts[lo]['value']:.1f})."))
+
+    st = tl.get("steep")
+    if st and abs(st["change"]) >= 0.1:
+        drop = st["change"] < 0
+        head = (("Πιο απότομη πτώση: " if drop else "Πιο απότομη άνοδος: ") if el
+                else ("Steepest drop: " if drop else "Steepest rise: "))
+        unit = ("μονάδες" if el else "points")
+        seg = f"{st['from']} → {st['to']} ({st['change']:+.1f} {unit})"
+        if st["is_busiest"]:
+            tail = ((", την ώρα με τον υψηλότερο όγκο αναφορών" if hourly else ", τη μέρα με τον υψηλότερο όγκο αναφορών")
+                    if el else (", in the busiest hour of the period" if hourly else ", on the busiest day of the period"))
+            tail += f" ({st['volume']})."
+        else:
+            tail = (f", με {st['volume']} αναφορές στο διάστημα." if el
+                    else f", with {st['volume']} mentions in that window.")
+        out.append((head, seg + tail))
+    return out
+
+
+def _add_rich(slide, parts, x, y, w, h, *, size=9.6, color=INK, align=PP_ALIGN.LEFT):
+    box = slide.shapes.add_textbox(Inches(x), Inches(y), Inches(w), Inches(h))
+    tf = box.text_frame; tf.clear(); tf.word_wrap = True
+    p = tf.paragraphs[0]; p.alignment = align
+    for idx, (text, bold) in enumerate(parts):
+        run = p.add_run()
+        # Keep the separating space between runs: clean, then restore the
+        # trailing space _clean_text strips from the lead-in run.
+        cleaned = _clean_text(text, 600)
+        if idx < len(parts) - 1 and str(text).endswith(" "):
+            cleaned += " "
+        run.text = cleaned
+        try:
+            from pptx.oxml.ns import qn
+            t_el = run._r.find(qn("a:t"))
+            if t_el is not None:
+                t_el.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+        except Exception:
+            pass
+        run.font.name = FONT; run.font.size = Pt(size); run.font.bold = bold
+        run.font.color.rgb = _rgb(color)
+    return box
+
+
+def _render_reputation_timeline(slide, tl: dict, lang: str, ctx: dict) -> None:
+    el = lang == "el"
+    pts = tl["points"]; n = len(pts)
+    hourly = tl["granularity"] == "hourly"
+
+    # Top-right identity, matching slide 2.
+    client = _clean_text(ctx.get("client") or "", 60)
+    topic = _clean_text(ctx.get("topic") or "", 60)
+    who = " · ".join(x for x in (client, topic) if x)
+    gran = ("ανά ώρα" if hourly else "ανά ημέρα") if el else ("per hour" if hourly else "per day")
+    when = " · ".join(x for x in (_period_label(ctx.get("date_from"), ctx.get("date_to"), lang), gran) if x)
+    if who:
+        _add_text(slide, who, 8.35, 0.36, 4.38, 0.28, size=12, color=INK, bold=True, align=PP_ALIGN.RIGHT)
+    _add_text(slide, when, 8.35, 0.66, 4.38, 0.24, size=9.5, color=MUTED, align=PP_ALIGN.RIGHT)
+
+    # --- Chart card ---
+    cx0, cy0, cw, chh = 0.58, 1.42, 8.10, 5.44
+    _dash_card(slide, cx0, cy0, cw, chh)
+    _add_text(slide, ("BRAND REPUTATION · ΕΞΕΛΙΞΗ ΣΤΗΝ ΠΕΡΙΟΔΟ" if el else "BRAND REPUTATION · EVOLUTION OVER THE PERIOD"),
+              cx0 + 0.28, cy0 + 0.18, cw - 0.56, 0.24, size=9.5, color=MUTED, bold=True, font=LABEL_FONT)
+
+    px0, px1 = cx0 + 0.62, cx0 + cw - 0.34
+    py_bot, py_top = cy0 + 4.62, cy0 + 1.02
+    X = (lambda i: px0 + (px1 - px0) * i / (n - 1)) if n > 1 else (lambda i: (px0 + px1) / 2)
+    Y = lambda v: py_bot - (max(0.0, min(100.0, v)) / 100.0) * (py_bot - py_top)
+
+    # Grid + y labels
+    for g in (0, 25, 50, 75, 100):
+        _add_rule(slide, px0, Y(g), px1 - px0, color=DASH_TRACK, width=0.8)
+        _add_text(slide, str(g), cx0 + 0.14, Y(g) - 0.09, 0.42, 0.18, size=7.5, color=NEUTRAL, align=PP_ALIGN.RIGHT)
+
+    # Colour-scale legend, top right of the plot
+    sx, sw_total, seg_n = px1 - 2.35, 1.55, 26
+    for i in range(seg_n):
+        seg = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(sx + sw_total * i / seg_n), Inches(cy0 + 0.52),
+                                     Inches(sw_total / seg_n + 0.006), Inches(0.08))
+        seg.fill.solid(); seg.fill.fore_color.rgb = _rgb(_val_color(100.0 * i / (seg_n - 1)))
+        seg.line.fill.background(); seg.shadow.inherit = False
+    _add_text(slide, ("Αρνητικό 0" if el else "Negative 0"), sx - 0.95, cy0 + 0.475, 0.9, 0.18, size=7.5, color=MUTED, align=PP_ALIGN.RIGHT)
+    _add_text(slide, ("100 Θετικό" if el else "100 Positive"), sx + sw_total + 0.05, cy0 + 0.475, 0.95, 0.18, size=7.5, color=MUTED)
+
+    # Area fill under the line
+    area_pts = [(X(0), py_bot)] + [(X(i), Y(p["value"])) for i, p in enumerate(pts)] + [(X(n - 1), py_bot)]
+    unit = 100000
+    ipts = [(int(round(x * unit)), int(round(y * unit))) for x, y in area_pts]
+    try:
+        fb = slide.shapes.build_freeform(ipts[0][0], ipts[0][1], scale=914400.0 / unit)
+        fb.add_line_segments(ipts[1:], close=True)
+        shp = fb.convert_to_shape()
+        shp.fill.solid(); shp.fill.fore_color.rgb = _rgb(TL_AREA)
+        shp.line.fill.background(); shp.shadow.inherit = False
+    except Exception:
+        pass
+
+    # Value-coloured segments
+    from pptx.enum.shapes import MSO_CONNECTOR
+    for i in range(n - 1):
+        c = _val_color((pts[i]["value"] + pts[i + 1]["value"]) / 2.0)
+        conn = slide.shapes.add_connector(MSO_CONNECTOR.STRAIGHT, Inches(X(i)), Inches(Y(pts[i]["value"])),
+                                          Inches(X(i + 1)), Inches(Y(pts[i + 1]["value"])))
+        conn.line.color.rgb = _rgb(c); conn.line.width = Pt(3.4); conn.shadow.inherit = False
+
+    # Which dots get a printed value (thin out on dense series; extremes always)
+    if n <= 14:
+        labelled = set(range(n))
+    else:
+        step = max(1, (n + 11) // 12)
+        labelled = set(range(0, n, step)) | {0, n - 1, tl["i_peak"], tl["i_low"]}
+
+    dot_d = 0.13
+    for i, p in enumerate(pts):
+        x, y = X(i), Y(p["value"])
+        c = _val_color(p["value"])
+        if i in (tl["i_peak"], tl["i_low"]):
+            ring = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(x - 0.145), Inches(y - 0.145), Inches(0.29), Inches(0.29))
+            ring.fill.background(); ring.line.color.rgb = _rgb(c); ring.line.width = Pt(1.6); ring.shadow.inherit = False
+        dot = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(x - dot_d / 2), Inches(y - dot_d / 2), Inches(dot_d), Inches(dot_d))
+        dot.fill.solid(); dot.fill.fore_color.rgb = _rgb(c)
+        dot.line.color.rgb = _rgb(WHITE); dot.line.width = Pt(1.5); dot.shadow.inherit = False
+        if i in (tl["i_peak"], tl["i_low"]):
+            continue  # value lives in the badge
+        if i in labelled:
+            above = p["value"] >= pts[i - 1]["value"] if i > 0 else True
+            ly = y - 0.30 if above else y + 0.12
+            _add_text(slide, f"{p['value']:.1f}", x - 0.35, ly, 0.70, 0.20, size=8.5, color=c, bold=True, align=PP_ALIGN.CENTER)
+
+    # Peak / Low badges with the value inside
+    for i, tag in ((tl["i_peak"], "Peak"), (tl["i_low"], "Low")):
+        x, y = X(i), Y(pts[i]["value"])
+        c = _val_color(pts[i]["value"])
+        bw = 1.06
+        bx = min(max(x - bw / 2, px0), px1 - bw)
+        by = y - 0.56 if tag == "Peak" else y + 0.24
+        badge = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(bx), Inches(by), Inches(bw), Inches(0.30))
+        badge.adjustments[0] = 0.5; badge.fill.solid(); badge.fill.fore_color.rgb = _rgb(c)
+        badge.line.fill.background(); badge.shadow.inherit = False
+        _add_text(slide, f"{tag} {pts[i]['value']:.1f}", bx, by, bw, 0.30, size=8.5, color=WHITE, bold=True,
+                  align=PP_ALIGN.CENTER, valign=MSO_ANCHOR.MIDDLE)
+
+    # X axis labels (thinned like the values)
+    if n <= 12:
+        x_lab = set(range(n))
+    else:
+        step = max(1, (n + 9) // 10)
+        x_lab = set(range(0, n, step)) | {0, n - 1}
+    for i in sorted(x_lab):
+        _add_text(slide, pts[i]["label"], X(i) - 0.55, py_bot + 0.10, 1.10, 0.20, size=8, color=MUTED, align=PP_ALIGN.CENTER)
+
+    caption = (("Δείκτης 0–100 · υπολογίζεται ανά ημέρα από τα evidence της περιόδου" if not hourly
+                else "Σταθμισμένο sentiment σε κλίμακα 0–100 · υπολογίζεται ανά ώρα από τα evidence της περιόδου") if el
+               else ("Index 0–100 · computed per day from the period's evidence" if not hourly
+                     else "Weighted sentiment on a 0–100 scale · computed per hour from the period's evidence"))
+    _add_text(slide, caption, cx0 + 0.28, cy0 + chh - 0.34, cw - 0.56, 0.22, size=8, color=NEUTRAL)
+
+    # --- Narrative card ---
+    nx, nw_ = 8.88, 3.85
+    _dash_card(slide, nx, 1.42, nw_, 3.62)
+    _add_text(slide, ("ΤΙ ΔΕΙΧΝΕΙ Η ΓΡΑΜΜΗ" if el else "WHAT THE LINE SHOWS"),
+              nx + 0.28, 1.62, nw_ - 0.56, 0.24, size=9.5, color=MUTED, bold=True, font=LABEL_FONT)
+    paras = _timeline_narrative(tl, lang)[:4]
+    block = (3.62 - 0.62) / max(1, len(paras))
+    py = 1.96
+    for head, body in paras:
+        _add_rich(slide, [(head, True), (body, False)], nx + 0.28, py, nw_ - 0.56, block, size=9.4)
+        py += block
+
+    # --- Mini KPI chips ---
+    ky, kh_ = 5.22, 1.64
+    kw_ = (nw_ - 0.24) / 3
+    pk, lo = pts[tl["i_peak"]], pts[tl["i_low"]]
+    d = tl["delta"]
+    chips = [
+        (f"{pk['value']:.1f}", _val_color(pk["value"]), f"Peak {pk['label']}"),
+        (f"{lo['value']:.1f}", _val_color(lo["value"]), f"Low {lo['label']}"),
+        (f"{d:+.1f}", POS if d > 0 else NEG if d < 0 else NEUTRAL,
+         ("Μεταβολή περιόδου" if el else "Period change")),
+    ]
+    for i, (value, color, label) in enumerate(chips):
+        x = nx + i * (kw_ + 0.12)
+        _dash_card(slide, x, ky, kw_, kh_)
+        _add_text(slide, value, x, ky + 0.22, kw_, 0.4, size=15, color=color, bold=True, align=PP_ALIGN.CENTER)
+        _add_text(slide, label, x + 0.06, ky + 0.72, kw_ - 0.12, 0.8, size=8, color=MUTED, align=PP_ALIGN.CENTER)
+
+
 def generate_pptx(presentation_plan: dict, visual_pack: dict, output_path: Path, logo_path: Path) -> dict:
     prs = Presentation(); prs.slide_width = Inches(13.333333); prs.slide_height = Inches(7.5)
     blank = prs.slide_layouts[6]
@@ -1762,6 +2110,10 @@ def generate_pptx(presentation_plan: dict, visual_pack: dict, output_path: Path,
                         chart_modes.append((cids[1],_render_chart_spec(slide,charts[cids[1]],6.82,1.55,5.35,2.15,lang)))
                     for i,cl in enumerate(claims[:3]):
                         _add_claim_card(slide,cl.get("text"),1.12+i*3.72,4.15,3.47,1.62,font_size=10.5)
+            elif typ == "reputation_timeline":
+                tl = presentation_plan.get("reputation_timeline")
+                if isinstance(tl, dict) and tl.get("points"):
+                    _render_reputation_timeline(slide, tl, lang, ctx)
             elif typ == "evidence_split":
                 pos=[c for c in claims if str((c.get("source_values") or {}).get("sentiment"))=="positive"]
                 neg=[c for c in claims if str((c.get("source_values") or {}).get("sentiment"))=="negative"]
@@ -2062,6 +2414,16 @@ def build_exports(folder: Path, plan: dict, *, force: bool=False, cancel_check: 
     pplan=build_presentation_plan(visual_pack,evidence_pack,plan,cancel_check=cancel_check)
     # Slide 2 executive dashboard: computed per run; None falls back to legacy.
     pplan["executive_dashboard"]=_executive_dashboard_data(folder,visual_pack)
+    # Slide 3 reputation timeline: only added when the run has a plottable series.
+    tl=_reputation_timeline_data(folder,visual_pack,pplan.get("language") or "en")
+    if tl:
+        pplan["reputation_timeline"]=tl
+        spec={"slide_id":"reputation_timeline","slide_type":"reputation_timeline",
+              "title":"Brand Reputation Timeline","chart_ids":[],"claims":[],
+              "section":"opening","priority":99,"required":False,"notes":{}}
+        slides_list=pplan.get("slides") or []
+        idx=next((i for i,sp in enumerate(slides_list) if sp.get("slide_id")=="executive_summary"),None)
+        slides_list.insert((idx+1) if idx is not None else 1,spec)
     base=folder/"exports"; base.mkdir(parents=True,exist_ok=True)
     lang=pplan["language"]; ctx=pplan["research_context"]
     stem=re.sub(r"[^A-Za-z0-9Α-Ωα-ω_-]+","_",f"{ctx.get('client','')}_{ctx.get('topic','')}_{ctx.get('date_from','')}_{ctx.get('date_to','')}").strip("_")[:140] or "SIGNALYTH_Report"
