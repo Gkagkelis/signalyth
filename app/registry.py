@@ -63,6 +63,11 @@ def load_registry() -> dict:
         cfg.setdefault("comment_route", None)
         cfg.setdefault("comment_input_field", None)
         cfg.setdefault("comment_output_mapping", {})
+        cfg.setdefault("comment_enabled", False)
+        cfg.setdefault("comment_price_per_1000_hint", None)
+        cfg.setdefault("comment_max_per_parent", 40)
+        cfg.setdefault("comment_max_parents", 12)
+        cfg.setdefault("comment_include_replies", True)
     return data
 
 
@@ -102,8 +107,17 @@ def update_source(source: str, changes: dict) -> dict:
     data = load_registry()
     if source not in data:
         raise KeyError(source)
-    allowed = {"actor_id", "locked", "enabled", "price_per_1000_hint"}
+    allowed = {
+        "actor_id", "locked", "enabled", "price_per_1000_hint",
+        "comment_enabled", "comment_price_per_1000_hint",
+        "comment_max_per_parent", "comment_max_parents", "comment_include_replies",
+    }
     current = data[source]
+    if changes.get("comment_enabled") is True:
+        if current.get("comment_deepening_status") != "verified":
+            raise PermissionError("Comments cannot be enabled until this comment Actor passes the paid live smoke verification.")
+        if not current.get("comment_actor_id"):
+            raise PermissionError("Comments cannot be enabled because no comment Actor is configured for this source.")
     requested_actor = changes.get("actor_id")
     actor_changed = requested_actor is not None and requested_actor != current.get("actor_id")
     if actor_changed and current.get("locked", False) and changes.get("locked") is not False:
@@ -228,6 +242,7 @@ def commit_comment_route_verification(
         "comment_route": route,
         "comment_input_field": input_field,
         "comment_output_mapping": deepcopy(output_mapping or {}),
+        "comment_enabled": True,
     })
     _write_json_atomic(REGISTRY_PATH, data)
     return deepcopy(current)
@@ -246,6 +261,7 @@ def clear_comment_route_verification(source: str, reason: str = "manual_clear") 
         "comment_route": None,
         "comment_input_field": None,
         "comment_output_mapping": {},
+        "comment_enabled": False,
     })
     _write_json_atomic(REGISTRY_PATH, data)
     return deepcopy(current)

@@ -21,11 +21,16 @@
     "mapping_confidence": null,
     "mapping_signature": null,
     "comment_deepening_status": "unverified",
-    "comment_actor_id": null,
+    "comment_actor_id": "xquik/x-tweet-scraper",
     "comment_last_smoke_test_at": null,
-    "comment_route": null,
-    "comment_input_field": null,
-    "comment_output_mapping": {}
+    "comment_route": "replies",
+    "comment_input_field": "replyTweetIds",
+    "comment_output_mapping": {},
+    "comment_enabled": false,
+    "comment_price_per_1000_hint": 0.15,
+    "comment_max_per_parent": 40,
+    "comment_max_parents": 12,
+    "comment_include_replies": true
   },
   "tiktok": {
     "label": "TikTok",
@@ -49,11 +54,16 @@
     "mapping_confidence": null,
     "mapping_signature": null,
     "comment_deepening_status": "unverified",
-    "comment_actor_id": null,
+    "comment_actor_id": "epctex/tiktok-comment-scraper",
     "comment_last_smoke_test_at": null,
-    "comment_route": null,
-    "comment_input_field": null,
-    "comment_output_mapping": {}
+    "comment_route": "comments",
+    "comment_input_field": "startUrls",
+    "comment_output_mapping": {},
+    "comment_enabled": false,
+    "comment_price_per_1000_hint": 0.3,
+    "comment_max_per_parent": 40,
+    "comment_max_parents": 12,
+    "comment_include_replies": true
   },
   "instagram": {
     "label": "Instagram",
@@ -77,11 +87,16 @@
     "mapping_confidence": null,
     "mapping_signature": null,
     "comment_deepening_status": "unverified",
-    "comment_actor_id": null,
+    "comment_actor_id": "scrapesmith/instagram-comments-scraper",
     "comment_last_smoke_test_at": null,
-    "comment_route": null,
-    "comment_input_field": null,
-    "comment_output_mapping": {}
+    "comment_route": "comments",
+    "comment_input_field": "postUrls",
+    "comment_output_mapping": {},
+    "comment_enabled": false,
+    "comment_price_per_1000_hint": 0.5,
+    "comment_max_per_parent": 40,
+    "comment_max_parents": 12,
+    "comment_include_replies": true
   },
   "facebook": {
     "label": "Facebook",
@@ -109,7 +124,12 @@
     "comment_last_smoke_test_at": null,
     "comment_route": null,
     "comment_input_field": null,
-    "comment_output_mapping": {}
+    "comment_output_mapping": {},
+    "comment_enabled": false,
+    "comment_price_per_1000_hint": 0.3,
+    "comment_max_per_parent": 40,
+    "comment_max_parents": 12,
+    "comment_include_replies": true
   },
   "youtube": {
     "label": "YouTube",
@@ -137,7 +157,12 @@
     "comment_last_smoke_test_at": null,
     "comment_route": null,
     "comment_input_field": null,
-    "comment_output_mapping": {}
+    "comment_output_mapping": {},
+    "comment_enabled": false,
+    "comment_price_per_1000_hint": null,
+    "comment_max_per_parent": 40,
+    "comment_max_parents": 12,
+    "comment_include_replies": true
   },
   "news": {
     "label": "News",
@@ -165,6 +190,11 @@
     "comment_last_smoke_test_at": null,
     "comment_route": null,
     "comment_input_field": null,
-    "comment_output_mapping": {}
+    "comment_output_mapping": {},
+    "comment_enabled": false,
+    "comment_price_per_1000_hint": null,
+    "comment_max_per_parent": 40,
+    "comment_max_parents": 12,
+    "comment_include_replies": true
   }
 }

@@ -915,7 +915,7 @@ replace_once(
 #     existing /api/sources PATCH endpoint. No secret is exposed client-side.
 # ---------------------------------------------------------------------------
 main_anchor = '''    html=html.replace("</body>",panel+"</body>") if "</body>" in html else html+panel\n    return HTMLResponse(html)\n'''
-comment_panel = r'''    comment_panel = r'''<style>
+comment_panel = r"""    comment_panel = r'''<style>
 #commentActorSettings{position:fixed;left:18px;bottom:18px;z-index:99998;width:min(440px,calc(100vw - 36px));background:#fff;border:1px solid #d8d5cf;border-radius:14px;box-shadow:0 14px 45px rgba(0,0,0,.14);font-family:Inter,Arial,sans-serif;color:#181818}
 #commentActorSettings summary{cursor:pointer;padding:12px 14px;font-weight:750;font-size:13px}
 #commentActorSettings .ca-body{padding:0 14px 14px;font-size:12px;max-height:55vh;overflow:auto}
@@ -931,7 +931,7 @@ load();
 </script>'''
     html=html.replace("</body>",panel+comment_panel+"</body>") if "</body>" in html else html+panel+comment_panel
     return HTMLResponse(html)
-'''
+"""
 replace_once("app/main.py", main_anchor, comment_panel)
 
 

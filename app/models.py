@@ -134,6 +134,14 @@ class SourceConfigUpdate(BaseModel):
     locked: bool | None = None
     enabled: bool | None = None
     price_per_1000_hint: float | None = Field(default=None, ge=0, le=10000)
+    # Comment/reply collection is a second evidence layer, independently switchable
+    # from the primary discovery Actor. Enabling remains fail-closed until the
+    # configured comment route has passed the explicit paid live smoke acceptance.
+    comment_enabled: bool | None = None
+    comment_price_per_1000_hint: float | None = Field(default=None, ge=0, le=10000)
+    comment_max_per_parent: int | None = Field(default=None, ge=1, le=1000)
+    comment_max_parents: int | None = Field(default=None, ge=1, le=100)
+    comment_include_replies: bool | None = None
 
 
 class ReviewDecision(BaseModel):

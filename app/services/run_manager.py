@@ -269,7 +269,8 @@ class RunManager:
             # and the requested *trusted/analyzable* target.  It may diversify a
             # dominant context and, when Comments is ON, deepen into direct replies.
             # Every adaptive Actor call remains inside the existing run budget.
-            if int(report.get("trusted_sample_shortfall", 0) or 0) > 0 and plan.get("search_strategy_version") in {"smart-collection-v2", "master30-search-v1"}:
+            needs_adaptive_layer = int(report.get("trusted_sample_shortfall", 0) or 0) > 0 or bool(plan.get("comments_requested"))
+            if needs_adaptive_layer and plan.get("search_strategy_version") in {"smart-collection-v2", "master30-search-v1"}:
                 adaptive_status = self.store.read_status(run_id)
                 adaptive_status.update({
                     "status": "running",

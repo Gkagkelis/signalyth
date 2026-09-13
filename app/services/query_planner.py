@@ -553,9 +553,16 @@ def build_collection_plan(draft: AnalysisDraft) -> CollectionPlan:
     has_unknown=any(v is None for v in estimates.values()); known_total=sum(v or 0 for v in estimates.values())
     budget_check="unknown" if has_unknown else ("within_budget" if known_total<=draft.max_budget_usd else "estimate_over_budget")
     # Allocate the user's acquisition budget across sources. Source-specific pricing is enforced by Apify's charge cap plus the global guard.
+    live_comment_sources = [
+        s for s in selected
+        if draft.comments
+        and bool(registry[s].get("comment_enabled", False))
+        and registry[s].get("comment_deepening_status") == "verified"
+    ]
+    primary_budget = float(draft.max_budget_usd) * (0.75 if live_comment_sources else 1.0)
     if selected:
         weights={s:max(0.05,float(estimates[s] or 0.05)) for s in selected}; den=sum(weights.values())
-        source_budgets={s:float(draft.max_budget_usd)*weights[s]/den for s in selected}
+        source_budgets={s:primary_budget*weights[s]/den for s in selected}
     else: source_budgets={}
     plans=[make_source_plan(s,targets[s],draft,queries,registry,source_budgets[s]) for s in selected]
     preview={p.source:p.query_preview for p in plans}
