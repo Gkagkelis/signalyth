@@ -84,35 +84,7 @@ async def _fresh_ui_after_deploys(request, call_next):
 def home(request: Request):
     html=(BASE_DIR / "app" / "templates" / "index.html").read_text(encoding="utf-8")
     panel='<style>\n#master30SearchPanel{position:fixed;right:18px;bottom:18px;z-index:99999;width:min(430px,calc(100vw - 36px));background:#fff;border:1px solid #d8d5cf;border-radius:14px;box-shadow:0 14px 45px rgba(0,0,0,.16);font-family:Inter,Arial,sans-serif;color:#181818}\n#master30SearchPanel summary{cursor:pointer;padding:12px 14px;font-weight:700;font-size:13px}#master30SearchPanel .m30body{padding:0 14px 14px;font-size:12px}#master30SearchPanel select,#master30SearchPanel input{width:100%;box-sizing:border-box;margin:5px 0 9px;padding:8px;border:1px solid #cbc7c0;border-radius:8px;background:#fff}#m30preview{max-height:190px;overflow:auto;background:#f7f5f0;padding:8px;border-radius:8px;white-space:pre-wrap;font-family:ui-monospace,monospace;font-size:10px}\n</style><details id="master30SearchPanel"><summary>Search Strategy & Query Preview</summary><div class="m30body"><label>Research Scope Mode</label><select id="m30strategy"><option value="balanced_smart">Balanced Smart</option><option value="topic_first">Topic-first</option><option value="context_first">Context-first</option></select><label>Required Context (comma separated)</label><input id="m30required" placeholder="π.χ. ΔΕΘ"><label>Aliases (comma separated)</label><input id="m30aliases" placeholder="π.χ. Tsipras"><label>Watch only (comma separated)</label><input id="m30watch" placeholder="θέματα προς μέτρηση, όχι υποχρεωτικό φίλτρο"><div style="margin:5px 0 6px;color:#67635d">Τα queries είναι routes αναζήτησης, όχι quotas. Ο στόχος παραμένει το τελικό analyzable sample ανά πηγή.</div><div id="m30preview">Το Query Preview θα εμφανιστεί μόλις γίνει planning/run.</div></div></details><script>\n(()=>{const originalFetch=window.fetch.bind(window);const split=id=>(document.getElementById(id)?.value||\'\').split(\',\').map(x=>x.trim()).filter(Boolean);const rolePayload=()=>{const roles={};split(\'m30required\').forEach(x=>roles[x]=\'required_context\');split(\'m30aliases\').forEach(x=>roles[x]=\'alias\');split(\'m30watch\').forEach(x=>roles[x]=\'watch\');return roles};window.fetch=async function(input,init){let url=typeof input===\'string\'?input:(input&&input.url)||\'\';let next=init?{...init}:{};if(next.body&&typeof next.body===\'string\'&&next.method&&String(next.method).toUpperCase()===\'POST\'&&(url.includes(\'/api/plan\')||url.match(/\\/api\\/runs(?:\\?|$)/))){try{const body=JSON.parse(next.body);body.search_strategy=document.getElementById(\'m30strategy\')?.value||\'balanced_smart\';body.keyword_roles={...(body.keyword_roles||{}),...rolePayload()};body.keywords=Array.isArray(body.keywords)?body.keywords:[];for(const x of [...split(\'m30required\'),...split(\'m30aliases\'),...split(\'m30watch\')])if(!body.keywords.includes(x))body.keywords.push(x);next.body=JSON.stringify(body)}catch(e){}}\nconst resp=await originalFetch(input,next);if(url.includes(\'/api/plan\')&&resp.ok){try{const clone=resp.clone();const data=await clone.json();const q=data.query_preview||{};document.getElementById(\'m30preview\').textContent=Object.entries(q).map(([s,rows])=>s.toUpperCase()+\':\\n\'+(rows||[]).map(r=>`• [${r.route}] ${r.query}`).join(\'\\n\')).join(\'\\n\\n\')||\'Δεν δημιουργήθηκαν queries.\'}catch(e){}}return resp};})();\n</script>'
-    comment_panel = r'''<style>
-.comment-actor-inline{grid-column:1/-1;margin-top:2px;padding:10px 12px;border:1px solid rgba(23,23,22,.08);border-radius:11px;background:#f8f7f4;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
-.comment-actor-inline .cai-main{min-width:220px;flex:1}.comment-actor-inline .cai-title{font-size:10px;font-weight:750}.comment-actor-inline .cai-meta{font-size:9px;color:#7b776f;margin-top:3px;overflow-wrap:anywhere}.comment-actor-inline .cai-controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:9px}.comment-actor-inline input[type=number]{width:62px;padding:5px;border:1px solid rgba(23,23,22,.11);border-radius:8px;background:#fff}.comment-actor-inline .cai-state{font-size:9px;font-weight:750}.comment-actor-inline .cai-warn{color:#9a5c18}.comment-actor-inline input:disabled{opacity:.45}
-</style><script>
-(()=>{
-const commentSources=new Set(['x','tiktok','instagram','facebook']);
-const escComment=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-async function patchCommentSource(source,payload){const r=await fetch(`/api/sources/${source}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});let data={};try{data=await r.json()}catch(_){ }if(!r.ok)throw new Error(data.detail||'Could not update comment Actor setting');return data}
-async function decorateCommentActors(){
-  const host=document.getElementById('view-sources');if(!host)return;
-  let reg={};try{const r=await fetch('/api/sources');if(!r.ok)return;reg=await r.json()}catch(_){return}
-  host.querySelectorAll('[data-edit-source]').forEach(btn=>{
-    const source=btn.dataset.editSource;if(!commentSources.has(source))return;
-    const row=btn.closest('.actor');if(!row)return;
-    const c=reg[source]||{};const state=String(c.comment_deepening_status||'unverified');const verified=state==='verified';const ready=state==='configured'||verified;const enabled=!!c.comment_enabled;const max=Number(c.comment_max_per_parent||40);const actor=c.comment_actor_id||'No comment Actor configured';
-    let box=row.querySelector('.comment-actor-inline');if(!box){box=document.createElement('div');box.className='comment-actor-inline';row.appendChild(box)}
-    const sig=[actor,state,enabled,max].join('|');if(box.dataset.sig===sig)return;box.dataset.sig=sig;
-    const stateLabel=verified?(enabled?'LIVE CONFIRMED · ON':'LIVE CONFIRMED · OFF'):(ready?(enabled?'READY · ON':'READY · OFF'):'UNAVAILABLE');
-    box.innerHTML=`<div class="cai-main"><div class="cai-title">Comments / replies Actor</div><div class="cai-meta">${escComment(actor)}</div></div><div class="cai-controls"><span class="cai-state ${ready?'':'cai-warn'}">${stateLabel}</span><label><input type="checkbox" data-comment-toggle="${source}" ${enabled?'checked':''} ${ready?'':'disabled'}> Include comments</label><label>max / parent <input type="number" min="1" max="1000" value="${max}" data-comment-max="${source}"></label></div>`;
-    const toggle=box.querySelector('[data-comment-toggle]');if(toggle)toggle.onchange=async()=>{const wanted=toggle.checked;toggle.disabled=true;try{await patchCommentSource(source,{comment_enabled:wanted});box.dataset.sig='';await decorateCommentActors()}catch(e){toggle.checked=!wanted;alert(e.message)}finally{if(ready)toggle.disabled=false}};
-    const maxInput=box.querySelector('[data-comment-max]');if(maxInput)maxInput.onchange=async()=>{const value=Math.max(1,Math.min(1000,Number(maxInput.value||40)));try{await patchCommentSource(source,{comment_max_per_parent:value});box.dataset.sig='';await decorateCommentActors()}catch(e){alert(e.message)}};
-  });
-}
-let running=false;const schedule=()=>{if(running)return;running=true;setTimeout(()=>Promise.resolve(decorateCommentActors()).finally(()=>{running=false}),0)};
-const sourceHost=document.getElementById('view-sources');if(sourceHost)new MutationObserver(schedule).observe(sourceHost,{childList:true,subtree:true});
-setTimeout(decorateCommentActors,0);
-})();
-</script>'''
-    html=html.replace("</body>",panel+comment_panel+"</body>") if "</body>" in html else html+panel+comment_panel
+    html=html.replace("</body>",panel+"</body>") if "</body>" in html else html+panel
     return HTMLResponse(html)
 
 
@@ -145,8 +117,24 @@ def sources():
 
 @app.patch("/api/sources/{source}")
 def patch_source(source: str, update: SourceConfigUpdate):
+    changes = update.model_dump(exclude_none=True)
+    # Comments can only be switched on for a source whose comment route has
+    # actually been smoke-tested, and never for sources without one.
+    if changes.get("comments_enabled") is True:
+        registry = public_registry()
+        if source not in registry:
+            raise HTTPException(status_code=404, detail="Unknown source")
+        cap = (source_capabilities(source).get("comment_deepening") or {})
+        if cap.get("mode") == "not_applicable":
+            raise HTTPException(status_code=409, detail=f"Comment collection is not applicable to {source}.")
+        verified = str(registry[source].get("comment_deepening_status") or "") == "verified"
+        if not verified and not changes.get("comment_actor_id"):
+            raise HTTPException(
+                status_code=409,
+                detail="Verify the comments route with a paid smoke test before enabling comment collection.",
+            )
     try:
-        return update_source(source, update.model_dump(exclude_none=True))
+        return update_source(source, changes)
     except KeyError:
         raise HTTPException(status_code=404, detail="Unknown source")
     except PermissionError as exc:

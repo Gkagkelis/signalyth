@@ -34,7 +34,11 @@ class Settings(BaseSettings):
     # independent in fixed per-source plans; they share ONE atomic budget guard
     # and one locked status writer. Automatic elastic rebalancing always runs
     # sequentially regardless of this value. 1 = classic sequential behavior.
-    signalyth_collection_parallel_sources: int = 3 if RUNNING_ON_VERCEL else 1
+    # Speed pack A: on the deployed platform every selected source collects at
+    # the same time (the shared budget guard is thread-safe, so parallel sources
+    # can never overspend). Local/dev keeps the classic sequential behaviour the
+    # cancellation contract and tests are written against.
+    signalyth_collection_parallel_sources: int = 4 if RUNNING_ON_VERCEL else 1
     signalyth_dry_run: bool = True
     signalyth_max_parallel_runs: int = 2
     openai_api_key: str = ""
@@ -45,7 +49,11 @@ class Settings(BaseSettings):
     # Number of concurrent OpenAI batch requests. All parallel batches draw from
     # ONE shared, lock-protected budget (atomic reserve/settle), so parallelism
     # can never jointly exceed the hard AI cost guard. 1 = sequential.
-    signalyth_ai_parallel_requests: int = 3
+    # Speed pack B: concurrent OpenAI batch requests. 8 is safe for standard
+    # OpenAI tiers; raise via env (SIGNALYTH_AI_PARALLEL_REQUESTS) on higher
+    # tiers, lower it if the account ever rate-limits. Batches remain
+    # independently cached, so nothing is ever analysed or billed twice.
+    signalyth_ai_parallel_requests: int = 8
     signalyth_ai_max_text_chars: int = 6000
     signalyth_ai_max_output_tokens: int = 7000
     signalyth_ai_max_cost_usd: float = 3.0

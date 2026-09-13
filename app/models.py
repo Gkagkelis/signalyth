@@ -134,14 +134,8 @@ class SourceConfigUpdate(BaseModel):
     locked: bool | None = None
     enabled: bool | None = None
     price_per_1000_hint: float | None = Field(default=None, ge=0, le=10000)
-    # Comment/reply collection is a second evidence layer, independently switchable
-    # from the primary discovery Actor. Curated production contracts may be
-    # enabled directly; the per-run Comments switch remains the paid opt-in.
-    comment_enabled: bool | None = None
-    comment_price_per_1000_hint: float | None = Field(default=None, ge=0, le=10000)
-    comment_max_per_parent: int | None = Field(default=None, ge=1, le=1000)
-    comment_max_parents: int | None = Field(default=None, ge=1, le=100)
-    comment_include_replies: bool | None = None
+    comments_enabled: bool | None = None
+    comment_actor_id: str | None = Field(default=None, min_length=3, max_length=200)
 
 
 class ReviewDecision(BaseModel):
