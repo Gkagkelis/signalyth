@@ -1,0 +1,97 @@
+name: Comment deepening upgrade
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feat/comment-deepening-v1
+    paths:
+      - 'scripts/comment_deepening_upgrade.py'
+      - '.github/workflows/comment-deepening-upgrade.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  upgrade-and-test:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SIGNALYTH_DRY_RUN: 'true'
+      SIGNALYTH_AI_ENABLED: 'false'
+      APIFY_TOKEN: ''
+      OPENAI_API_KEY: ''
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/comment-deepening-v1
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Repair generator string delimiter
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('scripts/comment_deepening_upgrade.py')
+          text = p.read_text(encoding='utf-8')
+          text = text.replace(
+              "comment_panel = r'''    comment_panel = r'''<style>",
+              "comment_panel = r\"\"\"    comment_panel = r'''<style>",
+              1,
+          )
+          text = text.replace(
+              "    return HTMLResponse(html)\n'''\nreplace_once(\"app/main.py\", main_anchor, comment_panel)",
+              "    return HTMLResponse(html)\n\"\"\"\nreplace_once(\"app/main.py\", main_anchor, comment_panel)",
+              1,
+          )
+          p.write_text(text, encoding='utf-8')
+          PY
+          python -m py_compile scripts/comment_deepening_upgrade.py
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Apply comment deepening upgrade
+        run: python scripts/comment_deepening_upgrade.py
+
+      - name: Compile application and tests
+        run: python -m compileall -q app tests scripts/comment_deepening_upgrade.py
+
+      - name: Comment deepening unit tests
+        run: pytest -q tests/test_comment_deepening.py --tb=short
+
+      - name: Full offline regression suite
+        run: pytest -q --tb=short
+
+      - name: Commit tested implementation to feature branch
+        run: |
+          git config user.name 'SIGNALYTH CI'
+          git config user.email 'signalyth-ci@users.noreply.github.com'
+          git add \
+            scripts/comment_deepening_upgrade.py \
+            app/models.py \
+            app/registry.py \
+            app/services/source_capabilities.py \
+            app/services/comment_deepening.py \
+            app/services/relevance_expansion.py \
+            app/services/run_manager.py \
+            app/services/query_planner.py \
+            app/services/semantic_refill.py \
+            app/main.py \
+            config/source_registry.json \
+            tests/test_comment_deepening.py
+          if git diff --cached --quiet; then
+            echo 'No generated changes to commit.'
+            exit 0
+          fi
+          git commit -m 'Implement verified comment evidence layer'
+          git pull --rebase --autostash origin feat/comment-deepening-v1
+          git push origin HEAD:feat/comment-deepening-v1
