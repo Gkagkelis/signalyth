@@ -242,7 +242,7 @@ def commit_comment_route_verification(
         "comment_route": route,
         "comment_input_field": input_field,
         "comment_output_mapping": deepcopy(output_mapping or {}),
-        "comment_enabled": True,
+        "comment_enabled": False,
     })
     _write_json_atomic(REGISTRY_PATH, data)
     return deepcopy(current)
