@@ -33,7 +33,7 @@ from app.services.storage import RunStore
 from app.services.visualizations import load_presentation_visual_pack, load_visualization_summary
 from app.services.report_synthesis import build_report_synthesis, final_consistency_qa
 
-PRESENTATION_RULESET_VERSION = "1.9.0"
+PRESENTATION_RULESET_VERSION = "2.0.0"
 PRESENTATION_METHODOLOGY_VERSION = "signalyth-presentation-intelligence-v1.4"
 PRESENTATION_CONTRACT_VERSION = "signalyth-presentation-pack-v1.4"
 
@@ -908,12 +908,33 @@ def _add_rule(slide, x, y, w, color=STONE_DARK, width=1.0):
     return line
 
 
-def _add_header(slide, title, section_no=None):
+def _add_header(slide, title, section_no=None, accent=None):
+    """accent=(tail_text, colour) paints a trailing word of the title — used by
+    the emotion anatomy slides so the emotion is named in its own colour."""
     if section_no is not None:
         _add_text(slide, f"{section_no:02d}", 0.58, 0.45, 0.5, 0.28, size=9, color=MUTED, bold=True)
     clean = _clean_text(title, 250)
     size = 25 if len(clean) <= 54 else 20 if len(clean) <= 82 else 17
-    _add_text(slide, clean, 1.15, 0.30, 11.4, 0.82, size=size, bold=True, valign=MSO_ANCHOR.MIDDLE)
+    tail, tail_color = (accent or (None, None))
+    if tail and tail_color and clean.endswith(tail) and len(clean) > len(tail):
+        parts = [(clean[: -len(tail)], INK), (tail, tail_color)]
+        box = slide.shapes.add_textbox(Inches(1.15), Inches(0.30), Inches(11.4), Inches(0.82))
+        tf = box.text_frame; tf.clear(); tf.word_wrap = True
+        tf.vertical_anchor = MSO_ANCHOR.MIDDLE
+        para = tf.paragraphs[0]
+        for text, color in parts:
+            run = para.add_run(); run.text = text
+            try:
+                from pptx.oxml.ns import qn
+                t_el = run._r.find(qn("a:t"))
+                if t_el is not None:
+                    t_el.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+            except Exception:
+                pass
+            run.font.name = FONT; run.font.size = Pt(size); run.font.bold = True
+            run.font.color.rgb = _rgb(color)
+    else:
+        _add_text(slide, clean, 1.15, 0.30, 11.4, 0.82, size=size, bold=True, valign=MSO_ANCHOR.MIDDLE)
     _add_rule(slide, 0.58, 1.15, 12.15)
 
 
@@ -1754,6 +1775,16 @@ _EN_DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", 
 _EN_DAYS_AB = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
 
+def _tint(hex_color: str, amount: float) -> str:
+    """Blend a colour toward white. amount=0 keeps it, 1 makes it white."""
+    try:
+        r, g, b = (int(str(hex_color)[i:i + 2], 16) for i in (0, 2, 4))
+    except Exception:
+        return "F2F2F2"
+    a = max(0.0, min(1.0, amount))
+    return "".join(f"{int(round(c + (255 - c) * a)):02X}" for c in (r, g, b))
+
+
 def _val_color(v) -> str:
     """Value -> hex on the reputation palette. Saturates at 30 (full red) and
     70 (full green) so movement around the 45-55 neutral band stays visible."""
@@ -2392,7 +2423,8 @@ def _emotion_profile_data(visual_pack: dict, lang: str) -> dict | None:
         return None
 
 
-def _fallback_narratives(top: dict | None, emo: dict | None, lang: str, tl: dict | None = None) -> dict:
+def _fallback_narratives(top: dict | None, emo: dict | None, lang: str,
+                         tl: dict | None = None, anatomy: list[dict] | None = None) -> dict:
     """Qualitative fallback: interprets rather than recites numbers, so a deck
     built without AI still reads like analysis."""
     el = lang == "el"
@@ -2421,6 +2453,26 @@ def _fallback_narratives(top: dict | None, emo: dict | None, lang: str, tl: dict
                                    f"υποστήριξη, όχι επανάληψη του ίδιου χρήστη." if el else
                                    f"They come from {voices} distinct voices — {'diffuse' if voices >= len(vals) else 'concentrated'} "
                                    f"support rather than one repeated user.")})
+            neg_vals = [e["score"] for e in ((top or {}).get("negative") or [])]
+            if neg_vals:
+                pa, na = sum(vals) / len(vals), sum(abs(v) for v in neg_vals) / len(neg_vals)
+                weaker = pa < na - 0.02
+                items.append({"lead": "Η ασυμμετρία της έντασης." if el else "The intensity asymmetry.",
+                              "body": ((f"Η υποστήριξη εκφράζεται πιο συγκρατημένα από την κριτική (μ.ο. {pa:+.2f} έναντι −{na:.2f}): "
+                                        f"το θετικό στρατόπεδο επιδοκιμάζει, το αρνητικό στρατεύεται — ανισορροπία που καθορίζει ποιος "
+                                        f"δίνει τον τόνο." if weaker else
+                                        f"Η υποστήριξη εκφράζεται με ένταση ισάξια της κριτικής (μ.ο. {pa:+.2f} έναντι −{na:.2f}): "
+                                        f"υπάρχει στρατευμένο θετικό ρεύμα, όχι απλή επιδοκιμασία.") if el else
+                                       (f"Support is voiced more mildly than the criticism (avg {pa:+.2f} vs −{na:.2f}): approval on one "
+                                        f"side, mobilisation on the other — an imbalance that decides who sets the tone." if weaker else
+                                        f"Support matches the criticism in intensity (avg {pa:+.2f} vs −{na:.2f}): a committed positive "
+                                        f"current, not mere approval."))})
+            else:
+                items.append({"lead": "Η απουσία αντιλόγου." if el else "The absent counter-current.",
+                              "body": ("Δεν καταγράφεται αντίστοιχο σώμα έντονα αρνητικών σχολίων — η υποστήριξη κινείται σε πεδίο "
+                                       "χωρίς οργανωμένη αμφισβήτηση." if el else
+                                       "No comparable body of strongly negative comments is recorded — support moves on ground "
+                                       "without organised contestation.")})
         else:
             items.append({"lead": "Ένταση της απόρριψης." if el else "Intensity of rejection.",
                           "body": (f"{strong} από τα {len(vals)} κορυφαία αρνητικά σχόλια ξεπερνούν το −0.85: πρόκειται για απορριπτικό λόγο "
@@ -2430,6 +2482,12 @@ def _fallback_narratives(top: dict | None, emo: dict | None, lang: str, tl: dict
             items.append({"lead": "Εύρος των φωνών." if el else "Breadth of voices.",
                           "body": (f"Προέρχονται από {voices} διαφορετικές φωνές, άρα η κριτική δεν εξαντλείται σε μεμονωμένο επικριτή." if el else
                                    f"They come from {voices} distinct voices, so the criticism is not confined to a single critic.")})
+            ext = entries[0]
+            items.append({"lead": "Το σημείο αιχμής." if el else "The sharpest point.",
+                          "body": (f"Η κορυφαία ένταση ({ext['score']:+.2f}, {ext['date']}) ορίζει το ταβάνι της κριτικής — αν αυτό το "
+                                   f"αφήγημα μείνει αναπάντητο, γίνεται το σημείο αναφοράς γύρω από το οποίο οργανώνονται τα υπόλοιπα." if el else
+                                   f"The peak intensity ({ext['score']:+.2f}, {ext['date']}) sets the ceiling of the criticism — left "
+                                   f"unanswered, it becomes the reference point around which the rest organises.")})
         out[slot] = items
 
     if emo and emo.get("rows"):
@@ -2444,9 +2502,111 @@ def _fallback_narratives(top: dict | None, emo: dict | None, lang: str, tl: dict
                                f"{'η αρνητική φόρτιση κυριαρχεί καθαρά' if neg > pos_share * 1.5 else 'οι δύο πλευρές συνυπάρχουν'}." if el else
                                f"Negative emotions cover {neg:.1f}% against {pos_share:.1f}% positive — "
                                f"{'negative charge clearly dominates' if neg > pos_share * 1.5 else 'both sides coexist'}.")})
-        out["emotions"] = items
+        # Absence is a finding: name what the near-zero emotions rule out.
+        absent_map_el = {"fear": "ανησυχία", "sadness": "απογοήτευση", "surprise": "αιφνιδιασμός",
+                         "joy": "ενθουσιασμός", "anger": "οργή", "disgust": "οριστική απόρριψη"}
+        absent_map_en = {"fear": "anxiety", "sadness": "disappointment", "surprise": "unsettledness",
+                         "joy": "enthusiasm", "anger": "outrage", "disgust": "final rejection"}
+        present = {r["key"] for r in emo["rows"] if r["share"] >= 3.0}
+        absent = [k for k in ("fear", "sadness", "surprise", "joy", "anger", "disgust") if k not in present]
+        if absent:
+            words = ", ".join((absent_map_el if el else absent_map_en)[k] for k in absent[:3])
+            items.append({"lead": "Τα απόντα συναισθήματα." if el else "The absent emotions.",
+                          "body": (f"Σχεδόν μηδενικά: {words}. Η απουσία τους αποκλείει αντίστοιχες ψυχικές καταστάσεις στο κοινό "
+                                   f"και στενεύει την ερμηνεία — η στάση που καταγράφεται είναι επιλογή, όχι σύγχυση." if el else
+                                   f"Near zero: {words}. Their absence rules out the matching audience states and narrows the "
+                                   f"interpretation — the recorded stance is a choice, not confusion.")})
+        else:
+            items.append({"lead": "Πλήρες φάσμα." if el else "A full spectrum.",
+                          "body": ("Κανένα συναίσθημα δεν απουσιάζει ουσιαστικά — το κοινό δεν έχει καταλήξει σε ενιαία στάση, "
+                                   "και αυτό κρατά το πεδίο ανοιχτό." if el else
+                                   "No emotion is materially absent — the audience has not settled into one stance, which keeps "
+                                   "the field open.")})
+        out["emotions"] = items[:3]
     if tl and tl.get("points"):
         out["timeline"] = [{"lead": h.strip(), "body": b} for h, b in _timeline_narrative(tl, lang)[:3]]
+    for a in (anatomy or []):
+        name = _cat_label(a["key"], lang)
+        items = []
+        pts = a.get("points") or []
+        if len(pts) >= 2:
+            vals = [p_["value"] for p_ in pts]
+            steps = len(vals) - 1
+            rising = sum(1 for i in range(1, len(vals)) if vals[i] > vals[i - 1])
+            floor = min(vals)
+            standing = floor >= max(8.0, a["share"] * 0.5)
+            delta = a.get("delta") or 0.0
+            subj = EMOTION_ARTICLES_EL.get(a["key"], name) if el else name
+            if delta >= 2:
+                lead = "Κλιμάκωση, όχι έκρηξη." if el else "Escalation, not a spike."
+                body = (f"{subj} ανεβαίνει σε {rising} από {steps} βήματα και δεν υποχωρεί ποτέ κάτω από {floor:.0f}%: "
+                        f"δεν εξαρτάται από ένα γεγονός, αυτοτροφοδοτείται." if el else
+                        f"{name} rises in {rising} of {steps} steps and never falls below {floor:.0f}%: it does not "
+                        f"depend on a single event, it self-sustains.")
+            elif delta <= -2:
+                lead = "Βάση που υποχωρεί." if el else "An eroding base."
+                body = (f"{subj} κρατά διαρκή παρουσία πάνω από {floor:.0f}%, αλλά χάνει έδαφος μέσα στην περίοδο — "
+                        f"υπάρχει, δεν επεκτείνεται." if el else
+                        f"{name} keeps a continuous presence above {floor:.0f}% but loses ground over the period — "
+                        f"it persists without expanding.")
+            elif standing:
+                lead = "Καθεστώς, όχι έκρηξη." if el else "A standing condition."
+                body = (f"{subj} δεν πέφτει ποτέ κάτω από {floor:.0f}% και δεν εξαρτάται από μία αφορμή: είναι σταθερή "
+                        f"κατάσταση, όχι στιγμιαία αντίδραση." if el else
+                        f"{name} never falls below {floor:.0f}% and does not hang on a single trigger: it is a settled "
+                        f"state, not a momentary reaction.")
+            else:
+                lead = "Κορύφωση, όχι καθεστώς." if el else "A spike, not a state."
+                body = (f"{subj} συγκεντρώνεται σε συγκεκριμένες στιγμές αντί να διατρέχει την περίοδο — συνδέεται με "
+                        f"αφορμές, όχι με σταθερή στάση." if el else
+                        f"{name} concentrates in specific moments rather than running through the period — it is tied "
+                        f"to triggers, not to a settled stance.")
+            items.append({"lead": lead, "body": body})
+        voices = a.get("voices") or []
+        if voices:
+            items.append({
+                "lead": "Πού στρέφεται." if el else "What it targets.",
+                "body": (f"Οι φωνές υψηλότερης έντασης φτάνουν το {voices[0]['intensity']:.2f}: "
+                         f"{name.lower()} που εκφράζεται ρητά και αιχμηρά, όχι ήπια διάθεση." if el else
+                         f"The highest-intensity voices reach {voices[0]['intensity']:.2f} — not a mild mood but a "
+                         f"sharp, declared position."),
+            })
+        neg_family = {"anger", "disgust", "fear", "sadness"}
+        if a["key"] in neg_family and emo:
+            others = {r["key"]: r["share"] for r in (emo.get("rows") or [])}
+            rest = sum(v for k, v in others.items() if k in neg_family and k != a["key"])
+            items.append({
+                "lead": "Τι δεν έχει γίνει ακόμα." if el else "What it has not become.",
+                "body": (f"Το υπόλοιπο αρνητικό φορτίο μένει στο {rest:.1f}%: μέρος του κοινού εκφράζει ακόμη έντονη "
+                         f"διαφωνία και όχι οριστική απόρριψη — αυτό το περιθώριο είναι το διακύβευμα." if el else
+                         f"The remaining negative charge sits at {rest:.1f}%: part of the audience still expresses "
+                         f"strong disagreement rather than final rejection — that margin is the stake."),
+            })
+        elif emo:
+            neg_total = _safe_float(emo.get("negative_share"))
+            subj2 = EMOTION_ARTICLES_EL.get(a["key"], name) if el else name
+            items.append({
+                "lead": "Πυρήνας, όχι κλίμα." if el else "A core, not a climate.",
+                "body": (f"Με {a['share']:.1f}% απέναντι σε {neg_total:.1f}% αρνητικού φορτίου, {subj2.lower()} λειτουργεί ως "
+                         f"συμπαγής, δεσμευμένος πυρήνας — όχι ως διάχυτο κλίμα. Το διακύβευμα δεν είναι η διεύρυνσή του, "
+                         f"αλλά να μη χάσει την ένταση που τον συγκρατεί." if el else
+                         f"At {a['share']:.1f}% against {neg_total:.1f}% of negative charge, {name.lower()} operates as a "
+                         f"compact, committed core — not a diffuse climate. The stake is not widening it but keeping the "
+                         f"intensity that holds it together."),
+            })
+        # RULE: every anatomy panel carries exactly 3 observations — pad with a
+        # data-grounded structural note if any branch above lacked material.
+        subj3 = EMOTION_ARTICLES_EL.get(a["key"], name) if el else name
+        while len(items) < 3:
+            items.append({
+                "lead": "Η θέση στο σύνολο." if el else "Its place in the whole.",
+                "body": (f"{subj3} κατέχει το {a['share']:.1f}% της συναισθηματικά φορτισμένης συζήτησης "
+                         f"(#{a['rank']} στην κατάταξη) — μέγεθος που το καθιστά δομικό στοιχείο της εικόνας, "
+                         f"όχι παρασιτικό θόρυβο." if el else
+                         f"{name} holds {a['share']:.1f}% of the emotionally charged conversation (ranked #{a['rank']}) — "
+                         f"a weight that makes it a structural element of the picture, not incidental noise."),
+            })
+        out[f"anatomy_{a['key']}"] = items[:3]
     return out
 
 
@@ -2491,12 +2651,17 @@ def _run_profile_block(plan: dict, visual_pack: dict, top: dict | None,
 
 def _build_analyst_narratives(folder: Path, plan: dict, lang: str,
                               top: dict | None, emo: dict | None,
-                              tl: dict | None = None, visual_pack: dict | None = None) -> dict:
+                              tl: dict | None = None, visual_pack: dict | None = None,
+                              anatomy: list[dict] | None = None) -> dict:
     """One AI pass writes every qualitative panel of the deck, in the persona
     the run was configured for. The model receives the WHOLE run profile and a
     question scaffold per panel, so each narrative interprets, cross-references
     and reads absences instead of reciting the numbers already on the slide."""
-    narratives = {"provider": "deterministic", "slots": _fallback_narratives(top, emo, lang, tl)}
+    anatomy = anatomy or []
+    # One extra slot per dominant emotion, e.g. "anatomy_anger".
+    slot_names = list(NARRATIVE_SLOTS) + [f"anatomy_{a['key']}" for a in anatomy]
+    narratives = {"provider": "deterministic",
+                  "slots": _fallback_narratives(top, emo, lang, tl, anatomy)}
     try:
         from app.config import settings
         if not (settings.signalyth_ai_enabled and settings.openai_api_key):
@@ -2517,6 +2682,16 @@ def _build_analyst_narratives(folder: Path, plan: dict, lang: str,
                 "top_positive_comments": pack((top or {}).get("positive")),
                 "top_negative_comments": pack((top or {}).get("negative")),
             }
+            if anatomy:
+                payload["emotion_deep_dives"] = [{
+                    "emotion": a["key"], "share_percent": a["share"], "rank": a["rank"],
+                    "daily_share_series": [{"when": p_["full"], "percent": p_["value"]} for p_ in (a.get("points") or [])],
+                    "change_over_period": a.get("delta"),
+                    "highest_intensity_voices": [{"voice": _pseudo_label(v.get("author_idx") or (i + 1), lang),
+                                                  "date": v["date"], "intensity": v["intensity"],
+                                                  "text": v["text"][:400]}
+                                                 for i, v in enumerate(a.get("voices") or [])],
+                } for a in anatomy]
 
             if political:
                 persona = ("a senior political communications analyst. You read public discourse the way a campaign "
@@ -2562,17 +2737,22 @@ def _build_analyst_narratives(folder: Path, plan: dict, lang: str,
                 "(durability test), and what strength is actually usable.\n"
                 "  top_negative: the dominant counter-narrative, the ground the critics avoid, and the single "
                 "highest-escalation point.\n"
-                "  emotions: what the mix means psychologically, including the meaning of near-zero emotions.")
+                "  emotions: what the mix means psychologically, including the meaning of near-zero emotions.\n"
+                "  anatomy_<emotion> (one slot per entry in emotion_deep_dives, e.g. anatomy_anger): dissect THAT "
+                "emotion alone — is it a standing condition or a spike, what its trajectory says about whether it is "
+                "self-sustaining or event-driven, what the highest-intensity voices reveal about its true object, and "
+                "what it has NOT yet become (e.g. anger not yet hardened into disgust) since that margin is the stake "
+                "of the next period.")
 
             item = {"type": "object", "additionalProperties": False, "required": ["lead", "body"],
                     "properties": {"lead": {"type": "string"}, "body": {"type": "string"}}}
-            schema = {"type": "object", "additionalProperties": False, "required": list(NARRATIVE_SLOTS),
-                      "properties": {k: {"type": "array", "maxItems": 3, "items": item} for k in NARRATIVE_SLOTS}}
+            schema = {"type": "object", "additionalProperties": False, "required": slot_names,
+                      "properties": {k: {"type": "array", "maxItems": 3, "items": item} for k in slot_names}}
             response = client.responses.create(
                 model=settings.signalyth_ai_reasoning_model, store=False,
                 instructions=(
                     f"You are {persona}. Write in {language}.\n\n{doctrine}\n\n{scaffold}\n\n"
-                    "FORM: `lead` = bold 2-6 word heading ending with a period, stating the finding (e.g. "
+                    "FORM: EXACTLY 3 observations per slot — never fewer; a slot may be [] only when its material is empty. `lead` = bold 2-6 word heading ending with a period, stating the finding (e.g. "
                     "'Η μορφολογία της πτώσης.' not 'Παρατήρηση 1.'). `body` = 1-3 dense sentences, max ~340 "
                     "characters, in the analytical register of a serious client report.\n"
                     "HARD RULES: interpret, never recite — a number may appear only as evidence inside an "
@@ -2588,7 +2768,7 @@ def _build_analyst_narratives(folder: Path, plan: dict, lang: str,
                 max_output_tokens=int(getattr(settings, "signalyth_ai_max_output_tokens", 7000)))
             decoded = json.loads(response.output_text or "{}")
             cleaned = {}
-            for slot in NARRATIVE_SLOTS:
+            for slot in slot_names:
                 items = []
                 for it in (decoded.get(slot) or [])[:3]:
                     lead = _clean_text((it or {}).get("lead"), 70)
@@ -2597,6 +2777,9 @@ def _build_analyst_narratives(folder: Path, plan: dict, lang: str,
                         items.append({"lead": lead if lead.endswith((".", ":", "!", ";")) else lead + ".", "body": body})
                 if items:
                     cleaned[slot] = items
+            # RULE: a panel is complete only with 3 observations; short AI slots
+            # keep their deterministic fallback instead.
+            cleaned = {k: v for k, v in cleaned.items() if len(v) >= 3 or not narratives["slots"].get(k)}
             if cleaned:
                 narratives["slots"].update(cleaned)
                 narratives["provider"] = "openai"
@@ -2709,6 +2892,285 @@ def _render_emotion_profile(slide, emo: dict, narrative: list[dict], lang: str, 
         _add_text(slide, label, x + 0.06, ky + 0.52, kw_ - 0.12, 0.3, size=8, color=MUTED, align=PP_ALIGN.CENTER)
 
 
+# ---------- Emotion anatomy (slide 7+) ----------
+# One deep-dive slide per DOMINANT non-neutral emotion (share >= threshold,
+# capped), because a trend line drawn from a handful of mentions is noise
+# dressed as analysis. Everything on the slide comes from the run: the daily
+# share series the intelligence layer already computes, the comments scoring
+# highest on that emotion's intensity, and an AI narrative slot of its own.
+
+EMOTION_ARTICLES_EL = {"anger": "Ο θυμός", "disgust": "Η αποστροφή", "joy": "Η χαρά",
+                       "fear": "Ο φόβος", "sadness": "Η λύπη", "surprise": "Η έκπληξη",
+                       "neutral": "Το ουδέτερο"}
+EMOTION_ANATOMY_MIN_SHARE = 12.0   # same materiality bar the methodology uses
+EMOTION_ANATOMY_MAX_SLIDES = 3
+
+
+def _emotion_anatomy_data(folder: Path, visual_pack: dict, plan: dict,
+                          emo: dict | None, lang: str) -> list[dict]:
+    """Build one anatomy payload per dominant emotion. Empty list when no
+    emotion clears the materiality bar."""
+    try:
+        if not emo or not emo.get("rows"):
+            return []
+        dominant = [r for r in emo["rows"]
+                    if r["key"] != "neutral" and r["share"] >= EMOTION_ANATOMY_MIN_SHARE][:EMOTION_ANATOMY_MAX_SLIDES]
+        if not dominant:
+            return []
+
+        charts = _chart_map(visual_pack)
+        trend_rows = ((charts.get("time_trends") or {}).get("data") or {}).get("rows") or []
+
+        records = None
+        for rel in (("intelligence", "records.json"), ("analysis", "analysis-ready.json")):
+            try:
+                data = RunStore.read(folder / rel[0] / rel[1], None)
+            except Exception:
+                data = None
+            if isinstance(data, list) and data:
+                records = data
+                break
+        owned = {_norm_handle(x) for x in (plan.get("owned_accounts") or [])}
+
+        def is_owned(r: dict) -> bool:
+            if str(((r.get("cleaning") or {}).get("origin_class")) or "") == "brand_owned":
+                return True
+            return _norm_handle(r.get("author")) in owned if r.get("author") else False
+
+        out = []
+        for row in dominant:
+            key = row["key"]
+
+            # Daily share series for this emotion (already computed upstream).
+            points = []
+            for tr in trend_rows:
+                if not isinstance(tr, dict):
+                    continue
+                share = tr.get(f"{key}_opinion_weight_share")
+                if share is None:
+                    continue
+                dt = _parse_dt(str(tr.get("date"))[:10] + "T00:00:00+00:00")
+                if dt is None:
+                    continue
+                ab, full = _tl_day_labels(dt, lang)
+                points.append({"label": ab, "full": full, "value": round(_safe_float(share) * 100.0, 1)})
+            if len(points) < 2:
+                points = []
+
+            # Voices scoring highest on THIS emotion's intensity.
+            voices = []
+            for r in records or []:
+                if not isinstance(r, dict) or is_owned(r):
+                    continue
+                ai = r.get("ai_analysis") or {}
+                if _cat_key(ai.get("primary_emotion")) != key:
+                    continue
+                text = _clean_text(r.get("text"), 2000)
+                if len(text) < 5:
+                    continue
+                dt = _parse_dt(r.get("date"))
+                voices.append({
+                    "author": str(r.get("author") or "—"),
+                    "author_idx": 0,
+                    "raw_author": _norm_handle(r.get("author")),
+                    "date": f"{dt.day}/{dt.month}" if dt else "",
+                    "intensity": round(_safe_float(ai.get("emotion_intensity"), 0.0), 2),
+                    "confidence": round(_safe_float(ai.get("emotion_confidence"), 0.0), 2),
+                    "text": text,
+                })
+            voices.sort(key=lambda v: (-v["intensity"], -v["confidence"]))
+            voices = voices[:3]
+
+            vals = [p["value"] for p in points]
+            out.append({
+                "key": key,
+                "share": row["share"],
+                "records": row.get("records"),
+                "rank": emo["rows"].index(row) + 1,
+                "points": points,
+                "i_peak": (max(range(len(vals)), key=lambda i: vals[i]) if vals else None),
+                "delta": (round(vals[-1] - vals[0], 1) if len(vals) >= 2 else None),
+                "voices": voices,
+            })
+        return out
+    except Exception:
+        return []
+
+
+def _render_emotion_anatomy(slide, item: dict, narrative: list[dict], lang: str,
+                            ctx: dict, policy: dict) -> None:
+    el = lang == "el"
+    key = item["key"]
+    accent = EMOTION_COLORS.get(key, NEUTRAL)
+    soft = _tint(accent, 0.88)
+    name = _cat_label(key, lang)
+    anonymize = bool(policy.get("anonymize"))
+
+    # Header: emotion named in its own colour.
+    client = _clean_text(ctx.get("client") or "", 60)
+    topic = _clean_text(ctx.get("topic") or "", 60)
+    who = " · ".join(x for x in (client, topic) if x)
+    rank_label = (("κυρίαρχο συναίσθημα" if item["rank"] == 1 else f"#{item['rank']} συναίσθημα") if el
+                  else ("leading emotion" if item["rank"] == 1 else f"#{item['rank']} emotion"))
+    bits = [f"{item['share']:.1f}% " + ("της συζήτησης" if el else "of the conversation")]
+    if item.get("records"):
+        bits.append(f"{item['records']} " + ("αναφορές" if el else "mentions"))
+    bits.append(rank_label)
+    if who:
+        _add_text(slide, who, 6.35, 0.36, 6.38, 0.28, size=12, color=INK, bold=True, align=PP_ALIGN.RIGHT)
+    _add_text(slide, " · ".join(bits), 6.35, 0.66, 6.38, 0.24, size=9.5, color=MUTED, align=PP_ALIGN.RIGHT)
+
+    # --- Top left: this emotion's share over time ---
+    cx, cy, cw, chh = 0.58, 1.42, 8.10, 2.78
+    _dash_card(slide, cx, cy, cw, chh)
+    header = (f"ΜΕΡΙΔΙΟ · {_upper_label(name)} ΣΤΗ ΣΥΖΗΤΗΣΗ ΑΝΑ ΗΜΕΡΑ" if el
+              else f"SHARE OF {_upper_label(name)} IN THE CONVERSATION · PER DAY")
+    _add_text(slide, header, cx + 0.28, cy + 0.18, cw - 0.56, 0.24, size=9.5, color=MUTED, bold=True, font=LABEL_FONT)
+
+    pts = item.get("points") or []
+    if len(pts) >= 2:
+        n = len(pts)
+        px0, px1 = cx + 0.66, cx + cw - 0.30
+        py_bot, py_top = cy + 2.26, cy + 0.72
+        vmax = max(20.0, math.ceil(max(p["value"] for p in pts) / 20.0) * 20.0)
+        X = lambda i: px0 + (px1 - px0) * i / (n - 1)
+        Y = lambda v: py_bot - (max(0.0, min(vmax, v)) / vmax) * (py_bot - py_top)
+        g = 0
+        while g <= vmax:
+            gy = Y(g)
+            _add_rule(slide, px0, gy, px1 - px0, color=DASH_TRACK, width=0.6)
+            _add_text(slide, f"{g:.0f}%", cx + 0.10, gy - 0.09, 0.5, 0.18, size=7, color=NEUTRAL, align=PP_ALIGN.RIGHT)
+            g += vmax / 3.0
+        # Area fill under the line
+        area = [(X(0), py_bot)] + [(X(i), Y(p["value"])) for i, p in enumerate(pts)] + [(X(n - 1), py_bot)]
+        unit = 100000
+        ip = [(int(round(x * unit)), int(round(y * unit))) for x, y in area]
+        try:
+            fb = slide.shapes.build_freeform(ip[0][0], ip[0][1], scale=914400.0 / unit)
+            fb.add_line_segments(ip[1:], close=True)
+            shp = fb.convert_to_shape()
+            shp.fill.solid(); shp.fill.fore_color.rgb = _rgb(_tint(accent, 0.90))
+            shp.line.fill.background(); shp.shadow.inherit = False
+        except Exception:
+            pass
+        from pptx.enum.shapes import MSO_CONNECTOR
+        for i in range(n - 1):
+            conn = slide.shapes.add_connector(MSO_CONNECTOR.STRAIGHT, Inches(X(i)), Inches(Y(pts[i]["value"])),
+                                              Inches(X(i + 1)), Inches(Y(pts[i + 1]["value"])))
+            conn.line.color.rgb = _rgb(accent); conn.line.width = Pt(3.0); conn.shadow.inherit = False
+        labelled = set(range(n)) if n <= 12 else (set(range(0, n, max(1, (n + 9) // 10))) | {0, n - 1, item["i_peak"]})
+        for i, p in enumerate(pts):
+            x, y = X(i), Y(p["value"])
+            if i == item["i_peak"]:
+                ring = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(x - 0.135), Inches(y - 0.135), Inches(0.27), Inches(0.27))
+                ring.fill.background(); ring.line.color.rgb = _rgb(accent); ring.line.width = Pt(1.4)
+                ring.shadow.inherit = False
+            dot = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(x - 0.06), Inches(y - 0.06), Inches(0.12), Inches(0.12))
+            dot.fill.solid(); dot.fill.fore_color.rgb = _rgb(accent)
+            dot.line.color.rgb = _rgb(WHITE); dot.line.width = Pt(1.2); dot.shadow.inherit = False
+            if i in labelled and i != item["i_peak"]:
+                _add_text(slide, f"{p['value']:.0f}%", x - 0.35, y - 0.29, 0.70, 0.20,
+                          size=8, color=accent, bold=True, align=PP_ALIGN.CENTER)
+            if i in labelled:
+                _add_text(slide, p["label"], x - 0.55, py_bot + 0.08, 1.10, 0.20,
+                          size=7.5, color=MUTED, align=PP_ALIGN.CENTER)
+        # Peak badge
+        ip_ = item["i_peak"]
+        bx = min(max(X(ip_) - 0.72, px0), px1 - 1.44)
+        # Sit above the value-label band so it never covers a neighbouring value.
+        by = max(cy + 0.44, Y(pts[ip_]["value"]) - 0.64)
+        badge = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(bx), Inches(by), Inches(1.44), Inches(0.28))
+        badge.adjustments[0] = 0.5; badge.fill.solid(); badge.fill.fore_color.rgb = _rgb(accent)
+        badge.line.fill.background(); badge.shadow.inherit = False
+        _add_text(slide, f"Peak {pts[ip_]['value']:.0f}% · {pts[ip_]['label']}", bx, by, 1.44, 0.28,
+                  size=8, color=WHITE, bold=True, align=PP_ALIGN.CENTER, valign=MSO_ANCHOR.MIDDLE)
+    else:
+        _add_text(slide, ("Δεν υπάρχει επαρκής ημερήσια σειρά για αυτό το συναίσθημα στην περίοδο." if el
+                          else "No sufficient daily series for this emotion in the period."),
+                  cx + 0.28, cy + 1.25, cw - 0.56, 0.3, size=9, color=NEUTRAL, align=PP_ALIGN.CENTER)
+
+    # --- Bottom left: highest-intensity voices ---
+    vy, vh = 4.34, 2.52
+    _dash_card(slide, cx, vy, cw, vh)
+    _add_text(slide, (f"ΟΙ ΦΩΝΕΣ ΜΕ ΤΗΝ ΥΨΗΛΟΤΕΡΗ ΕΝΤΑΣΗ · {_upper_label(name)}" if el
+                      else f"HIGHEST-INTENSITY VOICES · {_upper_label(name)}"),
+              cx + 0.28, vy + 0.16, cw - 0.56, 0.24, size=9.5, color=MUTED, bold=True, font=LABEL_FONT)
+    voices = item.get("voices") or []
+    if voices:
+        lx, lw = cx + 0.28, cw - 0.56
+        top_y = vy + 0.50
+        avail = (vy + vh - 0.06) - top_y - 0.065 * (len(voices) - 1)
+        text_w = lw - 1.75
+        chosen, needs = 6.6, None
+        for font in (8.4, 8.0, 7.6, 7.2, 6.8, 6.6):
+            cpl = max(30, int(text_w * 12.2 * 8.3 / font))
+            lh = 0.0172 * font
+            trial = [0.245 + max(1, math.ceil(len(v["text"]) / cpl)) * lh for v in voices]
+            if sum(trial) <= avail:
+                chosen, needs = font, trial
+                break
+        if needs is None:
+            cpl = max(30, int(text_w * 12.2 * 8.3 / 6.6))
+            needs = [0.245 + max(1, math.ceil(len(v["text"]) / cpl)) * 0.0172 * 6.6 for v in voices]
+        k = avail / sum(needs)
+        needs = [h * k for h in needs]
+        y = top_y
+        for i, v in enumerate(voices):
+            h = needs[i]
+            card = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(lx), Inches(y), Inches(lw), Inches(h))
+            card.adjustments[0] = min(0.5, 0.05 / max(h, 0.2))
+            card.fill.solid(); card.fill.fore_color.rgb = _rgb(WHITE)
+            card.line.color.rgb = _rgb(STONE_DARK); card.line.width = Pt(0.75)
+            card.shadow.inherit = False
+            chip_w = 1.32
+            chip = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(lx + lw - chip_w - 0.12),
+                                          Inches(y + h / 2 - 0.13), Inches(chip_w), Inches(0.26))
+            chip.adjustments[0] = 0.5; chip.fill.solid(); chip.fill.fore_color.rgb = _rgb(soft)
+            chip.line.fill.background(); chip.shadow.inherit = False
+            _add_text(slide, (f"ένταση {v['intensity']:.2f}" if el else f"intensity {v['intensity']:.2f}"),
+                      lx + lw - chip_w - 0.12, y + h / 2 - 0.13, chip_w, 0.26,
+                      size=8.5, color=accent, bold=True, align=PP_ALIGN.CENTER, valign=MSO_ANCHOR.MIDDLE)
+            shown = _pseudo_label(v.get("author_idx") or (i + 1), lang) if anonymize else str(v["author"])
+            meta = " · ".join(x for x in (_upper_label(shown), v["date"]) if x)
+            _add_text(slide, meta, lx + 0.16, y + 0.045, lw - 1.62, 0.16, size=6.8, color=NEUTRAL, bold=True, font=LABEL_FONT)
+            _add_text(slide, v["text"], lx + 0.16, y + 0.205, lw - 1.62, max(0.18, h - 0.245), size=chosen, color=INK)
+            y += h + 0.065
+    else:
+        _add_text(slide, ("Δεν εντοπίστηκαν organic σχόλια με αυτό το κυρίαρχο συναίσθημα." if el
+                          else "No organic comments carry this as their primary emotion."),
+                  cx + 0.28, vy + 1.1, cw - 0.56, 0.3, size=9, color=NEUTRAL, align=PP_ALIGN.CENTER)
+
+    # --- Right: anatomy narrative ---
+    nx, nw_ = 8.88, 3.85
+    _dash_card(slide, nx, 1.42, nw_, 4.30)
+    _add_text(slide, (f"Η ΑΝΑΤΟΜΙΑ · {_upper_label(name)}" if el else f"THE ANATOMY · {_upper_label(name)}"),
+              nx + 0.28, 1.62, nw_ - 0.56, 0.24, size=9.5, color=MUTED, bold=True, font=LABEL_FONT)
+    paras = (narrative or [])[:3]
+    block = (4.30 - 0.72) / max(1, len(paras) or 1)
+    py = 1.98
+    for it in paras:
+        _add_rich(slide, [((it.get("lead") or "") + " ", True), (it.get("body") or "", False)],
+                  nx + 0.28, py, nw_ - 0.56, block, size=8.6)
+        py += block
+    _add_text(slide, ("Γράφεται αυτόματα από την AI ανάλυση του run" if el else "Written automatically by the run's AI analysis"),
+              nx + 0.28, 5.42, nw_ - 0.56, 0.2, size=7, color=NEUTRAL)
+
+    # --- Chips: peak and change within the period ---
+    ky, kh_ = 5.90, 0.96
+    kw_ = (nw_ - 0.12) / 2
+    peak_txt = (f"{pts[item['i_peak']]['value']:.0f}% · {pts[item['i_peak']]['label']}" if pts and item.get("i_peak") is not None else "—")
+    delta = item.get("delta")
+    delta_txt = "—" if delta is None else (f"{delta:+.1f} " + ("μον." if el else "pts"))
+    chips = [(peak_txt, ("Κορύφωση" if el else "Peak"), accent),
+             (delta_txt, ("Μεταβολή στην περίοδο" if el else "Change over the period"), accent)]
+    for i, (value, label, color) in enumerate(chips):
+        x = nx + i * (kw_ + 0.12)
+        _dash_card(slide, x, ky, kw_, kh_)
+        _add_text(slide, value, x, ky + 0.12, kw_, 0.34, size=14 if len(value) <= 9 else 10.5,
+                  color=color, bold=True, align=PP_ALIGN.CENTER)
+        _add_text(slide, label, x + 0.06, ky + 0.52, kw_ - 0.12, 0.3, size=8, color=MUTED, align=PP_ALIGN.CENTER)
+
+
 def generate_pptx(presentation_plan: dict, visual_pack: dict, output_path: Path, logo_path: Path) -> dict:
     prs = Presentation(); prs.slide_width = Inches(13.333333); prs.slide_height = Inches(7.5)
     blank = prs.slide_layouts[6]
@@ -2722,7 +3184,12 @@ def generate_pptx(presentation_plan: dict, visual_pack: dict, output_path: Path,
         if typ=="cover":
             _render_cover(slide, spec, ctx, lang, logo_path, presentation_plan)
         else:
-            _add_header(slide,spec.get("title"),idx-1)
+            accent_pair=None
+            if typ=="emotion_anatomy":
+                ekey=str((spec.get("notes") or {}).get("emotion_key") or "")
+                if ekey:
+                    accent_pair=(_cat_label(ekey,lang),EMOTION_COLORS.get(ekey,NEUTRAL))
+            _add_header(slide,spec.get("title"),idx-1,accent_pair)
             _add_footer(slide,idx,ctx)
             if spec.get("subtitle"):
                 _add_text(slide,spec.get("subtitle"),1.15,1.35,11.3,.72,size=12.5,color=MUTED)
@@ -2762,6 +3229,13 @@ def generate_pptx(presentation_plan: dict, visual_pack: dict, output_path: Path,
                 if emo.get("rows"):
                     _render_emotion_profile(slide, emo, ((presentation_plan.get("slide_narratives") or {}).get("emotions") or []),
                                             lang, ctx)
+            elif typ == "emotion_anatomy":
+                key = str((spec.get("notes") or {}).get("emotion_key") or "")
+                item = next((x for x in (presentation_plan.get("emotion_anatomy") or []) if x.get("key") == key), None)
+                if item:
+                    slot = f"anatomy_{key}"
+                    _render_emotion_anatomy(slide, item, ((presentation_plan.get("slide_narratives") or {}).get(slot) or []),
+                                            lang, ctx, presentation_plan.get("display_policy") or {})
             elif typ == "evidence_split":
                 pos=[c for c in claims if str((c.get("source_values") or {}).get("sentiment"))=="positive"]
                 neg=[c for c in claims if str((c.get("source_values") or {}).get("sentiment"))=="negative"]
@@ -3080,7 +3554,10 @@ def build_exports(folder: Path, plan: dict, *, force: bool=False, cancel_check: 
         pplan["emotion_profile"]=emo
     # ONE AI pass writes every qualitative panel, so the analyst voice is
     # consistent across slides and the reasoning budget is spent once.
-    narratives=_build_analyst_narratives(folder,plan,lang_now,top,emo,tl,visual_pack)
+    anatomy=_emotion_anatomy_data(folder,visual_pack,plan,emo,lang_now)
+    if anatomy:
+        pplan["emotion_anatomy"]=anatomy
+    narratives=_build_analyst_narratives(folder,plan,lang_now,top,emo,tl,visual_pack,anatomy)
     pplan["slide_narratives"]=narratives.get("slots") or {}
     pplan["slide_narratives_provider"]=narratives.get("provider")
     if top:
@@ -3107,6 +3584,15 @@ def build_exports(folder: Path, plan: dict, *, force: bool=False, cancel_check: 
         slides_list.insert(after+1,{"slide_id":"emotion_profile_bars","slide_type":"emotion_profile_bars",
             "title":"Συναισθηματικό Προφίλ" if lang_now=="el" else "Emotional Profile",
             "chart_ids":[],"claims":[],"section":"opening","priority":96,"required":False,"notes":{}})
+        # One deep-dive slide per dominant emotion, right after the profile.
+        at=after+2
+        for a in anatomy:
+            nm=_cat_label(a["key"],lang_now)
+            slides_list.insert(at,{"slide_id":f"emotion_anatomy_{a['key']}","slide_type":"emotion_anatomy",
+                "title":(f"Ανατομία: {nm}" if lang_now=="el" else f"Anatomy: {nm}"),
+                "chart_ids":[],"claims":[],"section":"opening","priority":95,"required":False,
+                "notes":{"emotion_key":a["key"]}})
+            at+=1
     # Display policy for the client deck (internal docx keeps real details).
     policy_names=sorted(((top or {}).get("name_index") or {}).items(),key=lambda kv:-len(kv[0]))
     pplan["display_policy"]={
