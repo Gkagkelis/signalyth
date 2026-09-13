@@ -70,9 +70,17 @@ def test_registry_comment_route_verification_is_separate_and_reversible(tmp_path
         route="replies", input_field="replyTweetIds", output_mapping={"text":"text"},
     )
     assert saved["comment_deepening_status"] == "verified"
-    assert comments_forecast("x", True, saved)["status"] == "verified_available"
+    assert saved["comment_enabled"] is False
+    assert comments_forecast("x", True, saved)["status"] == "verified_disabled"
+    enabled = R.update_source("x", {"comment_enabled": True})
+    assert enabled["comment_enabled"] is True
+    assert comments_forecast("x", True, enabled)["status"] == "verified_available"
+    disabled = R.update_source("x", {"comment_enabled": False})
+    assert disabled["comment_enabled"] is False
+    assert comments_forecast("x", True, disabled)["status"] == "verified_disabled"
     cleared = R.clear_comment_route_verification("x")
     assert cleared["comment_deepening_status"] == "unverified"
+    assert cleared["comment_enabled"] is False
     assert comments_forecast("x", True, cleared)["status"] != "verified_available"
 
 
@@ -107,6 +115,7 @@ def test_comment_route_endpoint_only_commits_after_clean_paid_smoke(monkeypatch,
     assert r.json()["comment_deepening_status"] == "verified"
     assert "sample_items" not in r.json()["smoke_test"]
     assert R.load_registry()["x"]["comment_deepening_status"] == "verified"
+    assert R.load_registry()["x"]["comment_enabled"] is False
 
 def _declared_capacity(source: str, inp: dict) -> int | None:
     if source == "x": return int(inp.get("maxItems", 0) or 0)

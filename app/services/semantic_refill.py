@@ -62,6 +62,11 @@ def semantic_refill(folder: Path, plan: dict, cancel_check: Callable[[], bool] |
             normalized=[r for r in normalized if in_range(r,date_from,date_to)]
             # Keep enough candidate headroom for semantic filtering; stable ids dedupe.
             dedup={str(r.get("id")):r for r in normalized if r.get("id")}; normalized=list(dedup.values())[:max(target*2,target)]
+            # Comment/reply evidence is a separate acquired layer and must survive a
+            # later primary semantic refill. Merge it back before rewriting the source file.
+            comment_rows=store.read(folder/f"normalized-comments-{source}.json",[]) or []
+            normalized_dedup={str(r.get("id")):r for r in [*normalized,*comment_rows] if r.get("id")}
+            normalized=list(normalized_dedup.values())
             before=store.read(folder/f"normalized-{source}.json",[]) or []; before_ids={str(r.get("id")) for r in before if r.get("id")}
             store.write(folder/f"normalized-{source}.json",normalized)
             audit["added_normalized"] += sum(1 for r in normalized if str(r.get("id")) not in before_ids)
