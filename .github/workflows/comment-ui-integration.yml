@@ -31,7 +31,7 @@ jobs:
           python-version: '3.12'
           cache: 'pip'
 
-      - name: Move comment controls into Sources & Actors
+      - name: 'Move comment controls into Sources & Actors'
         run: |
           python - <<'PY'
           from pathlib import Path
@@ -87,7 +87,7 @@ setTimeout(decorateCommentActors,0);
       - name: Compile
         run: python -m compileall -q app tests
 
-      - name: Verify real menu and ON/OFF API path
+      - name: Verify real menu and ON-OFF API path
         run: |
           rm -rf "$SIGNALYTH_RUNTIME_CONFIG_DIR"
           mkdir -p "$SIGNALYTH_RUNTIME_CONFIG_DIR"
@@ -130,7 +130,6 @@ setTimeout(decorateCommentActors,0);
               blocked = client.patch('/api/sources/facebook', json={'comment_enabled': True})
               assert blocked.status_code == 409
 
-              # Verification itself must leave the route OFF; activation is an explicit user choice.
               commit_comment_route_verification(
                   'facebook', actor_id='scraper_one/facebook-comments-scraper',
                   smoke_tested_at='2026-09-13T00:00:00+00:00', route='comments',
