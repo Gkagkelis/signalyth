@@ -91,6 +91,7 @@ def normalize_comment_dataset(
     items: list[dict],
     *,
     seed_refs: list[str] | None = None,
+    seed_context: dict[str, str] | None = None,
     mapping: dict | None = None,
 ) -> list[dict]:
     """Normalize comment/reply Actors into the same evidence contract as primary rows.
@@ -99,6 +100,7 @@ def normalize_comment_dataset(
     analysis can use comments while still separating publisher content from audience response.
     """
     seed_refs = [str(x) for x in (seed_refs or []) if str(x or "").strip()]
+    seed_context = {str(k): str(v or "").strip() for k, v in (seed_context or {}).items() if str(k or "").strip()}
     raw_items = _instagram_flatten(items) if source == "instagram" else [x for x in items if isinstance(x, dict)]
     out: list[dict] = []
     seen: set[str] = set()
@@ -164,6 +166,7 @@ def normalize_comment_dataset(
         if not text:
             continue
         parent_post = _parent_from_seed(source, raw, seed_refs)
+        parent_context = seed_context.get(str(parent_post or ""), "")
         dt = parse_date(date_raw)
         raw_id = str(native_id or "").strip()
         stable = raw_id or sha1(f"{source}|{parent_post}|{author}|{text}".encode("utf-8", errors="ignore")).hexdigest()[:24]
@@ -194,6 +197,7 @@ def normalize_comment_dataset(
             "url": str(url) if url else parent_post,
             "content_type": layer,
             "parent_post": parent_post,
+            "parent_context": parent_context or None,
             "parent_comment_id": parent_comment_id,
             "comment_id": raw_id or stable,
             "evidence_layer": layer,

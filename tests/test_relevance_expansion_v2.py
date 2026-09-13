@@ -111,11 +111,15 @@ def test_adaptive_expansion_never_exceeds_remaining_budget(tmp_path):
     assert runner.calls[0][3] <= 0.001 + 1e-9
 
 
-def test_reply_deepening_is_blocked_until_route_live_verified(tmp_path):
+def test_reply_deepening_runs_from_configured_production_contract_without_separate_smoke(tmp_path):
     initial = [raw(800, "Allwyn Greece customer experience", "person1", replies=5)]
     plan, report = prepare(tmp_path, initial, target=2, comments=True, verify_reply_route=False)
-    runner = FakeRunner(reply_items=[raw(801, "Allwyn Greece reply", "person2", day=18)])
+    runner = FakeRunner(reply_items=[{
+        **raw(801, "Allwyn Greece reply", "person2", day=18),
+        "type": "reply", "inReplyToId": "800",
+    }])
     result = adaptive_expand_after_cleaning(tmp_path, plan, report, runner=runner)
-    assert runner.calls == []
-    assert "reply_deepening_blocked_until_live_route_verification" in result["audit"]["warnings"]
-    assert result["report"]["trusted_sample_shortfall"] == 1
+    assert runner.calls and runner.calls[0][1]["mode"] == "replies"
+    assert runner.calls[0][1]["replyTweetIds"] == ["800"]
+    assert "x:comment_deepening_not_operational" not in result["audit"]["warnings"]
+    assert result["report"]["trusted_sample_shortfall"] == 0

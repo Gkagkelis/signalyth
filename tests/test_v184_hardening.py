@@ -64,14 +64,14 @@ def test_registry_comment_route_verification_is_separate_and_reversible(tmp_path
     monkeypatch.setattr(R, "REGISTRY_PATH", reg)
     monkeypatch.setattr(R, "HISTORY_PATH", hist)
     before = R.load_registry()["x"]
-    assert comments_forecast("x", True, before)["status"] != "verified_available"
+    assert comments_forecast("x", True, before)["status"] in {"configured_available", "verified_available"}
     saved = R.commit_comment_route_verification(
         "x", actor_id="xquik/x-tweet-scraper", smoke_tested_at="2026-09-05T10:00:00+00:00",
         route="replies", input_field="replyTweetIds", output_mapping={"text":"text"},
     )
     assert saved["comment_deepening_status"] == "verified"
-    assert saved["comment_enabled"] is False
-    assert comments_forecast("x", True, saved)["status"] == "verified_disabled"
+    assert saved["comment_enabled"] is True
+    assert comments_forecast("x", True, saved)["status"] == "verified_available"
     enabled = R.update_source("x", {"comment_enabled": True})
     assert enabled["comment_enabled"] is True
     assert comments_forecast("x", True, enabled)["status"] == "verified_available"
@@ -79,9 +79,9 @@ def test_registry_comment_route_verification_is_separate_and_reversible(tmp_path
     assert disabled["comment_enabled"] is False
     assert comments_forecast("x", True, disabled)["status"] == "verified_disabled"
     cleared = R.clear_comment_route_verification("x")
-    assert cleared["comment_deepening_status"] == "unverified"
-    assert cleared["comment_enabled"] is False
-    assert comments_forecast("x", True, cleared)["status"] != "verified_available"
+    assert cleared["comment_deepening_status"] == "configured"
+    assert cleared["comment_actor_id"] == "xquik/x-tweet-scraper"
+    assert comments_forecast("x", True, cleared)["status"] in {"configured_available", "configured_disabled"}
 
 
 def test_comment_route_endpoint_requires_explicit_paid_confirmation():
@@ -115,7 +115,7 @@ def test_comment_route_endpoint_only_commits_after_clean_paid_smoke(monkeypatch,
     assert r.json()["comment_deepening_status"] == "verified"
     assert "sample_items" not in r.json()["smoke_test"]
     assert R.load_registry()["x"]["comment_deepening_status"] == "verified"
-    assert R.load_registry()["x"]["comment_enabled"] is False
+    assert R.load_registry()["x"]["comment_enabled"] is True
 
 def _declared_capacity(source: str, inp: dict) -> int | None:
     if source == "x": return int(inp.get("maxItems", 0) or 0)
