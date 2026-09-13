@@ -7,6 +7,7 @@ on:
     paths:
       - '.github/workflows/comments-production-ready.yml'
       - 'scripts/comments_production_ready_patch.py'
+      - 'scripts/comments_production_compat.py'
       - 'tests/test_comment_deepening.py'
       - 'tests/test_v184_hardening.py'
 
@@ -42,6 +43,7 @@ jobs:
           t=t.replace('cleaned = result["records"][0]', 'cleaned = result["cleaned"][0]')
           p.write_text(t, encoding='utf-8')
           PY
+          python scripts/comments_production_compat.py
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -50,7 +52,7 @@ jobs:
       - name: Compile
         run: python -m compileall -q app tests
       - name: Comment-specific tests
-        run: pytest -q tests/test_comment_deepening.py tests/test_v184_hardening.py --tb=short
+        run: pytest -q tests/test_comment_deepening.py tests/test_v184_hardening.py tests/test_relevance_expansion_v2.py tests/test_multisource_matrix_v182.py --tb=short
       - name: Planner readiness check
         run: |
           rm -rf "$SIGNALYTH_RUNTIME_CONFIG_DIR"
@@ -64,6 +66,9 @@ jobs:
               assert reg[s]['comment_enabled'] is True, (s,reg[s])
               assert reg[s]['comment_deepening_status'] in {'configured','verified'}, (s,reg[s])
               assert reg[s]['comment_actor_id'], s
+          for s in ('youtube','news'):
+              assert reg[s]['comment_enabled'] is False, (s,reg[s])
+              assert reg[s]['comment_deepening_status'] == 'not_applicable', (s,reg[s])
           draft=AnalysisDraft(client='Test',topic='Vodafone',market='Greece',date_from=date(2026,9,1),date_to=date(2026,9,13),keywords=['δίκτυο'],sources=['x','tiktok','instagram','facebook'],sample_target=100,comments=True,max_budget_usd=5,report_language='Ελληνικά')
           plan=build_collection_plan(draft).model_dump(mode='json')
           coverage=plan['preflight_forecast']['comments_coverage']
