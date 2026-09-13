@@ -33,7 +33,7 @@ from app.services.storage import RunStore
 from app.services.visualizations import load_presentation_visual_pack, load_visualization_summary
 from app.services.report_synthesis import build_report_synthesis, final_consistency_qa
 
-PRESENTATION_RULESET_VERSION = "1.7.0"
+PRESENTATION_RULESET_VERSION = "1.9.0"
 PRESENTATION_METHODOLOGY_VERSION = "signalyth-presentation-intelligence-v1.4"
 PRESENTATION_CONTRACT_VERSION = "signalyth-presentation-pack-v1.4"
 
@@ -61,9 +61,17 @@ COVER_ACCENT = "FD9D08"
 # Stable semantic colors: the same sentiment/emotion always gets the same color
 # in dashboard, PPTX, PDF and Word, as the methodology requires.
 SENTIMENT_COLORS = {"positive": POS, "negative": NEG, "neutral": NEUTRAL, "mixed": MIXED}
+# Emotions inherit the report's own valence palette: green = positive,
+# red family = negative (shade by intensity), amber = ambiguous, grey = neutral.
+# A colour therefore means the same thing on every slide of the deck.
 EMOTION_COLORS = {
-    "joy": "E2A63D", "anger": "B23B32", "sadness": "3E6B9E", "fear": "6B4FA1",
-    "disgust": "7A7F3A", "surprise": "2E8C8C", "neutral": "9AA0A6",
+    "joy": POS,            # positive
+    "anger": NEG,          # strongest negative
+    "disgust": "8C2C33",   # deep wine — negative
+    "fear": "C4625E",      # muted terracotta — negative
+    "sadness": "9E4A4F",   # muted rose-brown — negative
+    "surprise": MIXED,     # ambiguous valence
+    "neutral": NEUTRAL,
 }
 CATEGORY_LABELS_EL = {
     "positive": "Θετικό", "negative": "Αρνητικό", "neutral": "Ουδέτερο", "mixed": "Μικτό",
@@ -1933,7 +1941,7 @@ def _add_rich(slide, parts, x, y, w, h, *, size=9.6, color=INK, align=PP_ALIGN.L
     return box
 
 
-def _render_reputation_timeline(slide, tl: dict, lang: str, ctx: dict) -> None:
+def _render_reputation_timeline(slide, tl: dict, lang: str, ctx: dict, narrative: list[dict] | None = None) -> None:
     el = lang == "el"
     pts = tl["points"]; n = len(pts)
     hourly = tl["granularity"] == "hourly"
@@ -2052,7 +2060,10 @@ def _render_reputation_timeline(slide, tl: dict, lang: str, ctx: dict) -> None:
     _dash_card(slide, nx, 1.42, nw_, 3.62)
     _add_text(slide, ("ΤΙ ΔΕΙΧΝΕΙ Η ΓΡΑΜΜΗ" if el else "WHAT THE LINE SHOWS"),
               nx + 0.28, 1.62, nw_ - 0.56, 0.24, size=9.5, color=MUTED, bold=True, font=LABEL_FONT)
-    paras = _timeline_narrative(tl, lang)[:4]
+    if narrative:
+        paras = [((it.get("lead") or ""), " " + (it.get("body") or "")) for it in narrative[:4]]
+    else:
+        paras = _timeline_narrative(tl, lang)[:4]
     block = (3.62 - 0.62) / max(1, len(paras))
     py = 1.96
     for head, body in paras:
@@ -2170,99 +2181,6 @@ def _top_comments_data(folder: Path, plan: dict, lang: str) -> dict | None:
                 "unique_authors": len(name_index)}
     except Exception:
         return None
-
-
-def _commentary_fallback(entries: list[dict], polarity: str, lang: str) -> list[dict]:
-    el = lang == "el"
-    if not entries:
-        return []
-    vals = [e["score"] for e in entries]
-    n = len(entries)
-    voices = len({_norm_handle(e["author"]) for e in entries})
-    avg = sum(vals) / n
-    pos = polarity == "positive"
-    out = [{
-        "lead": ("Η ένταση του ρεύματος." if el else "Strength of the current.") if pos
-                 else ("Η ένταση της κριτικής." if el else "Intensity of the criticism."),
-        "body": (f"Τα {n} κορυφαία {'θετικά' if pos else 'αρνητικά'} σχόλια κινούνται από {vals[-1]:+.2f} έως {vals[0]:+.2f} "
-                 f"(μ.ο. {avg:+.2f}) και προέρχονται από {voices} διαφορετικές φωνές." if el else
-                 f"The top {n} {'positive' if pos else 'negative'} comments range from {vals[-1]:+.2f} to {vals[0]:+.2f} "
-                 f"(avg {avg:+.2f}) and come from {voices} distinct voices."),
-    }]
-    strong = sum(1 for v in vals if abs(v) >= 0.85)
-    if strong:
-        out.append({
-            "lead": "Βαθμός βεβαιότητας. " if el else "Degree of conviction. ",
-            "body": (f"{strong} από τα {n} σχόλια ξεπερνούν το {'+' if pos else '−'}0.85 — "
-                     f"{'ισχυρή, ξεκάθαρη αποδοχή χωρίς επιφυλάξεις.' if pos else 'απορριπτικός λόγος υψηλής έντασης, όχι ήπιες ενστάσεις.'}" if el else
-                     f"{strong} of the {n} comments exceed {'+' if pos else '−'}0.85 — "
-                     f"{'strong, unreserved approval.' if pos else 'high-intensity rejection rather than mild objection.'}"),
-        })
-    return out
-
-
-def _analyst_commentary(top: dict, plan: dict, lang: str) -> dict:
-    """Short analyst read of the two Top-10 lists. Written by OpenAI in the
-    run's research persona; deterministic fallback keeps the deck shipping."""
-    result = {"positive": _commentary_fallback(top.get("positive") or [], "positive", lang),
-              "negative": _commentary_fallback(top.get("negative") or [], "negative", lang),
-              "provider": "deterministic"}
-    try:
-        from app.config import settings
-        if not (settings.signalyth_ai_enabled and settings.openai_api_key):
-            return result
-        from openai import OpenAI
-        client = OpenAI(api_key=settings.openai_api_key, max_retries=0, timeout=60.0)
-        political = str(plan.get("research_type") or "market") == "political"
-        language = "Greek" if lang == "el" else "English"
-        persona = ("a senior political communications analyst reading public political discourse"
-                   if political else "a senior market/brand analyst reading consumer opinion")
-
-        def pack(entries):
-            return [{"author": _pseudo_label(e["author_idx"] or (i + 1), lang),
-                     "date": e["date"], "sentiment": e["score"], "text": e["text"][:400]}
-                    for i, e in enumerate(entries)]
-
-        payload = {"client": plan.get("client"), "topic": plan.get("topic"),
-                   "positive_top10": pack(top.get("positive") or []),
-                   "negative_top10": pack(top.get("negative") or [])}
-        schema = {"type": "object", "additionalProperties": False,
-                  "required": ["positive", "negative"],
-                  "properties": {k: {"type": "array", "maxItems": 3, "items": {
-                      "type": "object", "additionalProperties": False,
-                      "required": ["lead", "body"],
-                      "properties": {"lead": {"type": "string"}, "body": {"type": "string"}}}}
-                      for k in ("positive", "negative")}}
-        response = client.responses.create(
-            model=settings.signalyth_ai_reasoning_model, store=False,
-            instructions=(f"You are {persona}. Write in {language}. You receive the 10 most positive and 10 most negative "
-                          "public comments about the subject, ranked by raw sentiment score. For EACH list write 2-3 short, "
-                          "serious analyst observations: `lead` is a bold 2-5 word heading ending with a period; `body` is one "
-                          "or two dense sentences (max ~240 chars). Identify converging narratives, what the criticism or "
-                          "praise actually targets, and any escalation risk or exploitable strength. Use ONLY the supplied "
-                          "comments; never invent facts, names or numbers beyond simple counts of the supplied items; refer "
-                          "to commenters only by the supplied anonymous labels or not at all. No generic filler."),
-            input=json.dumps(payload, ensure_ascii=False, default=str),
-            text={"format": {"type": "json_schema", "name": "signalyth_top_comments_commentary",
-                             "schema": schema, "strict": True}},
-            max_output_tokens=1200)
-        decoded = json.loads(response.output_text or "{}")
-        cleaned = {}
-        for k in ("positive", "negative"):
-            items = []
-            for it in (decoded.get(k) or [])[:3]:
-                lead = _clean_text((it or {}).get("lead"), 60)
-                body = _clean_text((it or {}).get("body"), 300)
-                if lead and body:
-                    items.append({"lead": lead if lead.endswith((".", ":", "!")) else lead + ".", "body": body})
-            if items:
-                cleaned[k] = items
-        if cleaned.get("positive") or cleaned.get("negative"):
-            result.update(cleaned)
-            result["provider"] = "openai"
-    except Exception as exc:
-        result["provider_error"] = _clean_text(exc, 300)
-    return result
 
 
 def _scrub_display_text(text: str, policy: dict) -> str:
@@ -2442,6 +2360,355 @@ def _render_top_comments(slide, entries: list[dict], commentary: list[dict],
         _add_text(slide, label, x, ky + 0.52, kw_, 0.3, size=8, color=MUTED, align=PP_ALIGN.CENTER)
 
 
+# ---------- Shared analyst narrative layer + Emotional profile (slide 6) ----------
+# ONE OpenAI call writes the qualitative commentary for every narrative slide,
+# so the voice stays consistent across the deck and the reasoning budget is
+# spent once. The result is persisted to exports/analyst-narratives.json with
+# its provider and any error, so a fallback is always visible, never silent.
+
+NARRATIVE_SLOTS = ("timeline", "top_positive", "top_negative", "emotions")
+
+
+def _emotion_profile_data(visual_pack: dict, lang: str) -> dict | None:
+    """Emotion distribution for slide 6, straight from the run's own chart."""
+    try:
+        charts = _chart_map(visual_pack)
+        cats = ((charts.get("emotion_distribution") or {}).get("data") or {}).get("categories") or []
+        rows = []
+        for c in cats:
+            key = _cat_key(c.get("label"))
+            share = round(_safe_float(c.get("value")), 2)
+            if not key or share <= 0:
+                continue
+            rows.append({"key": key, "share": share, "records": _safe_int(c.get("records") or c.get("count"))})
+        if not rows:
+            return None
+        rows.sort(key=lambda r: -r["share"])
+        neg = sum(r["share"] for r in rows if r["key"] in ("anger", "disgust", "fear", "sadness"))
+        pos = sum(r["share"] for r in rows if r["key"] in ("joy", "surprise"))
+        return {"rows": rows, "negative_share": round(neg, 1), "positive_share": round(pos, 1),
+                "leading": rows[0]["key"], "leading_share": rows[0]["share"]}
+    except Exception:
+        return None
+
+
+def _fallback_narratives(top: dict | None, emo: dict | None, lang: str, tl: dict | None = None) -> dict:
+    """Qualitative fallback: interprets rather than recites numbers, so a deck
+    built without AI still reads like analysis."""
+    el = lang == "el"
+    out: dict[str, list[dict]] = {}
+
+    def band(vals):
+        strong = sum(1 for v in vals if abs(v) >= 0.85)
+        return strong
+
+    for slot, key, pos in (("top_positive", "positive", True), ("top_negative", "negative", False)):
+        entries = (top or {}).get(key) or []
+        if not entries:
+            continue
+        vals = [e["score"] for e in entries]
+        voices = len({_norm_handle(e["author"]) for e in entries})
+        strong = band(vals)
+        items = []
+        if pos:
+            items.append({"lead": "Ποιότητα της υποστήριξης." if el else "Quality of support.",
+                          "body": (f"Τα κορυφαία θετικά σχόλια δεν είναι ήπιες επιδοκιμασίες: {strong} από τα {len(vals)} ξεπερνούν το +0.85, "
+                                   f"δηλαδή δηλώνουν ξεκάθαρη στήριξη χωρίς επιφυλάξεις." if el else
+                                   f"The leading positive comments are not mild approval: {strong} of {len(vals)} exceed +0.85, "
+                                   f"signalling unreserved support.")})
+            items.append({"lead": "Εύρος των φωνών." if el else "Breadth of voices.",
+                          "body": (f"Προέρχονται από {voices} διαφορετικές φωνές — {'διάχυτη' if voices >= len(vals) else 'συγκεντρωμένη'} "
+                                   f"υποστήριξη, όχι επανάληψη του ίδιου χρήστη." if el else
+                                   f"They come from {voices} distinct voices — {'diffuse' if voices >= len(vals) else 'concentrated'} "
+                                   f"support rather than one repeated user.")})
+        else:
+            items.append({"lead": "Ένταση της απόρριψης." if el else "Intensity of rejection.",
+                          "body": (f"{strong} από τα {len(vals)} κορυφαία αρνητικά σχόλια ξεπερνούν το −0.85: πρόκειται για απορριπτικό λόγο "
+                                   f"υψηλής έντασης, όχι για ήπιες ενστάσεις που κάμπτονται εύκολα." if el else
+                                   f"{strong} of the {len(vals)} leading negative comments exceed −0.85: this is high-intensity rejection, "
+                                   f"not mild objection that argument alone will soften.")})
+            items.append({"lead": "Εύρος των φωνών." if el else "Breadth of voices.",
+                          "body": (f"Προέρχονται από {voices} διαφορετικές φωνές, άρα η κριτική δεν εξαντλείται σε μεμονωμένο επικριτή." if el else
+                                   f"They come from {voices} distinct voices, so the criticism is not confined to a single critic.")})
+        out[slot] = items
+
+    if emo and emo.get("rows"):
+        lead_label = _cat_label(emo["leading"], lang)
+        neg, pos_share = emo["negative_share"], emo["positive_share"]
+        items = [{"lead": (f"Κυρίαρχο συναίσθημα: {lead_label.lower()}." if el else f"Leading emotion: {lead_label.lower()}."),
+                  "body": (f"Συγκεντρώνει το {emo['leading_share']:.1f}% των αναφορών με αναγνωρισμένο συναίσθημα και δίνει τον τόνο "
+                           f"σε ολόκληρη τη συζήτηση." if el else
+                           f"It accounts for {emo['leading_share']:.1f}% of emotion-tagged mentions and sets the tone of the whole conversation.")}]
+        items.append({"lead": "Ισορροπία φορτίου." if el else "Emotional balance.",
+                      "body": (f"Τα αρνητικά συναισθήματα καλύπτουν το {neg:.1f}% έναντι {pos_share:.1f}% των θετικών — "
+                               f"{'η αρνητική φόρτιση κυριαρχεί καθαρά' if neg > pos_share * 1.5 else 'οι δύο πλευρές συνυπάρχουν'}." if el else
+                               f"Negative emotions cover {neg:.1f}% against {pos_share:.1f}% positive — "
+                               f"{'negative charge clearly dominates' if neg > pos_share * 1.5 else 'both sides coexist'}.")})
+        out["emotions"] = items
+    if tl and tl.get("points"):
+        out["timeline"] = [{"lead": h.strip(), "body": b} for h, b in _timeline_narrative(tl, lang)[:3]]
+    return out
+
+
+def _run_profile_block(plan: dict, visual_pack: dict, top: dict | None,
+                       emo: dict | None, tl: dict | None) -> dict:
+    """The whole run in one block, so every panel can cross-reference the rest
+    of the picture instead of reading its own numbers in isolation."""
+    charts = _chart_map(visual_pack)
+    rep = (charts.get("brand_reputation") or {}).get("data") or {}
+    conf = (charts.get("evidence_confidence") or {}).get("data") or {}
+    cats = ((charts.get("sentiment_distribution") or {}).get("data") or {}).get("categories") or []
+    profile: dict = {
+        "research_type": str(plan.get("research_type") or "market"),
+        "client": plan.get("client"), "topic": plan.get("topic"), "market": plan.get("market"),
+        "period": f"{plan.get('date_from')} — {plan.get('date_to')}",
+        "brand_reputation_score_0_100": rep.get("value"),
+        "evidence_confidence_0_100": conf.get("value"),
+        "weighted_sentiment_percent": {_cat_key(c.get("label")): round(_safe_float(c.get("value")), 1) for c in cats},
+    }
+    if emo:
+        profile["emotions_percent"] = {r["key"]: r["share"] for r in emo.get("rows") or []}
+        profile["emotions_negative_total"] = emo.get("negative_share")
+        profile["emotions_positive_total"] = emo.get("positive_share")
+    if tl and tl.get("points"):
+        pts = tl["points"]
+        vals = [p_["value"] for p_ in pts]
+        declines = sum(1 for i in range(1, len(vals)) if vals[i] < vals[i - 1])
+        recoveries = sum(1 for i in range(1, len(vals)) if vals[i] > vals[i - 1] + 0.5)
+        profile["trajectory"] = {
+            "granularity": tl.get("granularity"), "points": len(pts),
+            "start": vals[0], "end": vals[-1], "change": tl.get("delta"),
+            "peak": {"when": pts[tl["i_peak"]]["full"], "value": pts[tl["i_peak"]]["value"]},
+            "low": {"when": pts[tl["i_low"]]["full"], "value": pts[tl["i_low"]]["value"]},
+            "declining_steps": declines, "meaningful_recovery_steps": recoveries,
+            "ends_at_extreme": ("low" if tl["i_low"] == len(pts) - 1 else "peak" if tl["i_peak"] == len(pts) - 1 else "no"),
+            "steepest_move": tl.get("steep"),
+        }
+    if top:
+        profile["distinct_voices_in_dataset"] = top.get("unique_authors")
+    return profile
+
+
+def _build_analyst_narratives(folder: Path, plan: dict, lang: str,
+                              top: dict | None, emo: dict | None,
+                              tl: dict | None = None, visual_pack: dict | None = None) -> dict:
+    """One AI pass writes every qualitative panel of the deck, in the persona
+    the run was configured for. The model receives the WHOLE run profile and a
+    question scaffold per panel, so each narrative interprets, cross-references
+    and reads absences instead of reciting the numbers already on the slide."""
+    narratives = {"provider": "deterministic", "slots": _fallback_narratives(top, emo, lang, tl)}
+    try:
+        from app.config import settings
+        if not (settings.signalyth_ai_enabled and settings.openai_api_key):
+            narratives["provider_error"] = "ai_disabled_or_no_key"
+        else:
+            from openai import OpenAI
+            client = OpenAI(api_key=settings.openai_api_key, max_retries=0, timeout=120.0)
+            political = str(plan.get("research_type") or "market") == "political"
+            language = "Greek" if lang == "el" else "English"
+
+            def pack(entries):
+                return [{"voice": _pseudo_label(e["author_idx"] or (i + 1), lang), "date": e["date"],
+                         "sentiment": e["score"], "text": e["text"][:400]}
+                        for i, e in enumerate(entries or [])]
+
+            payload = {
+                "run_profile": _run_profile_block(plan, visual_pack or {}, top, emo, tl),
+                "top_positive_comments": pack((top or {}).get("positive")),
+                "top_negative_comments": pack((top or {}).get("negative")),
+            }
+
+            if political:
+                persona = ("a senior political communications analyst. You read public discourse the way a campaign "
+                           "war-room does: attacks are narrative strategies (delegitimisation, competence, ethics), "
+                           "emotions are mobilisation signals, and every finding ends with the REGISTER of response "
+                           "it calls for (moral vs technical vs agenda-changing event) — described analytically, "
+                           "not as a to-do list")
+                doctrine = ("EMOTION DOCTRINE: anger mobilises, self-renews and resists counter-argument; disgust is "
+                            "moral rejection — the hardest state to reverse and it hardens into identity; fear signals "
+                            "anxiety about consequences; sadness signals disappointment of prior trust; joy at minority "
+                            "share is a committed core, not diffuse sympathy; surprise marks an unsettled audience "
+                            "still forming judgement. ATTACK READING: always identify what the criticism actually "
+                            "targets — the right to speak (legitimacy), the ability to deliver (competence), or the "
+                            "moral standing (ethics) — and note which battlefield the critics AVOID, because avoidance "
+                            "reveals where they feel weak.")
+            else:
+                persona = ("a senior market and brand analyst. You read consumer opinion the way a brand strategist "
+                           "does: praise and criticism are brand-equity drivers (trust, quality, value, experience, "
+                           "service), emotions are loyalty and churn signals, and every finding ends with the business "
+                           "lever it points to (product, service recovery, positioning, proof) — described "
+                           "analytically, not as a to-do list")
+                doctrine = ("EMOTION DOCTRINE: anger predicts complaint amplification and churn; disgust is brand "
+                            "rejection — recovery requires reproof, not messaging; fear signals perceived risk in "
+                            "buying or using; sadness signals disappointed expectations of loyal users; joy at "
+                            "minority share is an advocacy core to be protected; surprise marks a category or claim "
+                            "the audience has not yet priced in. CRITICISM READING: always identify which equity "
+                            "driver the criticism actually targets and which drivers are NOT contested, because "
+                            "uncontested ground is defendable proof.")
+
+            scaffold = (
+                "For EVERY slot answer this scaffold with EXACTLY 3 observations:\n"
+                "  (1) What dominates — and what it actually targets or rewards (not the number, the object).\n"
+                "  (2) What is ABSENT — at least one observation MUST be built on an absence: what is missing from "
+                "the distribution, from the praise, from the criticism, or from the trajectory, and what that "
+                "absence rules out or reveals. Absence is a finding, never a gap.\n"
+                "  (3) Cross-reference — connect this panel to the rest of run_profile (emotions to comments, "
+                "comments to trajectory, trajectory to evidence confidence) and close with what kind of response "
+                "the finding calls for.\n"
+                "SLOTS:\n"
+                "  timeline: read the SHAPE of the trajectory (erosion vs shock, recovery steps or their absence, "
+                "where it ends and whether the trend is active or exhausted).\n"
+                "  top_positive: what the supportive voices converge on, what is missing from the praise "
+                "(durability test), and what strength is actually usable.\n"
+                "  top_negative: the dominant counter-narrative, the ground the critics avoid, and the single "
+                "highest-escalation point.\n"
+                "  emotions: what the mix means psychologically, including the meaning of near-zero emotions.")
+
+            item = {"type": "object", "additionalProperties": False, "required": ["lead", "body"],
+                    "properties": {"lead": {"type": "string"}, "body": {"type": "string"}}}
+            schema = {"type": "object", "additionalProperties": False, "required": list(NARRATIVE_SLOTS),
+                      "properties": {k: {"type": "array", "maxItems": 3, "items": item} for k in NARRATIVE_SLOTS}}
+            response = client.responses.create(
+                model=settings.signalyth_ai_reasoning_model, store=False,
+                instructions=(
+                    f"You are {persona}. Write in {language}.\n\n{doctrine}\n\n{scaffold}\n\n"
+                    "FORM: `lead` = bold 2-6 word heading ending with a period, stating the finding (e.g. "
+                    "'Η μορφολογία της πτώσης.' not 'Παρατήρηση 1.'). `body` = 1-3 dense sentences, max ~340 "
+                    "characters, in the analytical register of a serious client report.\n"
+                    "HARD RULES: interpret, never recite — a number may appear only as evidence inside an "
+                    "interpretation, never as the content of the sentence; the reader already sees every number on "
+                    "the slide. Use ONLY the supplied material; never invent facts, events, names or figures. Refer "
+                    "to commenters only by their supplied anonymous labels or not at all. No generic filler, no "
+                    "recommendations beyond the response-register/business-lever closing, no hedging boilerplate."),
+                input=json.dumps(payload, ensure_ascii=False, default=str),
+                text={"format": {"type": "json_schema", "name": "signalyth_slide_narratives",
+                                 "schema": schema, "strict": True}},
+                # Reasoning models spend part of this budget on reasoning: a tight
+                # cap silently truncates the answer and forces the fallback.
+                max_output_tokens=int(getattr(settings, "signalyth_ai_max_output_tokens", 7000)))
+            decoded = json.loads(response.output_text or "{}")
+            cleaned = {}
+            for slot in NARRATIVE_SLOTS:
+                items = []
+                for it in (decoded.get(slot) or [])[:3]:
+                    lead = _clean_text((it or {}).get("lead"), 70)
+                    body = _clean_text((it or {}).get("body"), 400)
+                    if lead and body:
+                        items.append({"lead": lead if lead.endswith((".", ":", "!", ";")) else lead + ".", "body": body})
+                if items:
+                    cleaned[slot] = items
+            if cleaned:
+                narratives["slots"].update(cleaned)
+                narratives["provider"] = "openai"
+                narratives["model"] = str(getattr(response, "model", ""))
+                narratives["ai_slots"] = sorted(cleaned)
+                status = str(getattr(response, "status", "") or "")
+                if status and status != "completed":
+                    narratives["provider_status"] = status
+            else:
+                narratives["provider_error"] = f"empty_ai_output(status={getattr(response, 'status', 'unknown')})"
+    except Exception as exc:
+        narratives["provider_error"] = _clean_text(exc, 400)
+    narratives["generated_at"] = _utcnow()
+    try:
+        RunStore().write(folder / "exports" / "analyst-narratives.json", narratives)
+    except Exception:
+        pass
+    return narratives
+
+
+def _render_emotion_profile(slide, emo: dict, narrative: list[dict], lang: str, ctx: dict) -> None:
+    el = lang == "el"
+    rows = (emo.get("rows") or [])[:8]
+
+    client = _clean_text(ctx.get("client") or "", 60)
+    topic = _clean_text(ctx.get("topic") or "", 60)
+    who = " · ".join(x for x in (client, topic) if x)
+    scope = "organic φωνές" if el else "organic voices"
+    when = " · ".join(x for x in (_period_label(ctx.get("date_from"), ctx.get("date_to"), lang), scope) if x)
+    if who:
+        _add_text(slide, who, 7.35, 0.36, 5.38, 0.28, size=12, color=INK, bold=True, align=PP_ALIGN.RIGHT)
+    _add_text(slide, when, 7.35, 0.66, 5.38, 0.24, size=9.5, color=MUTED, align=PP_ALIGN.RIGHT)
+
+    # --- Chart card: vertical bars, value + record count on every bar ---
+    cx, cy, cw, ch = 0.58, 1.42, 8.10, 5.44
+    _dash_card(slide, cx, cy, cw, ch)
+    _add_text(slide, ("ΚΑΤΑΝΟΜΗ ΣΥΝΑΙΣΘΗΜΑΤΩΝ · ΜΕΡΙΔΙΟ ΑΝΑΦΟΡΩΝ" if el else "EMOTION DISTRIBUTION · SHARE OF MENTIONS"),
+              cx + 0.28, cy + 0.18, cw - 0.56, 0.24, size=9.5, color=MUTED, bold=True, font=LABEL_FONT)
+
+    base_y, top_y = cy + 4.42, cy + 0.94
+    max_v = max((r["share"] for r in rows), default=1.0) or 1.0
+    plot_l, plot_r = cx + 0.42, cx + cw - 0.30
+    n = max(1, len(rows))
+    slot_w = (plot_r - plot_l) / n
+    bar_w = min(0.74, slot_w * 0.56)
+
+    step = 10 if max_v > 25 else 5 if max_v > 12 else 2
+    g = 0
+    while g <= max_v:
+        gy = base_y - (g / max_v) * (base_y - top_y)
+        if gy >= top_y - 0.02:
+            _add_rule(slide, plot_l, gy, plot_r - plot_l, color=DASH_TRACK, width=0.6)
+            _add_text(slide, str(g), cx + 0.03, gy - 0.09, 0.35, 0.18, size=7, color=NEUTRAL, align=PP_ALIGN.RIGHT)
+        g += step
+    _add_rule(slide, plot_l, base_y, plot_r - plot_l, color=STONE_DARK, width=0.8)
+
+    for i, r in enumerate(rows):
+        c = EMOTION_COLORS.get(r["key"], NEUTRAL)
+        cxi = plot_l + slot_w * (i + 0.5)
+        h = max(0.09, (r["share"] / max_v) * (base_y - top_y))
+        y = base_y - h
+        bar = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(cxi - bar_w / 2), Inches(y), Inches(bar_w), Inches(h))
+        bar.adjustments[0] = min(0.35, 0.09 / max(h, 0.12))
+        bar.fill.solid(); bar.fill.fore_color.rgb = _rgb(c)
+        bar.line.fill.background(); bar.shadow.inherit = False
+        lab_w = slot_w * 1.6
+        _add_text(slide, f"{r['share']:.1f}%", cxi - lab_w / 2, y - 0.42, lab_w, 0.26,
+                  size=13, color=c, bold=True, align=PP_ALIGN.CENTER)
+        if r.get("records"):
+            label = f"{r['records']} αναφορές" if el else f"{r['records']} mentions"
+            _add_text(slide, label, cxi - lab_w / 2, min(y - 0.19, base_y - 0.36), lab_w, 0.16,
+                      size=7, color=NEUTRAL, align=PP_ALIGN.CENTER)
+        name = _cat_label(r["key"], lang)
+        _add_text(slide, name, cxi - lab_w / 2, base_y + 0.10, lab_w, 0.22,
+                  size=10 if len(name) <= 9 else 8.8, color=INK, bold=True, align=PP_ALIGN.CENTER)
+
+    _add_text(slide, ("Ποσοστά επί των αναφορών με αναγνωρισμένο συναίσθημα · μόνο organic φωνές" if el
+                      else "Share of mentions with an identified emotion · organic voices only"),
+              cx + 0.28, cy + ch - 0.34, cw - 0.56, 0.22, size=8, color=NEUTRAL)
+
+    # --- Analysis card ---
+    nx, nw_ = 8.88, 3.85
+    _dash_card(slide, nx, 1.42, nw_, 4.30)
+    _add_text(slide, ("ΤΙ ΛΕΝΕ ΤΑ ΣΥΝΑΙΣΘΗΜΑΤΑ" if el else "WHAT THE EMOTIONS SAY"),
+              nx + 0.28, 1.62, nw_ - 0.56, 0.24, size=9.5, color=MUTED, bold=True, font=LABEL_FONT)
+    paras = (narrative or [])[:3]
+    block = (4.30 - 0.72) / max(1, len(paras) or 1)
+    py = 1.98
+    for it in paras:
+        _add_rich(slide, [((it.get("lead") or "") + " ", True), (it.get("body") or "", False)],
+                  nx + 0.28, py, nw_ - 0.56, block, size=8.8)
+        py += block
+    _add_text(slide, ("Γράφεται αυτόματα από την AI ανάλυση του run" if el else "Written automatically by the run's AI analysis"),
+              nx + 0.28, 5.42, nw_ - 0.56, 0.2, size=7, color=NEUTRAL)
+
+    # --- Chips ---
+    lead_key = emo.get("leading")
+    lead_color = EMOTION_COLORS.get(lead_key, NEUTRAL)
+    ky, kh_ = 5.90, 0.96
+    kw_ = (nw_ - 0.12) / 2
+    chips = [(f"{_safe_float(emo.get('negative_share')):.1f}%",
+              ("Αρνητικά συναισθήματα" if el else "Negative emotions"), NEG),
+             (_cat_label(lead_key, lang),
+              ("Κυρίαρχο συναίσθημα" if el else "Leading emotion"), lead_color)]
+    for i, (value, label, color) in enumerate(chips):
+        x = nx + i * (kw_ + 0.12)
+        _dash_card(slide, x, ky, kw_, kh_)
+        _add_text(slide, value, x, ky + 0.12, kw_, 0.34, size=14 if len(value) <= 9 else 11,
+                  color=color, bold=True, align=PP_ALIGN.CENTER)
+        _add_text(slide, label, x + 0.06, ky + 0.52, kw_ - 0.12, 0.3, size=8, color=MUTED, align=PP_ALIGN.CENTER)
+
+
 def generate_pptx(presentation_plan: dict, visual_pack: dict, output_path: Path, logo_path: Path) -> dict:
     prs = Presentation(); prs.slide_width = Inches(13.333333); prs.slide_height = Inches(7.5)
     blank = prs.slide_layouts[6]
@@ -2480,14 +2747,21 @@ def generate_pptx(presentation_plan: dict, visual_pack: dict, output_path: Path,
             elif typ == "reputation_timeline":
                 tl = presentation_plan.get("reputation_timeline")
                 if isinstance(tl, dict) and tl.get("points"):
-                    _render_reputation_timeline(slide, tl, lang, ctx)
+                    _render_reputation_timeline(slide, tl, lang, ctx,
+                                                (presentation_plan.get("slide_narratives") or {}).get("timeline"))
             elif typ in ("top_comments_positive", "top_comments_negative"):
                 tc = presentation_plan.get("top_comments") or {}
                 polarity = "positive" if typ.endswith("positive") else "negative"
                 entries = tc.get(polarity) or []
                 if entries:
-                    _render_top_comments(slide, entries, (tc.get("commentary") or {}).get(polarity) or [],
+                    slot = "top_positive" if polarity == "positive" else "top_negative"
+                    _render_top_comments(slide, entries, ((presentation_plan.get("slide_narratives") or {}).get(slot) or []),
                                          polarity, lang, ctx, presentation_plan.get("display_policy") or {})
+            elif typ == "emotion_profile_bars":
+                emo = presentation_plan.get("emotion_profile") or {}
+                if emo.get("rows"):
+                    _render_emotion_profile(slide, emo, ((presentation_plan.get("slide_narratives") or {}).get("emotions") or []),
+                                            lang, ctx)
             elif typ == "evidence_split":
                 pos=[c for c in claims if str((c.get("source_values") or {}).get("sentiment"))=="positive"]
                 neg=[c for c in claims if str((c.get("source_values") or {}).get("sentiment"))=="negative"]
@@ -2801,8 +3075,15 @@ def build_exports(folder: Path, plan: dict, *, force: bool=False, cancel_check: 
     # Slides 4-5: Top 10 comments by raw sentiment score + analyst commentary.
     top=_top_comments_data(folder,plan,pplan.get("language") or "en")
     lang_now=pplan.get("language") or "en"
+    emo=_emotion_profile_data(visual_pack,lang_now)
+    if emo:
+        pplan["emotion_profile"]=emo
+    # ONE AI pass writes every qualitative panel, so the analyst voice is
+    # consistent across slides and the reasoning budget is spent once.
+    narratives=_build_analyst_narratives(folder,plan,lang_now,top,emo,tl,visual_pack)
+    pplan["slide_narratives"]=narratives.get("slots") or {}
+    pplan["slide_narratives_provider"]=narratives.get("provider")
     if top:
-        top["commentary"]=_analyst_commentary(top,plan,lang_now)
         pplan["top_comments"]=top
         slides_list=pplan.get("slides") or []
         anchor_idx=next((i for i,sp in enumerate(slides_list) if sp.get("slide_id")=="reputation_timeline"),None)
@@ -2818,6 +3099,14 @@ def build_exports(folder: Path, plan: dict, *, force: bool=False, cancel_check: 
                 "title":f"Top {count} {adjective} {noun}","chart_ids":[],"claims":[],
                 "section":"opening","priority":97,"required":False,"notes":{}})
             insert_at+=1
+    if emo:
+        slides_list=pplan.get("slides") or []
+        after=next((i for i,sp in enumerate(slides_list) if sp.get("slide_id")=="top_comments_negative"),None)
+        if after is None:
+            after=next((i for i,sp in enumerate(slides_list) if sp.get("slide_id") in ("top_comments_positive","reputation_timeline","executive_summary")),0)
+        slides_list.insert(after+1,{"slide_id":"emotion_profile_bars","slide_type":"emotion_profile_bars",
+            "title":"Συναισθηματικό Προφίλ" if lang_now=="el" else "Emotional Profile",
+            "chart_ids":[],"claims":[],"section":"opening","priority":96,"required":False,"notes":{}})
     # Display policy for the client deck (internal docx keeps real details).
     policy_names=sorted(((top or {}).get("name_index") or {}).items(),key=lambda kv:-len(kv[0]))
     pplan["display_policy"]={
