@@ -7,6 +7,7 @@ on:
     paths:
       - '.github/workflows/comment-ui-integration.yml'
       - 'scripts/comment_ui_patch.py'
+      - 'tests/test_v184_hardening.py'
 
 permissions:
   contents: write
@@ -86,8 +87,12 @@ jobs:
               assert enabled.status_code == 200 and enabled.json()['comment_enabled'] is True
           print('Comment menu/API ON-OFF integration check passed for all four sources.')
           PY
+      - name: Reset test registry after integration exercise
+        run: rm -rf "$SIGNALYTH_RUNTIME_CONFIG_DIR"
       - name: Comment tests
         run: pytest -q tests/test_comment_deepening.py --tb=short
+      - name: Explicit-toggle hardening test
+        run: pytest -q tests/test_v184_hardening.py::test_registry_comment_route_verification_is_separate_and_reversible --tb=short
       - name: Regression gate
         run: pytest -q --tb=short -k 'not test_material_model_disagreement_forces_human_review'
       - name: Commit validated UI integration
