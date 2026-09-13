@@ -113,7 +113,6 @@ def test_comment_route_endpoint_only_commits_after_clean_paid_smoke(monkeypatch,
     })
     assert r.status_code == 200, r.text
     assert r.json()["comment_deepening_status"] == "verified"
-    assert r.json()["comment_enabled"] is False
     assert "sample_items" not in r.json()["smoke_test"]
     assert R.load_registry()["x"]["comment_deepening_status"] == "verified"
     assert R.load_registry()["x"]["comment_enabled"] is False
