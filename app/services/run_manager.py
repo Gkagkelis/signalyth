@@ -4,6 +4,7 @@ import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
+import uuid
 from pathlib import Path
 from uuid import uuid4
 
@@ -43,6 +44,7 @@ class RunManager:
         self.executor = ThreadPoolExecutor(max_workers=max(1, workers), thread_name_prefix="signalyth-run")
         self._lock = threading.RLock()
         self._jobs: dict[str, Future] = {}
+        self._lease_tokens: dict[str, str] = {}
         # Monotonic timestamp after which the current invocation must stop doing new
         # paid work, checkpoint and requeue a continuation. None disables the guard.
         self._deadline_monotonic: float | None = None
@@ -79,6 +81,9 @@ class RunManager:
             return max(0.0, (datetime.now(timezone.utc) - updated).total_seconds())
         except Exception:
             return None
+
+    def _lease_ok(self, run_id: str) -> bool:
+        return self._owns_lease(run_id, self._lease_tokens.get(run_id, ""))
 
     def _requeue_continuation(self, run_id: str) -> None:
         """Schedule a fresh invocation that resumes the run from durable state."""
@@ -159,9 +164,38 @@ class RunManager:
         self.set_invocation_deadline(settings.signalyth_worker_soft_deadline_seconds)
         self._worker(run_id)
 
+    def _claim_lease(self, run_id: str) -> str:
+        """Stamp this invocation as the owner of the run.
+
+        Serverless invocations are separate processes, so the in-process job map
+        cannot stop two workers from driving the same run after a stale-worker
+        resume. The newest claimant wins; older ones stand down at the next
+        phase boundary instead of rewinding the run's progress.
+        """
+        token = uuid.uuid4().hex
+        try:
+            status = self.store.read_status(run_id)
+            status["worker_lease"] = {"token": token, "claimed_at": _utcnow()}
+            self.store.write_status(run_id, status)
+        except Exception:
+            pass
+        return token
+
+    def _owns_lease(self, run_id: str, token: str) -> bool:
+        if not token:
+            return True
+        try:
+            lease = (self.store.read_status(run_id) or {}).get("worker_lease") or {}
+        except Exception:
+            return True  # unreadable status: do not strand the pipeline
+        current = str(lease.get("token") or "")
+        return not current or current == token
+
     def _worker(self, run_id: str):
         try:
             folder = self.store.folder_for(run_id)
+            lease_token = self._claim_lease(run_id)
+            self._lease_tokens[run_id] = lease_token
             if self.store.cancel_requested_folder(folder):
                 self._mark_cancelled_before_start(run_id)
                 return
@@ -247,6 +281,8 @@ class RunManager:
                 self._jobs.pop(run_id, None)
 
     def _run_cleaning(self, run_id: str, folder: Path, plan: dict):
+        if not self._lease_ok(run_id):
+            return  # a newer invocation owns this run
         if self.store.cancel_requested_folder(folder):
             self._mark_cancelled_after_collection(run_id)
             return
@@ -269,8 +305,7 @@ class RunManager:
             # and the requested *trusted/analyzable* target.  It may diversify a
             # dominant context and, when Comments is ON, deepen into direct replies.
             # Every adaptive Actor call remains inside the existing run budget.
-            needs_adaptive_layer = int(report.get("trusted_sample_shortfall", 0) or 0) > 0 or bool(plan.get("comments_requested"))
-            if needs_adaptive_layer and plan.get("search_strategy_version") in {"smart-collection-v2", "master30-search-v1"}:
+            if int(report.get("trusted_sample_shortfall", 0) or 0) > 0 and plan.get("search_strategy_version") in {"smart-collection-v2", "master30-search-v1"}:
                 adaptive_status = self.store.read_status(run_id)
                 adaptive_status.update({
                     "status": "running",
@@ -280,11 +315,30 @@ class RunManager:
                 })
                 adaptive_status.setdefault("progress", {})["percent"] = 89
                 self.store.write_status(run_id, adaptive_status)
+                def _adaptive_heartbeat(source: str) -> None:
+                    # A status write every call keeps the run visibly alive, so the
+                    # stale-worker recovery never resumes it in parallel.
+                    try:
+                        beat = self.store.read_status(run_id)
+                        beat["current"] = {
+                            "source": source,
+                            "code": "adaptive_collection",
+                            "message": "Diversifying relevant evidence and deepening useful conversations",
+                        }
+                        beat.setdefault("progress", {})["percent"] = 89
+                        self.store.write_status(run_id, beat)
+                    except Exception:
+                        pass
+
                 expanded = adaptive_expand_after_cleaning(
                     folder,
                     plan=plan,
                     initial_report=report,
                     cancel_check=lambda: self.store.cancel_requested_folder(folder),
+                    deadline_check=lambda: self._deadline_reached(
+                        margin_seconds=float(settings.signalyth_collection_deadline_margin_seconds)
+                    ),
+                    heartbeat=_adaptive_heartbeat,
                 )
                 report = expanded.get("report") or report
                 adaptive_status = self.store.read_status(run_id)
@@ -296,6 +350,30 @@ class RunManager:
                     "summary": expanded.get("audit"),
                 }
                 self.store.write_status(run_id, adaptive_status)
+                if (expanded.get("audit") or {}).get("deadline_reached"):
+                    # Collected evidence is already durable; hand the rest of the
+                    # pipeline to a fresh invocation instead of dying at the wall.
+                    cont = self.store.read_status(run_id)
+                    cont.update({
+                        "status": "queued",
+                        "phase": "cleaning",
+                        "fatal_error": None,
+                        "current": {
+                            "source": None,
+                            "code": "adaptive_continuation",
+                            "message": "Worker time budget reached; the analysis continues automatically from the saved evidence",
+                        },
+                    })
+                    self.store.write_status(run_id, cont)
+                    try:
+                        self.store.checkpoint_run(run_id)
+                    except Exception:
+                        pass
+                    try:
+                        self._requeue_continuation(run_id)
+                    except Exception:
+                        pass
+                    return
         except CleaningCancelled:
             self._mark_cancelled_after_collection(run_id)
             return
@@ -327,6 +405,8 @@ class RunManager:
             self._run_ai_analysis(run_id, folder, plan, terminal)
 
     def _run_ai_analysis(self, run_id: str, folder: Path, plan: dict, terminal_status: str):
+        if not self._lease_ok(run_id):
+            return  # superseded by a newer worker invocation
         if self.store.cancel_requested_folder(folder):
             self._mark_cancelled_after_collection(run_id)
             return
@@ -503,6 +583,8 @@ class RunManager:
             },
             "current": {"source": None, "code": "intelligence_engine", "message": "Computing deterministic reputation, impact, drivers and trends"},
         })
+        if not self._lease_ok(run_id):
+            return  # superseded by a newer worker invocation
         status.setdefault("progress", {})["percent"] = 96
         self.store.write_status(run_id, status)
         try:
@@ -557,6 +639,8 @@ class RunManager:
             },
             "current": {"source": None, "code": "automatic_investigations", "message": "Investigating meaningful changes, drivers, divergences, coordination and quality signals"},
         })
+        if not self._lease_ok(run_id):
+            return  # superseded by a newer worker invocation
         status.setdefault("progress", {})["percent"] = 98
         self.store.write_status(run_id, status)
         try:
