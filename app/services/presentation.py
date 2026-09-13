@@ -33,7 +33,7 @@ from app.services.storage import RunStore
 from app.services.visualizations import load_presentation_visual_pack, load_visualization_summary
 from app.services.report_synthesis import build_report_synthesis, final_consistency_qa
 
-PRESENTATION_RULESET_VERSION = "2.0.0"
+PRESENTATION_RULESET_VERSION = "2.1.0"
 PRESENTATION_METHODOLOGY_VERSION = "signalyth-presentation-intelligence-v1.4"
 PRESENTATION_CONTRACT_VERSION = "signalyth-presentation-pack-v1.4"
 
@@ -1533,6 +1533,20 @@ def _dash_dot(slide, x, y, d, color):
     return dot
 
 
+def _panel_label(slide, text, x, y, color=None, *, max_w=None):
+    """Premium panel header: soft tinted pill with the accent-coloured label.
+    One visual language for every card in the deck."""
+    color = color or AEGEAN
+    txt = _clean_text(text, 80)
+    w = min(max_w or 5.6, max(1.2, 0.42 + len(txt) * 0.098))
+    pill = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(x), Inches(y - 0.03), Inches(w), Inches(0.30))
+    pill.adjustments[0] = 0.5
+    pill.fill.solid(); pill.fill.fore_color.rgb = _rgb(_tint(color, 0.88))
+    pill.line.fill.background(); pill.shadow.inherit = False
+    _add_text(slide, txt, x, y - 0.03, w, 0.30, size=9, color=color, bold=True,
+              align=PP_ALIGN.CENTER, valign=MSO_ANCHOR.MIDDLE, font=LABEL_FONT)
+
+
 def _dash_card(slide, x, y, w, h):
     shape = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(x), Inches(y), Inches(w), Inches(h))
     shape.adjustments[0] = 0.055
@@ -1638,7 +1652,7 @@ def _render_executive_dashboard(slide, dash: dict, lang: str, ctx: dict) -> None
     # --- Card A: Brand Reputation gauge ---
     ax, aw = 0.58, 4.12
     _dash_card(slide, ax, row_y, aw, row_h)
-    _add_text(slide, "BRAND REPUTATION", ax + 0.28, row_y + 0.18, aw - 0.56, 0.24, size=9.5, color=MUTED, bold=True, font=LABEL_FONT)
+    _panel_label(slide, "BRAND REPUTATION", ax + 0.28, row_y + 0.20)
     cx, cy = ax + aw / 2, row_y + 1.52
     r_out, r_in = 1.00, 0.79
     r_mid, cap = (r_out + r_in) / 2, r_out - r_in
@@ -1680,8 +1694,7 @@ def _render_executive_dashboard(slide, dash: dict, lang: str, ctx: dict) -> None
     # --- Card B: weighted sentiment bars ---
     bx, bw = 4.90, 4.12
     _dash_card(slide, bx, row_y, bw, row_h)
-    _add_text(slide, "WEIGHTED SENTIMENT" if not el else "ΣΤΑΘΜΙΣΜΕΝΟ SENTIMENT",
-              bx + 0.28, row_y + 0.18, bw - 0.56, 0.24, size=9.5, color=MUTED, bold=True, font=LABEL_FONT)
+    _panel_label(slide, "WEIGHTED SENTIMENT" if not el else "ΣΤΑΘΜΙΣΜΕΝΟ SENTIMENT", bx + 0.28, row_y + 0.20)
     inner_x, inner_w = bx + 0.30, bw - 0.60
     bar_h, y0 = 0.20, row_y + 0.58
     rows_s = (dash.get("sentiment") or [])[:4]
@@ -1703,8 +1716,7 @@ def _render_executive_dashboard(slide, dash: dict, lang: str, ctx: dict) -> None
     # --- Card C: source composition donut ---
     dx, dw = 9.22, 3.51
     _dash_card(slide, dx, row_y, dw, row_h)
-    _add_text(slide, "SOURCE MIX" if not el else "ΣΥΝΘΕΣΗ ΠΗΓΩΝ",
-              dx + 0.28, row_y + 0.18, dw - 0.56, 0.24, size=9.5, color=MUTED, bold=True, font=LABEL_FONT)
+    _panel_label(slide, "SOURCE MIX" if not el else "ΣΥΝΘΕΣΗ ΠΗΓΩΝ", dx + 0.28, row_y + 0.20)
     comp = dash.get("composition") or []
     comp_colors = {"person": AEGEAN, "media": MIXED, "unknown": NEUTRAL}
     ccx, ccy = dx + dw / 2, row_y + 1.28
@@ -1990,8 +2002,7 @@ def _render_reputation_timeline(slide, tl: dict, lang: str, ctx: dict, narrative
     # --- Chart card ---
     cx0, cy0, cw, chh = 0.58, 1.42, 8.10, 5.44
     _dash_card(slide, cx0, cy0, cw, chh)
-    _add_text(slide, ("BRAND REPUTATION · ΕΞΕΛΙΞΗ ΣΤΗΝ ΠΕΡΙΟΔΟ" if el else "BRAND REPUTATION · EVOLUTION OVER THE PERIOD"),
-              cx0 + 0.28, cy0 + 0.18, cw - 0.56, 0.24, size=9.5, color=MUTED, bold=True, font=LABEL_FONT)
+    _panel_label(slide, ("BRAND REPUTATION · ΕΞΕΛΙΞΗ ΣΤΗΝ ΠΕΡΙΟΔΟ" if el else "BRAND REPUTATION · EVOLUTION OVER THE PERIOD"), cx0 + 0.28, cy0 + 0.20)
 
     px0, px1 = cx0 + 0.62, cx0 + cw - 0.34
     py_bot, py_top = cy0 + 4.62, cy0 + 1.02
@@ -2089,8 +2100,7 @@ def _render_reputation_timeline(slide, tl: dict, lang: str, ctx: dict, narrative
     # --- Narrative card ---
     nx, nw_ = 8.88, 3.85
     _dash_card(slide, nx, 1.42, nw_, 3.62)
-    _add_text(slide, ("ΤΙ ΔΕΙΧΝΕΙ Η ΓΡΑΜΜΗ" if el else "WHAT THE LINE SHOWS"),
-              nx + 0.28, 1.62, nw_ - 0.56, 0.24, size=9.5, color=MUTED, bold=True, font=LABEL_FONT)
+    _panel_label(slide, ("ΤΙ ΔΕΙΧΝΕΙ Η ΓΡΑΜΜΗ" if el else "WHAT THE LINE SHOWS"), nx + 0.28, 1.64)
     if narrative:
         paras = [((it.get("lead") or ""), " " + (it.get("body") or "")) for it in narrative[:4]]
     else:
@@ -2348,11 +2358,11 @@ def _render_top_comments(slide, entries: list[dict], commentary: list[dict],
         num.text_frame.margin_left = num.text_frame.margin_right = 0
         chip_w = 0.74
         chip = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(lx + lw - chip_w - 0.12), Inches(y + h / 2 - 0.13), Inches(chip_w), Inches(0.26))
-        chip.adjustments[0] = 0.5; chip.fill.solid(); chip.fill.fore_color.rgb = _rgb(soft)
+        chip.adjustments[0] = 0.5; chip.fill.solid(); chip.fill.fore_color.rgb = _rgb(accent)
         chip.line.fill.background(); chip.shadow.inherit = False
         sign = "+" if e["score"] > 0 else "−"
         _add_text(slide, f"{sign}{abs(e['score']):.2f}", lx + lw - chip_w - 0.12, y + h / 2 - 0.13, chip_w, 0.26,
-                  size=9.5, color=accent, bold=True, align=PP_ALIGN.CENTER, valign=MSO_ANCHOR.MIDDLE)
+                  size=9.5, color=WHITE, bold=True, align=PP_ALIGN.CENTER, valign=MSO_ANCHOR.MIDDLE)
         shown_author = _pseudo_label(e["author_idx"] or (i + 1), lang) if anonymize else str(e["author"])
         meta = " · ".join(x for x in (_upper_label(shown_author), e["date"]) if x)
         _add_text(slide, meta, lx + 0.46, y + 0.045, lw - 1.42, 0.16, size=6.8, color=NEUTRAL, bold=True, font=LABEL_FONT)
@@ -2363,8 +2373,7 @@ def _render_top_comments(slide, entries: list[dict], commentary: list[dict],
     # --- Analyst commentary card ---
     nx, nw_ = 8.88, 3.85
     _dash_card(slide, nx, 1.42, nw_, 4.30)
-    _add_text(slide, ("Η ΜΑΤΙΑ ΤΟΥ ΑΝΑΛΥΤΗ" if el else "THE ANALYST'S VIEW"),
-              nx + 0.28, 1.62, nw_ - 0.56, 0.24, size=9.5, color=MUTED, bold=True, font=LABEL_FONT)
+    _panel_label(slide, ("Η ΜΑΤΙΑ ΤΟΥ ΑΝΑΛΥΤΗ" if el else "THE ANALYST'S VIEW"), nx + 0.28, 1.64, accent)
     paras = (commentary or [])[:3]
     block = (4.30 - 0.72) / max(1, len(paras) or 1)
     py = 1.98
@@ -2816,8 +2825,7 @@ def _render_emotion_profile(slide, emo: dict, narrative: list[dict], lang: str, 
     # --- Chart card: vertical bars, value + record count on every bar ---
     cx, cy, cw, ch = 0.58, 1.42, 8.10, 5.44
     _dash_card(slide, cx, cy, cw, ch)
-    _add_text(slide, ("ΚΑΤΑΝΟΜΗ ΣΥΝΑΙΣΘΗΜΑΤΩΝ · ΜΕΡΙΔΙΟ ΑΝΑΦΟΡΩΝ" if el else "EMOTION DISTRIBUTION · SHARE OF MENTIONS"),
-              cx + 0.28, cy + 0.18, cw - 0.56, 0.24, size=9.5, color=MUTED, bold=True, font=LABEL_FONT)
+    _panel_label(slide, ("ΚΑΤΑΝΟΜΗ ΣΥΝΑΙΣΘΗΜΑΤΩΝ · ΜΕΡΙΔΙΟ ΑΝΑΦΟΡΩΝ" if el else "EMOTION DISTRIBUTION · SHARE OF MENTIONS"), cx + 0.28, cy + 0.20)
 
     base_y, top_y = cy + 4.42, cy + 0.94
     max_v = max((r["share"] for r in rows), default=1.0) or 1.0
@@ -2863,8 +2871,7 @@ def _render_emotion_profile(slide, emo: dict, narrative: list[dict], lang: str, 
     # --- Analysis card ---
     nx, nw_ = 8.88, 3.85
     _dash_card(slide, nx, 1.42, nw_, 4.30)
-    _add_text(slide, ("ΤΙ ΛΕΝΕ ΤΑ ΣΥΝΑΙΣΘΗΜΑΤΑ" if el else "WHAT THE EMOTIONS SAY"),
-              nx + 0.28, 1.62, nw_ - 0.56, 0.24, size=9.5, color=MUTED, bold=True, font=LABEL_FONT)
+    _panel_label(slide, ("ΤΙ ΛΕΝΕ ΤΑ ΣΥΝΑΙΣΘΗΜΑΤΑ" if el else "WHAT THE EMOTIONS SAY"), nx + 0.28, 1.64)
     paras = (narrative or [])[:3]
     block = (4.30 - 0.72) / max(1, len(paras) or 1)
     py = 1.98
@@ -3025,7 +3032,7 @@ def _render_emotion_anatomy(slide, item: dict, narrative: list[dict], lang: str,
     _dash_card(slide, cx, cy, cw, chh)
     header = (f"ΜΕΡΙΔΙΟ · {_upper_label(name)} ΣΤΗ ΣΥΖΗΤΗΣΗ ΑΝΑ ΗΜΕΡΑ" if el
               else f"SHARE OF {_upper_label(name)} IN THE CONVERSATION · PER DAY")
-    _add_text(slide, header, cx + 0.28, cy + 0.18, cw - 0.56, 0.24, size=9.5, color=MUTED, bold=True, font=LABEL_FONT)
+    _panel_label(slide, header, cx + 0.28, cy + 0.20, accent)
 
     pts = item.get("points") or []
     if len(pts) >= 2:
@@ -3092,9 +3099,8 @@ def _render_emotion_anatomy(slide, item: dict, narrative: list[dict], lang: str,
     # --- Bottom left: highest-intensity voices ---
     vy, vh = 4.34, 2.52
     _dash_card(slide, cx, vy, cw, vh)
-    _add_text(slide, (f"ΟΙ ΦΩΝΕΣ ΜΕ ΤΗΝ ΥΨΗΛΟΤΕΡΗ ΕΝΤΑΣΗ · {_upper_label(name)}" if el
-                      else f"HIGHEST-INTENSITY VOICES · {_upper_label(name)}"),
-              cx + 0.28, vy + 0.16, cw - 0.56, 0.24, size=9.5, color=MUTED, bold=True, font=LABEL_FONT)
+    _panel_label(slide, (f"ΟΙ ΦΩΝΕΣ ΜΕ ΤΗΝ ΥΨΗΛΟΤΕΡΗ ΕΝΤΑΣΗ · {_upper_label(name)}" if el
+                         else f"HIGHEST-INTENSITY VOICES · {_upper_label(name)}"), cx + 0.28, vy + 0.18, accent)
     voices = item.get("voices") or []
     if voices:
         lx, lw = cx + 0.28, cw - 0.56
@@ -3125,11 +3131,11 @@ def _render_emotion_anatomy(slide, item: dict, narrative: list[dict], lang: str,
             chip_w = 1.32
             chip = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(lx + lw - chip_w - 0.12),
                                           Inches(y + h / 2 - 0.13), Inches(chip_w), Inches(0.26))
-            chip.adjustments[0] = 0.5; chip.fill.solid(); chip.fill.fore_color.rgb = _rgb(soft)
+            chip.adjustments[0] = 0.5; chip.fill.solid(); chip.fill.fore_color.rgb = _rgb(accent)
             chip.line.fill.background(); chip.shadow.inherit = False
             _add_text(slide, (f"ένταση {v['intensity']:.2f}" if el else f"intensity {v['intensity']:.2f}"),
                       lx + lw - chip_w - 0.12, y + h / 2 - 0.13, chip_w, 0.26,
-                      size=8.5, color=accent, bold=True, align=PP_ALIGN.CENTER, valign=MSO_ANCHOR.MIDDLE)
+                      size=8.5, color=WHITE, bold=True, align=PP_ALIGN.CENTER, valign=MSO_ANCHOR.MIDDLE)
             shown = _pseudo_label(v.get("author_idx") or (i + 1), lang) if anonymize else str(v["author"])
             meta = " · ".join(x for x in (_upper_label(shown), v["date"]) if x)
             _add_text(slide, meta, lx + 0.16, y + 0.045, lw - 1.62, 0.16, size=6.8, color=NEUTRAL, bold=True, font=LABEL_FONT)
@@ -3143,8 +3149,7 @@ def _render_emotion_anatomy(slide, item: dict, narrative: list[dict], lang: str,
     # --- Right: anatomy narrative ---
     nx, nw_ = 8.88, 3.85
     _dash_card(slide, nx, 1.42, nw_, 4.30)
-    _add_text(slide, (f"Η ΑΝΑΤΟΜΙΑ · {_upper_label(name)}" if el else f"THE ANATOMY · {_upper_label(name)}"),
-              nx + 0.28, 1.62, nw_ - 0.56, 0.24, size=9.5, color=MUTED, bold=True, font=LABEL_FONT)
+    _panel_label(slide, (f"Η ΑΝΑΤΟΜΙΑ · {_upper_label(name)}" if el else f"THE ANATOMY · {_upper_label(name)}"), nx + 0.28, 1.64, accent)
     paras = (narrative or [])[:3]
     block = (4.30 - 0.72) / max(1, len(paras) or 1)
     py = 1.98
