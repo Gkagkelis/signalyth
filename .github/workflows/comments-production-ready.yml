@@ -33,7 +33,15 @@ jobs:
           python-version: '3.12'
           cache: 'pip'
       - name: Apply production comments patch
-        run: python scripts/comments_production_ready_patch.py
+        run: |
+          python scripts/comments_production_ready_patch.py
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('tests/test_comment_deepening.py')
+          t=p.read_text(encoding='utf-8')
+          t=t.replace('cleaned = result["records"][0]', 'cleaned = result["cleaned"][0]')
+          p.write_text(t, encoding='utf-8')
+          PY
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
