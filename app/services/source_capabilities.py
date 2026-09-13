@@ -101,33 +101,44 @@ def source_capabilities(source: str) -> dict:
 
 
 def comments_forecast(source: str, requested: bool, registry_cfg: dict | None = None) -> dict:
-    """Fail closed: installed/known is not the same as verified or enabled."""
+    """Describe whether the configured comment layer can run for this analysis.
+
+    The four production social routes are allowed from their curated public Actor
+    contracts. A successful live run may later upgrade the route to verified, but
+    a separate paid smoke is not a prerequisite for normal collection.
+    """
     cap = source_capabilities(source)["comment_deepening"]
     registry_cfg = registry_cfg or {}
     route_status = str(registry_cfg.get("comment_deepening_status") or "unverified")
     configured_actor = registry_cfg.get("comment_actor_id") or cap.get("candidate_actor_id")
+    production_scope = source in {"x", "tiktok", "instagram", "facebook"}
     live_verified = bool(cap.get("live_verified")) or route_status == "verified"
+    contract_ready = bool(production_scope and cap.get("public_schema_known") and configured_actor and route_status in {"configured", "verified"})
     configured_enabled = bool(registry_cfg.get("comment_enabled", False))
+
     if not requested:
         status = "not_requested"
-    elif cap.get("mode") == "not_applicable":
+    elif not production_scope or cap.get("mode") == "not_applicable":
         status = "not_applicable"
     elif live_verified and configured_enabled:
         status = "verified_available"
+    elif contract_ready and configured_enabled:
+        status = "configured_available"
     elif live_verified and not configured_enabled:
         status = "verified_disabled"
-    elif cap.get("mode") == "same_actor" and cap.get("public_schema_known"):
-        status = "available_but_unverified"
+    elif contract_ready and not configured_enabled:
+        status = "configured_disabled"
     elif cap.get("public_schema_known"):
-        status = "candidate_requires_live_verification"
+        status = "candidate_not_configured"
     else:
-        status = "unknown_requires_verification"
+        status = "unknown_requires_configuration"
     return {
         "requested": bool(requested),
         "status": status,
         **cap,
         "candidate_actor_id": configured_actor,
         "live_verified": live_verified,
+        "contract_ready": contract_ready,
         "enabled": configured_enabled,
         "registry_route_status": route_status,
     }
@@ -149,7 +160,7 @@ def build_comment_deepening_input(
     max_per_parent: int | None = None,
     include_replies: bool = True,
 ) -> dict:
-    """Build the public-schema input shape for a verified comment/reply route."""
+    """Build the curated public-schema input shape for a comment/reply route."""
     cap = source_capabilities(source).get("comment_deepening") or {}
     if cap.get("mode") == "not_applicable":
         raise ValueError(f"Comment deepening is not applicable to source {source}.")

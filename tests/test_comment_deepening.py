@@ -1,5 +1,6 @@
 from app.models import SourceConfigUpdate
 from app.services.comment_deepening import normalize_comment_dataset
+from app.services.cleaning import clean_records
 from app.services.source_capabilities import build_comment_deepening_input, comments_forecast
 
 
@@ -56,10 +57,12 @@ def test_x_reply_normalization_is_reply_layer():
     assert rows[0]["parent_post"] == "123"
 
 
-def test_forecast_requires_both_verification_and_settings_enable():
-    cfg = {"comment_actor_id": "a/b", "comment_deepening_status": "verified", "comment_enabled": False}
-    assert comments_forecast("facebook", True, cfg)["status"] == "verified_disabled"
+def test_forecast_allows_curated_configured_actor_when_enabled():
+    cfg = {"comment_actor_id": "scraper_one/facebook-comments-scraper", "comment_deepening_status": "configured", "comment_enabled": False}
+    assert comments_forecast("facebook", True, cfg)["status"] == "configured_disabled"
     cfg["comment_enabled"] = True
+    assert comments_forecast("facebook", True, cfg)["status"] == "configured_available"
+    cfg["comment_deepening_status"] = "verified"
     assert comments_forecast("facebook", True, cfg)["status"] == "verified_available"
 
 
@@ -68,3 +71,23 @@ def test_source_update_model_exposes_comment_controls():
     assert row.comment_enabled is True
     assert row.comment_max_per_parent == 55
     assert row.comment_max_parents == 9
+
+
+def test_comment_can_be_contextually_relevant_via_parent_without_repeating_topic():
+    rows = [{
+        "id": "comment:x:1", "platform": "x", "text": "Εμένα από το πρωί δεν δουλεύει τίποτα",
+        "date": "2026-09-13T09:00:00+00:00", "author": "person", "url": "https://x.com/u/status/2",
+        "evidence_layer": "reply", "parent_post": "1",
+        "parent_context": "Vodafone: μεγάλη διακοπή στο δίκτυο σήμερα στην Ελλάδα",
+        "likes": 1, "comments": 0, "shares": 0, "views": 0, "raw_data": {},
+    }]
+    plan = {
+        "client": "Vodafone", "topic": "Vodafone", "market": "Greece",
+        "core_terms": ["Vodafone"], "context_terms": ["διακοπή", "δίκτυο"],
+        "greeklish_variants": [], "exclusions": [], "target_total": 1,
+        "sources": [{"source": "x", "target_items": 1}],
+    }
+    result = clean_records(rows, plan)
+    cleaned = result["cleaned"][0]
+    assert "contextual_parent_match" in cleaned["cleaning"]["flags"]
+    assert cleaned["cleaning"]["decision"] != "excluded"

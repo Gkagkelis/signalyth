@@ -63,16 +63,17 @@ def test_all_63_combinations_remain_budget_safe_at_tiny_and_large_targets():
             assert sum(sp.target_items for sp in plan.sources) == target
 
 
-def test_comments_forecast_never_claims_unverified_full_coverage():
+def test_comments_forecast_distinguishes_operational_readiness_from_live_confirmation():
     plan = build_collection_plan(draft(SOURCES, comments=True))
     cc = plan.preflight_forecast["comments_coverage"]
+    assert cc["operationally_ready"] is True
     assert cc["fully_live_verified"] is False
-    assert "facebook" in cc["verification_blockers"]
-    assert "tiktok" in cc["verification_blockers"]
-    assert "youtube" in cc["verification_blockers"]
+    assert cc["verification_blockers"] == []
     rows = {r["source"]: r for r in plan.preflight_forecast["sources"]}
+    for source in ("x", "tiktok", "instagram", "facebook"):
+        assert rows[source]["comments"]["status"] in {"configured_available", "verified_available"}
+    assert rows["youtube"]["comments"]["status"] == "not_applicable"
     assert rows["news"]["comments"]["status"] == "not_applicable"
-    assert rows["x"]["comments"]["status"] == "available_but_unverified"
 
 
 class MatrixRunner:

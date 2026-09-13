@@ -16,6 +16,14 @@ HISTORY_PATH = RUNTIME_CONFIG_DIR / "source_registry_history.json"
 BASE_REGISTRY_PATH = BASE_DIR / "config" / "source_registry.json"
 BASE_HISTORY_PATH = BASE_DIR / "config" / "source_registry_history.json"
 
+COMMENT_ROLLOUT_VERSION = "comments-production-ready-v1"
+COMMENT_PRODUCTION_ROLLOUT = {
+    "x": {"actor_id": "xquik/x-tweet-scraper", "route": "replies", "input_field": "replyTweetIds", "price": 0.15},
+    "tiktok": {"actor_id": "epctex/tiktok-comment-scraper", "route": "comments", "input_field": "startUrls", "price": 0.30},
+    "instagram": {"actor_id": "scrapesmith/instagram-comments-scraper", "route": "comments", "input_field": "postUrls", "price": 0.50},
+    "facebook": {"actor_id": "scraper_one/facebook-comments-scraper", "route": "comments", "input_field": "postUrls", "price": 0.40},
+}
+
 
 def _ensure_runtime_file(path: Path, baseline: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -43,7 +51,8 @@ def _write_json_atomic(path: Path, data: Any) -> None:
 def load_registry() -> dict:
     _ensure_runtime_file(REGISTRY_PATH, BASE_REGISTRY_PATH)
     data = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
-    # Backward-compatible defaults for releases before the live connection manager.
+    changed = False
+    # Backward-compatible defaults plus one-time migration of the curated comment rollout.
     for source, cfg in data.items():
         cfg.setdefault("default_actor_id", cfg.get("actor_id"))
         cfg.setdefault("adapter_mode", "legacy" if cfg.get("actor_id") == cfg.get("default_actor_id") else "generic")
@@ -60,6 +69,7 @@ def load_registry() -> dict:
         cfg.setdefault("comment_deepening_status", "unverified")
         cfg.setdefault("comment_actor_id", None)
         cfg.setdefault("comment_last_smoke_test_at", None)
+        cfg.setdefault("comment_last_live_success_at", None)
         cfg.setdefault("comment_route", None)
         cfg.setdefault("comment_input_field", None)
         cfg.setdefault("comment_output_mapping", {})
@@ -68,6 +78,42 @@ def load_registry() -> dict:
         cfg.setdefault("comment_max_per_parent", 40)
         cfg.setdefault("comment_max_parents", 12)
         cfg.setdefault("comment_include_replies", True)
+        cfg.setdefault("comment_rollout_version", None)
+
+        rollout = COMMENT_PRODUCTION_ROLLOUT.get(source)
+        if rollout and cfg.get("comment_actor_id") in (None, "", rollout["actor_id"]):
+            desired_status = "verified" if cfg.get("comment_deepening_status") == "verified" else "configured"
+            desired = {
+                "comment_deepening_status": desired_status,
+                "comment_actor_id": rollout["actor_id"],
+                "comment_route": rollout["route"],
+                "comment_input_field": rollout["input_field"],
+                "comment_price_per_1000_hint": rollout["price"],
+            }
+            for key, value in desired.items():
+                if cfg.get(key) != value:
+                    cfg[key] = value
+                    changed = True
+            if cfg.get("comment_rollout_version") != COMMENT_ROLLOUT_VERSION:
+                # First production migration only: ready by default. The run-level
+                # Comments switch remains the explicit per-analysis paid opt-in.
+                cfg["comment_enabled"] = True
+                cfg["comment_rollout_version"] = COMMENT_ROLLOUT_VERSION
+                changed = True
+        elif source in {"youtube", "news"} and cfg.get("comment_rollout_version") != COMMENT_ROLLOUT_VERSION:
+            cfg.update({
+                "comment_deepening_status": "not_applicable",
+                "comment_actor_id": None,
+                "comment_route": None,
+                "comment_input_field": None,
+                "comment_enabled": False,
+                "comment_price_per_1000_hint": None,
+                "comment_rollout_version": COMMENT_ROLLOUT_VERSION,
+            })
+            changed = True
+
+    if changed:
+        _write_json_atomic(REGISTRY_PATH, data)
     return data
 
 
@@ -114,10 +160,10 @@ def update_source(source: str, changes: dict) -> dict:
     }
     current = data[source]
     if changes.get("comment_enabled") is True:
-        if current.get("comment_deepening_status") != "verified":
-            raise PermissionError("Comments cannot be enabled until this comment Actor passes the paid live smoke verification.")
         if not current.get("comment_actor_id"):
             raise PermissionError("Comments cannot be enabled because no comment Actor is configured for this source.")
+        if current.get("comment_deepening_status") not in {"configured", "verified"}:
+            raise PermissionError("Comments cannot be enabled because this source has no production-ready comment Actor contract.")
     requested_actor = changes.get("actor_id")
     actor_changed = requested_actor is not None and requested_actor != current.get("actor_id")
     if actor_changed and current.get("locked", False) and changes.get("locked") is not False:
@@ -242,7 +288,7 @@ def commit_comment_route_verification(
         "comment_route": route,
         "comment_input_field": input_field,
         "comment_output_mapping": deepcopy(output_mapping or {}),
-        "comment_enabled": False,
+        "comment_enabled": bool(current.get("comment_enabled", False)),
     })
     _write_json_atomic(REGISTRY_PATH, data)
     return deepcopy(current)
@@ -254,15 +300,29 @@ def clear_comment_route_verification(source: str, reason: str = "manual_clear") 
         raise KeyError(source)
     current = data[source]
     _append_history(source, current, reason)
-    current.update({
-        "comment_deepening_status": "unverified",
-        "comment_actor_id": None,
-        "comment_last_smoke_test_at": None,
-        "comment_route": None,
-        "comment_input_field": None,
-        "comment_output_mapping": {},
-        "comment_enabled": False,
-    })
+    rollout = COMMENT_PRODUCTION_ROLLOUT.get(source)
+    if rollout:
+        # Clearing a live confirmation must not uninstall a curated production contract.
+        current.update({
+            "comment_deepening_status": "configured",
+            "comment_actor_id": rollout["actor_id"],
+            "comment_last_smoke_test_at": None,
+            "comment_last_live_success_at": None,
+            "comment_route": rollout["route"],
+            "comment_input_field": rollout["input_field"],
+            "comment_output_mapping": {},
+        })
+    else:
+        current.update({
+            "comment_deepening_status": "not_applicable",
+            "comment_actor_id": None,
+            "comment_last_smoke_test_at": None,
+            "comment_last_live_success_at": None,
+            "comment_route": None,
+            "comment_input_field": None,
+            "comment_output_mapping": {},
+            "comment_enabled": False,
+        })
     _write_json_atomic(REGISTRY_PATH, data)
     return deepcopy(current)
 

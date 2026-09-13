@@ -20,17 +20,19 @@
     "output_mapping": {},
     "mapping_confidence": null,
     "mapping_signature": null,
-    "comment_deepening_status": "unverified",
+    "comment_deepening_status": "configured",
     "comment_actor_id": "xquik/x-tweet-scraper",
     "comment_last_smoke_test_at": null,
     "comment_route": "replies",
     "comment_input_field": "replyTweetIds",
     "comment_output_mapping": {},
-    "comment_enabled": false,
+    "comment_enabled": true,
     "comment_price_per_1000_hint": 0.15,
     "comment_max_per_parent": 40,
     "comment_max_parents": 12,
-    "comment_include_replies": true
+    "comment_include_replies": true,
+    "comment_rollout_version": "comments-production-ready-v1",
+    "comment_last_live_success_at": null
   },
   "tiktok": {
     "label": "TikTok",
@@ -53,17 +55,19 @@
     "output_mapping": {},
     "mapping_confidence": null,
     "mapping_signature": null,
-    "comment_deepening_status": "unverified",
+    "comment_deepening_status": "configured",
     "comment_actor_id": "epctex/tiktok-comment-scraper",
     "comment_last_smoke_test_at": null,
     "comment_route": "comments",
     "comment_input_field": "startUrls",
     "comment_output_mapping": {},
-    "comment_enabled": false,
+    "comment_enabled": true,
     "comment_price_per_1000_hint": 0.3,
     "comment_max_per_parent": 40,
     "comment_max_parents": 12,
-    "comment_include_replies": true
+    "comment_include_replies": true,
+    "comment_rollout_version": "comments-production-ready-v1",
+    "comment_last_live_success_at": null
   },
   "instagram": {
     "label": "Instagram",
@@ -86,17 +90,19 @@
     "output_mapping": {},
     "mapping_confidence": null,
     "mapping_signature": null,
-    "comment_deepening_status": "unverified",
+    "comment_deepening_status": "configured",
     "comment_actor_id": "scrapesmith/instagram-comments-scraper",
     "comment_last_smoke_test_at": null,
     "comment_route": "comments",
     "comment_input_field": "postUrls",
     "comment_output_mapping": {},
-    "comment_enabled": false,
+    "comment_enabled": true,
     "comment_price_per_1000_hint": 0.5,
     "comment_max_per_parent": 40,
     "comment_max_parents": 12,
-    "comment_include_replies": true
+    "comment_include_replies": true,
+    "comment_rollout_version": "comments-production-ready-v1",
+    "comment_last_live_success_at": null
   },
   "facebook": {
     "label": "Facebook",
@@ -119,17 +125,19 @@
     "output_mapping": {},
     "mapping_confidence": null,
     "mapping_signature": null,
-    "comment_deepening_status": "unverified",
+    "comment_deepening_status": "configured",
     "comment_actor_id": "scraper_one/facebook-comments-scraper",
     "comment_last_smoke_test_at": null,
     "comment_route": "comments",
     "comment_input_field": "postUrls",
     "comment_output_mapping": {},
-    "comment_enabled": false,
-    "comment_price_per_1000_hint": 0.3,
+    "comment_enabled": true,
+    "comment_price_per_1000_hint": 0.4,
     "comment_max_per_parent": 40,
     "comment_max_parents": 12,
-    "comment_include_replies": true
+    "comment_include_replies": true,
+    "comment_rollout_version": "comments-production-ready-v1",
+    "comment_last_live_success_at": null
   },
   "youtube": {
     "label": "YouTube",
@@ -152,7 +160,7 @@
     "output_mapping": {},
     "mapping_confidence": null,
     "mapping_signature": null,
-    "comment_deepening_status": "unverified",
+    "comment_deepening_status": "not_applicable",
     "comment_actor_id": null,
     "comment_last_smoke_test_at": null,
     "comment_route": null,
@@ -162,7 +170,9 @@
     "comment_price_per_1000_hint": null,
     "comment_max_per_parent": 40,
     "comment_max_parents": 12,
-    "comment_include_replies": true
+    "comment_include_replies": true,
+    "comment_rollout_version": "comments-production-ready-v1",
+    "comment_last_live_success_at": null
   },
   "news": {
     "label": "News",
@@ -185,7 +195,7 @@
     "output_mapping": {},
     "mapping_confidence": null,
     "mapping_signature": null,
-    "comment_deepening_status": "unverified",
+    "comment_deepening_status": "not_applicable",
     "comment_actor_id": null,
     "comment_last_smoke_test_at": null,
     "comment_route": null,
@@ -195,6 +205,8 @@
     "comment_price_per_1000_hint": null,
     "comment_max_per_parent": 40,
     "comment_max_parents": 12,
-    "comment_include_replies": true
+    "comment_include_replies": true,
+    "comment_rollout_version": "comments-production-ready-v1",
+    "comment_last_live_success_at": null
   }
 }

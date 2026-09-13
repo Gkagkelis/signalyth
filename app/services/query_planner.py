@@ -513,7 +513,7 @@ def _preflight_forecast(draft: AnalysisDraft, plans: list[SourcePlan], registry:
     for sp in plans:
         cfg = registry.get(sp.source, {})
         comment = comments_forecast(sp.source, bool(draft.comments), cfg)
-        if draft.comments and comment.get("status") not in {"verified_available", "not_applicable"}:
+        if draft.comments and comment.get("status") not in {"verified_available", "configured_available", "not_applicable"}:
             blockers.append(sp.source)
         is_default = bool(cfg.get("locked") and cfg.get("actor_id") == cfg.get("default_actor_id") == sp.actor_id)
         rows.append({
@@ -524,7 +524,11 @@ def _preflight_forecast(draft: AnalysisDraft, plans: list[SourcePlan], registry:
         })
     comments_coverage = {
         "requested": bool(draft.comments),
-        "fully_live_verified": bool(draft.comments) and not blockers,
+        "operationally_ready": bool(draft.comments) and not blockers,
+        "fully_live_verified": bool(draft.comments) and not blockers and all(
+            (r.get("comments") or {}).get("live_verified") or (r.get("comments") or {}).get("status") == "not_applicable"
+            for r in rows
+        ),
         "verification_blockers": blockers,
     }
     return {
@@ -557,7 +561,7 @@ def build_collection_plan(draft: AnalysisDraft) -> CollectionPlan:
         s for s in selected
         if draft.comments
         and bool(registry[s].get("comment_enabled", False))
-        and registry[s].get("comment_deepening_status") == "verified"
+        and registry[s].get("comment_deepening_status") in {"configured", "verified"}
     ]
     primary_budget = float(draft.max_budget_usd) * (0.75 if live_comment_sources else 1.0)
     if selected:

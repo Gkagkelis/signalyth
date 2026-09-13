@@ -234,21 +234,41 @@ def _relevance_score(row: dict, plan: dict, view: TextView, market_score: float)
     greeklish_terms = [x for x in plan.get("greeklish_variants", []) if str(x).strip()]
     exclusions = [x for x in plan.get("exclusions", []) if str(x).strip()]
 
-    core_hits = [x for x in core_terms if _term_present(view.folded, x)]
+    layer = str(row.get("evidence_layer") or "primary")
+    parent_context = str(row.get("parent_context") or "").strip() if layer in {"comment", "reply"} else ""
+    parent_view = _text_view(parent_context) if parent_context else None
+
+    direct_core_hits = [x for x in core_terms if _term_present(view.folded, x)]
+    parent_core_hits = [x for x in core_terms if parent_view and _term_present(parent_view.folded, x)]
+    core_hits = list(dict.fromkeys([*direct_core_hits, *parent_core_hits]))
     core_folded = {_fold(x) for x in core_terms if _fold(x)}
     context_candidates = [x for x in [*context_terms, *greeklish_terms] if _fold(x) not in core_folded]
-    context_hits = [x for x in context_candidates if _term_present(view.folded, x)]
+    direct_context_hits = [x for x in context_candidates if _term_present(view.folded, x)]
+    parent_context_hits = [x for x in context_candidates if parent_view and _term_present(parent_view.folded, x)]
     exclusion_hits = [x for x in exclusions if _term_present(view.folded, x)]
 
     score = 0.0
     reasons: list[str] = []
     flags: list[str] = []
-    if core_hits:
-        score += min(0.72, 0.58 + 0.07 * (len(core_hits) - 1))
-        reasons.extend([f"core_term:{x}" for x in core_hits[:3]])
-    if context_hits:
-        score += min(0.22, 0.08 + 0.05 * len(context_hits))
-        reasons.extend([f"context_term:{x}" for x in context_hits[:3]])
+    if direct_core_hits:
+        score += min(0.72, 0.58 + 0.07 * (len(direct_core_hits) - 1))
+        reasons.extend([f"core_term:{x}" for x in direct_core_hits[:3]])
+    elif parent_core_hits:
+        # A reply may omit the brand/topic because conversational context supplies it.
+        # Parent context is an anchor, not an automatic keep: the lower weight sends
+        # generic replies to semantic review instead of pretending they are direct matches.
+        score += min(0.42, 0.34 + 0.04 * (len(parent_core_hits) - 1))
+        if len(view.tokens) >= 2:
+            score += 0.08
+        reasons.extend([f"parent_core_context:{x}" for x in parent_core_hits[:3]])
+        flags.append("contextual_parent_match")
+
+    if direct_context_hits:
+        score += min(0.22, 0.08 + 0.05 * len(direct_context_hits))
+        reasons.extend([f"context_term:{x}" for x in direct_context_hits[:3]])
+    elif parent_context_hits and parent_core_hits:
+        score += min(0.10, 0.04 + 0.02 * len(parent_context_hits))
+        reasons.extend([f"parent_context_term:{x}" for x in parent_context_hits[:3]])
     score += 0.16 * market_score
 
     if exclusion_hits:
@@ -256,9 +276,8 @@ def _relevance_score(row: dict, plan: dict, view: TextView, market_score: float)
         reasons.extend([f"exclusion_term:{x}" for x in exclusion_hits[:3]])
         flags.append("explicit_exclusion_context")
 
-    # Short/acronym topics are ambiguous by nature. Require market/context evidence.
     topic = _fold(plan.get("topic"))
-    if core_hits and len(topic.replace(" ", "")) <= 5 and market_score < 0.35 and not context_hits:
+    if direct_core_hits and len(topic.replace(" ", "")) <= 5 and market_score < 0.35 and not direct_context_hits:
         score -= 0.32
         flags.append("ambiguous_short_entity")
         reasons.append("short_entity_without_market_context")

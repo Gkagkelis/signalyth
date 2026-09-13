@@ -72,6 +72,7 @@ def _append_source_items(
     mapping: dict | None = None,
     evidence_layer: str = "primary",
     seed_refs: list[str] | None = None,
+    seed_context: dict[str, str] | None = None,
 ) -> dict:
     store = RunStore()
     normalized_source_path = folder / f"normalized-{source}.json"
@@ -84,7 +85,7 @@ def _append_source_items(
         raw_existing = store.read(raw_path, []) or []
         raw_all = [*raw_existing, *[x for x in items if isinstance(x, dict)]]
         store.write(raw_path, raw_all)
-        new_norm = normalize_comment_dataset(source, data_items, seed_refs=seed_refs or [], mapping=mapping)
+        new_norm = normalize_comment_dataset(source, data_items, seed_refs=seed_refs or [], seed_context=seed_context or {}, mapping=mapping)
         # Comments outside the requested research window are not analysis evidence.
         new_norm = [r for r in new_norm if in_range(r, date_from, date_to)]
         existing_comments = store.read(comment_norm_path, []) or []
@@ -120,7 +121,12 @@ def _comment_seed_refs(source: str, cleaned: list[dict], max_seeds: int = 40) ->
     rows.sort(key=lambda r: (int(r.get("comments", 0) or 0), int(r.get("likes", 0) or 0)), reverse=True)
     refs, meta, seen = [], [], set()
     for row in rows:
-        if int(row.get("comments", 0) or 0) <= 0:
+        comments_n = int(row.get("comments", 0) or 0)
+        availability = row.get("metric_availability") if isinstance(row.get("metric_availability"), dict) else {}
+        comments_known = bool(availability.get("comments_known"))
+        # Do not pay for a parent the discovery Actor explicitly says has zero comments.
+        # If the count is unavailable, a bounded attempt is still allowed.
+        if comments_known and comments_n <= 0:
             continue
         raw = row.get("raw_data") if isinstance(row.get("raw_data"), dict) else {}
         if source == "x":
@@ -132,7 +138,7 @@ def _comment_seed_refs(source: str, cleaned: list[dict], max_seeds: int = 40) ->
             continue
         seen.add(ref)
         refs.append(ref)
-        meta.append({"ref": ref, "comments": int(row.get("comments", 0) or 0), "url": row.get("url")})
+        meta.append({"ref": ref, "comments": int(row.get("comments", 0) or 0), "url": row.get("url"), "text": str(row.get("text") or "")})
         if len(refs) >= max_seeds:
             break
     return refs, meta
@@ -158,7 +164,7 @@ def adaptive_expand_after_cleaning(
     cancel_check: Callable[[], bool] | None = None,
     runner=None,
 ) -> dict:
-    """Bounded adaptive discovery plus verified comment/reply deepening.
+    """Bounded adaptive discovery plus configured comment/reply deepening.
 
     Parent seeds come from the already-cleaned relevant evidence. Comments are then
     normalized as a separate evidence layer and cleaning is rerun, so a comment is
@@ -210,6 +216,7 @@ def adaptive_expand_after_cleaning(
         *,
         evidence_layer: str = "primary",
         seed_refs: list[str] | None = None,
+        seed_context: dict[str, str] | None = None,
     ):
         nonlocal report
         if cancel_check():
@@ -239,7 +246,7 @@ def adaptive_expand_after_cleaning(
             combined = [*resilient.items, *resilient.diagnostics]
             append = _append_source_items(
                 folder, source, combined, date_from, date_to, mapping=mapping,
-                evidence_layer=evidence_layer, seed_refs=seed_refs,
+                evidence_layer=evidence_layer, seed_refs=seed_refs, seed_context=seed_context,
             )
             report = clean_run(folder, plan=plan, cancel_check=cancel_check)
             audit["steps"].append({
@@ -295,15 +302,13 @@ def adaptive_expand_after_cleaning(
             cfg = registry.get(source) or {}
             comment_info = comments_forecast(source, True, cfg)
             plan_comment_info = (forecast_rows.get(source) or {}).get("comments") or {}
-            if plan_comment_info.get("status") == "verified_available":
-                comment_info = {**comment_info, "status": "verified_available", "live_verified": True, "enabled": True}
-            if comment_info.get("status") == "verified_disabled":
-                audit["warnings"].append(f"{source}:comment_actor_verified_but_disabled_in_settings")
+            if plan_comment_info.get("status") in {"verified_available", "configured_available"}:
+                comment_info = {**comment_info, "status": plan_comment_info.get("status"), "enabled": True}
+            if comment_info.get("status") in {"verified_disabled", "configured_disabled"}:
+                audit["warnings"].append(f"{source}:comment_actor_disabled_in_settings")
                 continue
-            if comment_info.get("status") != "verified_available":
-                audit["warnings"].append(f"{source}:comment_deepening_blocked_until_live_route_verification")
-                if source == "x":
-                    audit["warnings"].append("reply_deepening_blocked_until_live_route_verification")
+            if comment_info.get("status") not in {"verified_available", "configured_available"}:
+                audit["warnings"].append(f"{source}:comment_deepening_not_operational")
                 continue
             # Durable idempotence: a resumed run must not pay for the same layer twice.
             existing_comments = store.read(folder / f"normalized-comments-{source}.json", []) or []
@@ -334,11 +339,12 @@ def adaptive_expand_after_cleaning(
                 audit["warnings"].append(f"{source}:comment_input_unavailable:{exc}")
                 continue
             audit.setdefault("comment_seeds", {})[source] = seed_meta
+            seed_context = {str(m.get("ref")): str(m.get("text") or "") for m in seed_meta if m.get("ref")}
             mapping = cfg.get("comment_output_mapping") or None
             rate = cfg.get("comment_price_per_1000_hint")
             do_call(
                 source, actor_id, "comment_deepening", inp, wanted, rate, mapping=mapping,
-                evidence_layer="comment", seed_refs=refs,
+                evidence_layer="comment", seed_refs=refs, seed_context=seed_context,
             )
             shortfall = int(report.get("trusted_sample_shortfall", 0) or 0)
 
@@ -349,6 +355,6 @@ def adaptive_expand_after_cleaning(
         for s in ("x", "tiktok", "instagram", "facebook")
     )
     audit["status"] = "target_met" if final_shortfall <= 0 else "exhausted_or_shortfall"
-    audit["stop_rule"] = "Stop at target/budget/source exhaustion; comment routes must be verified + enabled and comments are re-cleaned for relevance."
+    audit["stop_rule"] = "Stop at target/budget/source exhaustion; configured comment routes must be enabled and comments are re-cleaned for direct or parent-context relevance."
     store.write(folder / "smart-collection-expansion.json", audit)
     return {"report": report, "audit": audit}
