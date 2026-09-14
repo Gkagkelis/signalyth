@@ -2747,6 +2747,12 @@ def _build_analyst_narratives(folder: Path, plan: dict, lang: str,
                 "  top_negative: the dominant counter-narrative, the ground the critics avoid, and the single "
                 "highest-escalation point.\n"
                 "  emotions: what the mix means psychologically, including the meaning of near-zero emotions.\n"
+                "  finale: the closing three slides. findings = the 3-4 findings that DEFINE the picture (title = a "
+                "plain sentence anyone understands, e.g. 'They attack his right to speak, not his ideas'; body = why "
+                "it matters and what it demands; chip = the proving numbers, short; tone = neg/amber/pos/teal by "
+                "gravity). position = 2 items per quadrant, each lead a plain statement and measurement the number "
+                "proving it, drawn ONLY from run_profile. recommendation = ONE decisive move in plain words + why "
+                "(tied to the findings) + what to avoid + why avoiding it matters. No probabilities anywhere.\n"
                 "  anatomy_<emotion> (one slot per entry in emotion_deep_dives, e.g. anatomy_anger): dissect THAT "
                 "emotion alone — is it a standing condition or a spike, what its trajectory says about whether it is "
                 "self-sustaining or event-driven, what the highest-intensity voices reveal about its true object, and "
@@ -2755,8 +2761,28 @@ def _build_analyst_narratives(folder: Path, plan: dict, lang: str,
 
             item = {"type": "object", "additionalProperties": False, "required": ["lead", "body"],
                     "properties": {"lead": {"type": "string"}, "body": {"type": "string"}}}
-            schema = {"type": "object", "additionalProperties": False, "required": slot_names,
-                      "properties": {k: {"type": "array", "maxItems": 3, "items": item} for k in slot_names}}
+            f_item = {"type": "object", "additionalProperties": False,
+                      "required": ["title", "body", "chip", "tone"],
+                      "properties": {"title": {"type": "string"}, "body": {"type": "string"},
+                                     "chip": {"type": "string"},
+                                     "tone": {"type": "string", "enum": ["neg", "amber", "pos", "teal"]}}}
+            q_item = {"type": "object", "additionalProperties": False, "required": ["lead", "measurement"],
+                      "properties": {"lead": {"type": "string"}, "measurement": {"type": "string"}}}
+            finale_schema = {"type": "object", "additionalProperties": False,
+                "required": ["findings", "position", "recommendation"],
+                "properties": {
+                    "findings": {"type": "array", "maxItems": 4, "items": f_item},
+                    "position": {"type": "object", "additionalProperties": False,
+                                 "required": ["assets", "vulnerabilities", "pressures", "openings"],
+                                 "properties": {k: {"type": "array", "maxItems": 2, "items": q_item}
+                                                for k in ("assets", "vulnerabilities", "pressures", "openings")}},
+                    "recommendation": {"type": "object", "additionalProperties": False,
+                                       "required": ["move", "why", "avoid", "avoid_why"],
+                                       "properties": {k: {"type": "string"} for k in ("move", "why", "avoid", "avoid_why")}},
+                }}
+            schema = {"type": "object", "additionalProperties": False, "required": slot_names + ["finale"],
+                      "properties": {**{k: {"type": "array", "maxItems": 3, "items": item} for k in slot_names},
+                                     "finale": finale_schema}}
             response = client.responses.create(
                 model=settings.signalyth_ai_reasoning_model, store=False,
                 instructions=(
@@ -2764,6 +2790,9 @@ def _build_analyst_narratives(folder: Path, plan: dict, lang: str,
                     "FORM: EXACTLY 3 observations per slot — never fewer; a slot may be [] only when its material is empty. `lead` = bold 2-6 word heading ending with a period, stating the finding (e.g. "
                     "'Η μορφολογία της πτώσης.' not 'Παρατήρηση 1.'). `body` = 1-3 dense sentences, max ~340 "
                     "characters, in the analytical register of a serious client report.\n"
+                    "PLAIN LANGUAGE (MANDATORY): write for an intelligent reader with NO analytics background — "
+                    "everyday words; any concept explained inside the same sentence; the reader must never wonder "
+                    "'what does this mean?'.\n"
                     "HARD RULES: interpret, never recite — a number may appear only as evidence inside an "
                     "interpretation, never as the content of the sentence; the reader already sees every number on "
                     "the slide. Use ONLY the supplied material; never invent facts, events, names or figures. Refer "
@@ -2789,6 +2818,18 @@ def _build_analyst_narratives(folder: Path, plan: dict, lang: str,
             # RULE: a panel is complete only with 3 observations; short AI slots
             # keep their deterministic fallback instead.
             cleaned = {k: v for k, v in cleaned.items() if len(v) >= 3 or not narratives["slots"].get(k)}
+            fin_ai = decoded.get("finale") if isinstance(decoded.get("finale"), dict) else None
+            if fin_ai:
+                ok_findings = [f for f in (fin_ai.get("findings") or [])
+                               if all(_clean_text(f.get(k), 400) for k in ("title", "body", "chip"))][:4]
+                pos_ai = fin_ai.get("position") or {}
+                ok_position = all(len([i for i in (pos_ai.get(k) or [])
+                                       if _clean_text(i.get("lead"), 90) and _clean_text(i.get("measurement"), 90)]) == 2
+                                  for k in ("assets", "vulnerabilities", "pressures", "openings"))
+                rec_ai = fin_ai.get("recommendation") or {}
+                ok_rec = all(_clean_text(rec_ai.get(k), 520) for k in ("move", "why", "avoid", "avoid_why"))
+                if len(ok_findings) >= 3 and ok_position and ok_rec:
+                    narratives["finale_ai"] = {"findings": ok_findings, "position": pos_ai, "recommendation": rec_ai}
             if cleaned:
                 narratives["slots"].update(cleaned)
                 narratives["provider"] = "openai"
@@ -3913,6 +3954,14 @@ def build_exports(folder: Path, plan: dict, *, force: bool=False, cancel_check: 
     # indicators computed from the run's own numbers.
     profile=_run_profile_block(plan,visual_pack,top,emo,tl)
     finale=_fallback_finale(profile,top,emo,tl,lang_now)
+    ai_fin=narratives.get("finale_ai")
+    if isinstance(ai_fin,dict):
+        # AI writes the prose; the watch indicators, score and basis line stay
+        # code-computed so every number remains verifiable.
+        basis=finale["recommendation"].get("basis")
+        finale["findings"]=ai_fin["findings"]
+        finale["position"]=ai_fin["position"]
+        finale["recommendation"]={**ai_fin["recommendation"],"basis":basis}
     finale["score"]=profile.get("brand_reputation_score_0_100")
     pplan["finale"]=finale
     slides_list=pplan.get("slides") or []
