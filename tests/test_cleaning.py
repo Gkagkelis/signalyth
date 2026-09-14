@@ -186,7 +186,7 @@ class CleaningTests(unittest.TestCase):
     def test_review_queue_contains_only_review_records(self):
         records = [
             row(1, "Eurojackpot Ελλάδα ΟΠΑΠ"),
-            row(2, "Eurojackpot generic mention"),
+            row(2, "Μεγάλη κλήρωση απόψε, για να δούμε τι θα γίνει"),
             row(3, "Eurojackpot KNVB final"),
         ]
         result = clean_records(records, plan(exclusions=["KNVB"], target=3))
@@ -225,7 +225,7 @@ class CleaningTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             folder = Path(td)
             p = plan(target=1)
-            records = [row(1, "Eurojackpot generic mention")]
+            records = [row(1, "Μεγάλη κλήρωση απόψε, για να δούμε τι θα γίνει")]
             (folder / "plan.json").write_text(json.dumps(p), encoding="utf-8")
             (folder / "normalized-all.json").write_text(json.dumps(records), encoding="utf-8")
             clean_run(folder, plan=p)
@@ -239,7 +239,7 @@ class CleaningTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             folder = Path(td)
             p = plan(target=1)
-            records = [row(1, "Eurojackpot generic mention")]
+            records = [row(1, "Μεγάλη κλήρωση απόψε, για να δούμε τι θα γίνει")]
             (folder / "plan.json").write_text(json.dumps(p), encoding="utf-8")
             (folder / "normalized-all.json").write_text(json.dumps(records), encoding="utf-8")
             clean_run(folder, plan=p)
@@ -252,7 +252,7 @@ class CleaningTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             folder = Path(td)
             p = plan(target=1)
-            records = [row(1, "Eurojackpot generic mention")]
+            records = [row(1, "Μεγάλη κλήρωση απόψε, για να δούμε τι θα γίνει")]
             (folder / "plan.json").write_text(json.dumps(p), encoding="utf-8")
             (folder / "normalized-all.json").write_text(json.dumps(records), encoding="utf-8")
             clean_run(folder, plan=p)
@@ -265,7 +265,7 @@ class CleaningTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             folder = Path(td)
             p = plan(target=1)
-            records = [row(1, "Eurojackpot generic mention")]
+            records = [row(1, "Μεγάλη κλήρωση απόψε, για να δούμε τι θα γίνει")]
             (folder / "plan.json").write_text(json.dumps(p), encoding="utf-8")
             (folder / "normalized-all.json").write_text(json.dumps(records), encoding="utf-8")
             clean_run(folder, plan=p)
@@ -325,7 +325,7 @@ class CleaningTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             folder = Path(td)
             p = plan(target=1)
-            records = [row(1, "Eurojackpot generic mention")]
+            records = [row(1, "Μεγάλη κλήρωση απόψε, για να δούμε τι θα γίνει")]
             (folder / "plan.json").write_text(json.dumps(p), encoding="utf-8")
             (folder / "normalized-all.json").write_text(json.dumps(records), encoding="utf-8")
             clean_run(folder, plan=p)

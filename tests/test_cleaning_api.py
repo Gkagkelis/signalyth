@@ -32,7 +32,7 @@ class CleaningApiTests(unittest.TestCase):
 
     def normalized(self):
         return [
-            {"id":"a","platform":"x","text":"Eurojackpot generic mention","date":"2026-08-15T10:00:00+00:00","author":"u","followers":1,"views":0,"likes":0,"comments":0,"shares":0,"url":"https://x/a","content_type":"post","parent_post":None,"raw_data":{}},
+            {"id":"a","platform":"x","text":"Μεγάλη κλήρωση απόψε, για να δούμε τι θα γίνει","date":"2026-08-15T10:00:00+00:00","author":"u","followers":1,"views":0,"likes":0,"comments":0,"shares":0,"url":"https://x/a","content_type":"post","parent_post":None,"raw_data":{}},
             {"id":"b","platform":"x","text":"Eurojackpot KNVB football final","date":"2026-08-15T11:00:00+00:00","author":"u2","followers":1,"views":0,"likes":0,"comments":0,"shares":0,"url":"https://x/b","content_type":"post","parent_post":None,"raw_data":{}},
         ]
 
@@ -60,7 +60,7 @@ class CleaningApiTests(unittest.TestCase):
         self.assertIn('data_quality_score', r.json())
         g = self.client.get(f'/api/runs/{run_id}/cleaning')
         self.assertEqual(g.status_code, 200)
-        self.assertEqual(g.json()['ruleset_version'], '0.8.0')
+        self.assertEqual(g.json()['ruleset_version'], '0.9.0')
 
     def test_review_queue_and_decision_api(self):
         run_id = self.make_run_with_data()
