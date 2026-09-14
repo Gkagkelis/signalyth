@@ -3971,12 +3971,6 @@ def build_exports(folder: Path, plan: dict, *, force: bool=False, cancel_check: 
     for sid in ("key_findings","strategic_position","final_recommendation"):
         slides_list.append({"slide_id":sid,"slide_type":sid,"title":fin_titles[sid],
             "chart_ids":[],"claims":[],"section":"closing","priority":94,"required":False,"notes":{}})
-    # CONTRACT: the client deck is cover + our 11 designed slides — nothing else.
-    keep={"cover","executive_summary","reputation_timeline","top_comments_positive",
-          "top_comments_negative","emotion_profile_bars","key_findings",
-          "strategic_position","final_recommendation"}
-    pplan["slides"]=[sp for sp in slides_list
-                     if sp.get("slide_id") in keep or sp.get("slide_type")=="emotion_anatomy"]
     if top:
         pplan["top_comments"]=top
         slides_list=pplan.get("slides") or []
@@ -4010,6 +4004,13 @@ def build_exports(folder: Path, plan: dict, *, force: bool=False, cancel_check: 
                 "chart_ids":[],"claims":[],"section":"opening","priority":95,"required":False,
                 "notes":{"emotion_key":a["key"]}})
             at+=1
+    slides_list=pplan.get("slides") or []
+    # CONTRACT: the client deck is cover + our 11 designed slides — nothing else.
+    keep={"cover","executive_summary","reputation_timeline","top_comments_positive",
+          "top_comments_negative","emotion_profile_bars","key_findings",
+          "strategic_position","final_recommendation"}
+    pplan["slides"]=[sp for sp in slides_list
+                     if sp.get("slide_id") in keep or sp.get("slide_type")=="emotion_anatomy"]
     # Display policy for the client deck (internal docx keeps real details).
     policy_names=sorted(((top or {}).get("name_index") or {}).items(),key=lambda kv:-len(kv[0]))
     pplan["display_policy"]={
