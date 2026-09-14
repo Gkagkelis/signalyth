@@ -15,11 +15,16 @@ from typing import Callable
 from app.services.normalizer import parse_date
 from app.services.storage import RunStore
 
-CLEANING_RULESET_VERSION = "0.8.0"
+CLEANING_RULESET_VERSION = "0.9.0"
 RULESET_CONFIG = {
     "relevance_exclude_below": 0.28,
     "relevance_review_below": 0.58,
     "market_review_below": 0.25,
+    # Hard market gate: below this score a record shows NO signal of the target
+    # market (language, market terms, location metadata, or parent context) and
+    # is excluded outright with a recorded reason, instead of drifting into the
+    # sample as globally-relevant but market-irrelevant noise.
+    "market_exclude_below": 0.15,
     "spam_exclude_at": 0.82,
     "bot_suspicious_at": 0.45,
     "bot_likely_automated_at": 0.80,
@@ -521,6 +526,10 @@ def _decision(relevance: float, market: float, spam: float, bot_risk: float, bot
         return "excluded", ["high_spam_risk"]
     if bot_risk >= RULESET_CONFIG["bot_likely_automated_at"] and bot_reason_count >= 2:
         return "excluded", ["high_automation_or_manipulation_risk"]
+    if market < RULESET_CONFIG["market_exclude_below"] and "contextual_parent_match" not in flags:
+        # No market language, no market terms, no market location, no market
+        # parent: this is another country's conversation about the same brand.
+        return "excluded", ["outside_target_market"]
     # Lexical relevance is only a cheap pre-AI signal. Low lexical overlap is sent
     # to semantic review rather than destroyed before the model can understand it.
     if relevance < RULESET_CONFIG["relevance_exclude_below"]:
