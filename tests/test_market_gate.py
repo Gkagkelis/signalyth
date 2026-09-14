@@ -55,3 +55,19 @@ def test_comment_inherits_market_via_parent_context_instead_of_being_gated():
     rec = cleaned[0]
     assert "outside_target_market" not in rec["cleaning"]["reasons"], rec["cleaning"]["reasons"]
     assert rec["cleaning"]["decision"] != "excluded"
+
+
+def test_excluded_parents_never_become_comment_seeds():
+    from app.services.relevance_expansion import _comment_seed_refs
+    cleaned = [
+        {"platform": "instagram", "evidence_layer": "primary", "comments": 50, "likes": 900,
+         "url": "https://ig/de", "text": "Gewinnzahlen Eurojackpot", "raw_data": {},
+         "metric_availability": {"comments_known": True},
+         "cleaning": {"decision": "excluded", "reasons": ["outside_target_market"]}},
+        {"platform": "instagram", "evidence_layer": "primary", "comments": 3, "likes": 5,
+         "url": "https://ig/gr", "text": "Μεγάλο τζακποτ απόψε", "raw_data": {},
+         "metric_availability": {"comments_known": True},
+         "cleaning": {"decision": "trusted", "reasons": []}},
+    ]
+    refs, meta = _comment_seed_refs("instagram", cleaned, max_seeds=10)
+    assert refs == ["https://ig/gr"], refs
