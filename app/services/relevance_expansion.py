@@ -117,7 +117,12 @@ def _append_source_items(
 
 
 def _comment_seed_refs(source: str, cleaned: list[dict], max_seeds: int = 40) -> tuple[list[str], list[dict]]:
-    rows = [r for r in cleaned if str(r.get("platform") or "") == source and str(r.get("evidence_layer") or "primary") == "primary"]
+    rows = [r for r in cleaned
+            if str(r.get("platform") or "") == source
+            and str(r.get("evidence_layer") or "primary") == "primary"
+            # Location chain: never deepen a parent the cleaning excluded — an
+            # outside-market or spam post must not buy its comments either.
+            and str(((r.get("cleaning") or {}).get("decision")) or "") != "excluded"]
     rows.sort(key=lambda r: (int(r.get("comments", 0) or 0), int(r.get("likes", 0) or 0)), reverse=True)
     refs, meta, seen = [], [], set()
     for row in rows:
