@@ -33,7 +33,7 @@ from app.services.storage import RunStore
 from app.services.visualizations import load_presentation_visual_pack, load_visualization_summary
 from app.services.report_synthesis import build_report_synthesis, final_consistency_qa
 
-PRESENTATION_RULESET_VERSION = "2.1.0"
+PRESENTATION_RULESET_VERSION = "2.2.0"
 PRESENTATION_METHODOLOGY_VERSION = "signalyth-presentation-intelligence-v1.4"
 PRESENTATION_CONTRACT_VERSION = "signalyth-presentation-pack-v1.4"
 
@@ -3176,6 +3176,340 @@ def _render_emotion_anatomy(slide, item: dict, narrative: list[dict], lang: str,
         _add_text(slide, label, x + 0.06, ky + 0.52, kw_ - 0.12, 0.3, size=8, color=MUTED, align=PP_ALIGN.CENTER)
 
 
+# ---------- Finale (slides 10-12): Findings, Position, Recommendation ----------
+# Locked design: plain language everyone understands, every claim carrying its
+# measurement, no probabilities anywhere. Watch indicators are ALWAYS computed
+# by code from the run's own numbers, so the next run answers them automatically.
+
+FINALE_TONES = {"neg": NEG, "amber": MIXED, "pos": POS, "teal": AEGEAN}
+
+
+def _finale_watch_indicators(emo: dict | None, tl: dict | None, lang: str) -> list[dict]:
+    el = lang == "el"
+    out = []
+    shares = {r["key"]: r["share"] for r in ((emo or {}).get("rows") or [])}
+    if "disgust" in shares:
+        v = shares["disgust"]
+        out.append({"name": "Απέχθεια" if el else "Disgust",
+                    "rule": ("αν περάσει το 30%, η απόρριψη παγιώνεται" if el else "above 30%, rejection hardens"),
+                    "now": (f"τώρα: {v:.1f}%" if el else f"now: {v:.1f}%"), "frac": min(1.0, v / 30.0), "tone": "neg"})
+    if "joy" in shares:
+        v = shares["joy"]
+        out.append({"name": "Χαρά" if el else "Joy",
+                    "rule": ("αν πέσει κάτω από 15%, χάνεται ο πυρήνας" if el else "below 15%, the core erodes"),
+                    "now": (f"τώρα: {v:.1f}%" if el else f"now: {v:.1f}%"),
+                    "frac": min(1.0, max(0.0, (30.0 - v) / 15.0)), "tone": "pos"})
+    if tl and tl.get("points"):
+        vals = [p["value"] for p in tl["points"]]
+        streak = 0
+        for i in range(len(vals) - 1, 0, -1):
+            if vals[i] > vals[i - 1] + 0.5:
+                streak += 1
+            else:
+                break
+        out.append({"name": "Ανάκαμψη" if el else "Recovery",
+                    "rule": ("2 συνεχόμενες περίοδοι βελτίωσης = η τάση έσπασε" if el else "2 consecutive improving periods = trend broken"),
+                    "now": (f"τώρα: {streak}" if el else f"now: {streak}"), "frac": min(1.0, streak / 2.0), "tone": "teal"})
+    if "anger" in shares:
+        v = shares["anger"]
+        out.append({"name": "Θυμός" if el else "Anger",
+                    "rule": ("αν ανέβει κι άλλο, η πίεση κλιμακώνεται" if el else "further rise escalates the pressure"),
+                    "now": (f"τώρα: {v:.1f}%" if el else f"now: {v:.1f}%"), "frac": min(1.0, v / 60.0), "tone": "amber"})
+    return out[:4]
+
+
+def _fallback_finale(profile: dict, top: dict | None, emo: dict | None,
+                     tl: dict | None, lang: str) -> dict:
+    """Deterministic finale: plain-language, every item carrying its number."""
+    el = lang == "el"
+    political = str(profile.get("research_type") or "market") == "political"
+    score = _safe_float(profile.get("brand_reputation_score_0_100"), 50.0)
+    traj = profile.get("trajectory") or {}
+    change = _safe_float(traj.get("change"), 0.0)
+    shares = {r["key"]: r["share"] for r in ((emo or {}).get("rows") or [])}
+    neg_emo = _safe_float((emo or {}).get("negative_share"))
+    subject = ("του" if political else "του brand") if el else ("them" if political else "the brand")
+
+    findings = []
+    if traj:
+        declining = change <= -3
+        findings.append({
+            "title": ("Η φθορά είναι σταθερή — όχι στιγμιαία" if declining else
+                      "Η εικόνα κινείται ήπια, χωρίς σοκ") if el else
+                     ("The erosion is daily — not an episode" if declining else "The picture moves gently, no shocks"),
+            "body": ((f"Ο δείκτης άλλαξε κατά {change:+.1f} μονάδες με {traj.get('meaningful_recovery_steps', 0)} "
+                      f"ουσιαστικές ανακάμψεις στην περίοδο. Πρακτικά: ό,τι συμβαίνει δεν είναι ένα «λάθος» που διορθώνεται "
+                      f"με μία απάντηση — είναι ροή που θέλει αλλαγή θέματος συζήτησης.") if el else
+                     (f"The index moved {change:+.1f} points with {traj.get('meaningful_recovery_steps', 0)} meaningful "
+                      f"recoveries in the period. Practically: this is a current, not a one-off mistake a single answer can fix.")),
+            "chip": (f"{change:+.1f} μον. · score {score:.1f}/100" if el else f"{change:+.1f} pts · score {score:.1f}/100"),
+            "tone": "neg" if declining else "teal",
+        })
+    if top and (top.get("negative") or top.get("positive")):
+        negs = top.get("negative") or []
+        strong = sum(1 for e in negs if abs(e["score"]) >= 0.85)
+        findings.append({
+            "title": ("Η κριτική είναι έντονη, όχι χλιαρή" if strong >= max(1, len(negs) // 2) else
+                      "Η κριτική υπάρχει αλλά δεν κυριαρχεί") if el else
+                     ("The criticism is intense, not lukewarm" if strong >= max(1, len(negs) // 2) else
+                      "Criticism exists but does not dominate"),
+            "body": ((f"{strong} από τα {len(negs)} κορυφαία αρνητικά σχόλια έχουν ακραία ένταση: μιλάμε για δηλωμένη "
+                      f"απόρριψη, όχι για παράπονα που σβήνουν μόνα τους. Όσο μένει αναπάντητη, γίνεται το σημείο αναφοράς.") if el else
+                     (f"{strong} of the {len(negs)} top negative comments carry extreme intensity: declared rejection, "
+                      f"not complaints that fade on their own. Left unanswered, it becomes the reference point.")),
+            "chip": (f"{strong}/{len(negs)} έντονα αρνητικά" if el else f"{strong}/{len(negs)} intense negatives"),
+            "tone": "neg",
+        })
+    if shares.get("fear") is not None and shares.get("anger") is not None and political:
+        findings.append({
+            "title": "Το κοινό δεν ακούει επιχειρήματα αυτή τη στιγμή" if el else "The audience is not open to argument right now",
+            "body": (("Η έρευνα για τα συναισθήματα στην πολιτική λέει κάτι απλό: οι άνθρωποι ανοίγονται σε νέα επιχειρήματα "
+                      "όταν ανησυχούν. Εδώ σχεδόν κανείς δεν ανησυχεί — κυριαρχεί ο θυμός. Και ο θυμωμένος δεν αλλάζει γνώμη· "
+                      "υπερασπίζεται αυτήν που έχει.") if el else
+                     ("Research on political emotion is blunt: people open up to new arguments when they are anxious. Here "
+                      "almost nobody is anxious — anger dominates. And angry audiences do not change their minds; they defend them.")),
+            "chip": f"Φόβος {shares['fear']:.1f}% · Θυμός {shares['anger']:.1f}%" if el else f"Fear {shares['fear']:.1f}% · Anger {shares['anger']:.1f}%",
+            "tone": "amber",
+        })
+    if shares.get("joy") is not None:
+        findings.append({
+            "title": ("Οι υποστηρικτές είναι πιστοί — αλλά δεν πληθαίνουν" if el else "Supporters are loyal — but not multiplying"),
+            "body": ((f"Υπάρχει σταθερός πυρήνας που στηρίζει με ενθουσιασμό ({shares['joy']:.1f}%). Είναι βάση που αντέχει· "
+                      f"δεν είναι ρεύμα που μεγαλώνει από μόνο του — το διακύβευμα είναι να μη χάσει την έντασή της.") if el else
+                     (f"A steady core supports with enthusiasm ({shares['joy']:.1f}%). It is a base that holds — not a current "
+                      f"that grows by itself; the stake is keeping its intensity.")),
+            "chip": f"Χαρά {shares['joy']:.1f}%" if el else f"Joy {shares['joy']:.1f}%",
+            "tone": "pos",
+        })
+    findings = findings[:4]
+    while len(findings) < 3:
+        findings.append({
+            "title": "Η βάση δεδομένων είναι στέρεη" if el else "The evidence base is solid",
+            "body": (f"Η ανάλυση πατά σε βεβαιότητα {profile.get('evidence_confidence_0_100') or '—'}/100 — τα ευρήματα "
+                     f"διαβάζονται με ασφάλεια." if el else
+                     f"The analysis stands on {profile.get('evidence_confidence_0_100') or '—'}/100 confidence — findings read safely."),
+            "chip": f"evidence {profile.get('evidence_confidence_0_100') or '—'}/100",
+            "tone": "teal",
+        })
+
+    def q(lead, meas):
+        return {"lead": lead, "measurement": meas}
+    position = {"assets": [], "vulnerabilities": [], "pressures": [], "openings": []}
+    if shares.get("joy") is not None:
+        position["assets"].append(q("Πιστό κοινό που δεν κλονίζεται εύκολα" if el else "A loyal, hard-to-shake audience",
+                                    f"Χαρά {shares['joy']:.1f}%" if el else f"Joy {shares['joy']:.1f}%"))
+    pos_s = (profile.get("weighted_sentiment_percent") or {}).get("positive")
+    if pos_s is not None:
+        position["assets"].append(q("Υπαρκτό θετικό ρεύμα στη συζήτηση" if el else "A real positive current in the conversation",
+                                    f"{pos_s:.1f}% " + ("θετικό sentiment" if el else "positive sentiment")))
+    if traj:
+        position["vulnerabilities"].append(q("Περιορισμένη αποδεδειγμένη ανάκαμψη" if el else "Limited proven recovery",
+                                             f"{traj.get('meaningful_recovery_steps', 0)} " + ("ανακάμψεις στην περίοδο" if el else "recoveries in the period")))
+    neg_s = (profile.get("weighted_sentiment_percent") or {}).get("negative")
+    if neg_s is not None:
+        position["vulnerabilities"].append(q("Το αρνητικό κλίμα έχει όγκο" if el else "The negative climate has volume",
+                                             f"{neg_s:.1f}% " + ("αρνητικό sentiment" if el else "negative sentiment")))
+    if shares.get("anger") is not None:
+        position["pressures"].append(q("Ο θυμός τροφοδοτεί καθημερινά τη φθορά" if el else "Anger fuels the erosion daily",
+                                       f"{shares['anger']:.1f}% " + ("της συζήτησης" if el else "of the conversation")))
+    if shares.get("disgust") is not None:
+        position["pressures"].append(q("Η απέχθεια σκληραίνει την απόρριψη" if el else "Disgust hardens rejection",
+                                       f"{shares['disgust']:.1f}%" + (" — δύσκολα αναστρέψιμη" if el else " — hard to reverse")))
+    if shares.get("anger") is not None and shares.get("disgust") is not None:
+        position["openings"].append(q("Ο θυμός δεν έχει γίνει ακόμα απέχθεια" if el else "Anger has not yet become disgust",
+                                      f"{shares['anger']:.1f}% vs {shares['disgust']:.1f}%"))
+    position["openings"].append(q("Το επόμενο report μετρά την αλλαγή" if el else "The next report measures the change",
+                                  ("ίδια μεθοδολογία, συγκρίσιμα νούμερα" if el else "same methodology, comparable numbers")))
+    for k in position:
+        while len(position[k]) < 2:
+            position[k].append(q("—", "—"))
+        position[k] = position[k][:2]
+
+    if political:
+        move = ("Απάντησε στο ισχυρότερο αρνητικό αφήγημα — στο δικό του επίπεδο." if el else
+                "Answer the strongest negative narrative — on its own register.")
+        why = (("Η κριτική υψηλής έντασης δεν σβήνει μόνη της· όσο μένει αναπάντητη, μετατρέπει τον θυμό (που γυρίζει) "
+                "σε απέχθεια (που δεν γυρίζει). Απαντιέται ευθέως και ανθρώπινα — με πράξη, όχι με ανακοίνωση.") if el else
+               ("High-intensity criticism does not fade by itself; unanswered, it converts anger (reversible) into disgust "
+                "(irreversible). It is answered directly and humanly — with an act, not a press release."))
+        avoid = "Λίστες πεπραγμένων και τεχνικές απαντήσεις." if el else "Achievement lists and technical rebuttals."
+        avoid_why = (("Σε κοινό που δεν ανησυχεί, τα επιχειρήματα δεν ακούγονται — επιβεβαιώνουν την εικόνα «μας λέει τα δικά του».") if el else
+                     ("For an audience that is not anxious, arguments do not land — they confirm the 'talking past us' image."))
+    else:
+        move = ("Απάντησε στη σοβαρότερη αιτία δυσαρέσκειας με ορατή διόρθωση — όχι με μήνυμα." if el else
+                "Fix the top driver of dissatisfaction visibly — with a remedy, not a message.")
+        why = (("Ο θυμός των πελατών προβλέπει παράπονα, αρνητική φήμη και αποχώρηση· μόνο η ορατή αποκατάσταση τον "
+                "εκτονώνει. Η απέχθεια, αν ριζώσει, δεν κερδίζεται πίσω με επικοινωνία.") if el else
+               ("Customer anger predicts complaints, negative word of mouth and churn; only visible remedy defuses it. "
+                "Disgust, once rooted, cannot be won back with messaging.")),
+        avoid = "Διαφημιστική αντεπίθεση πριν τη διόρθωση." if el else "An ad push before the fix."
+        avoid_why = ("Η προβολή πάνω σε άλυτο πρόβλημα πολλαπλασιάζει το αρνητικό word-of-mouth." if el else
+                     "Promotion on top of an unfixed problem multiplies negative word of mouth.")
+    if isinstance(why, tuple):
+        why = why[0]
+    return {"findings": findings,
+            "position": position,
+            "recommendation": {"move": move, "why": why, "avoid": avoid, "avoid_why": avoid_why,
+                               "basis": (f"Στηρίζεται στα ευρήματα της περιόδου · αξιοπιστία δεδομένων "
+                                         f"{profile.get('evidence_confidence_0_100') or '—'}/100" if el else
+                                         f"Grounded in this period's findings · data confidence "
+                                         f"{profile.get('evidence_confidence_0_100') or '—'}/100")},
+            "watch": _finale_watch_indicators(emo, tl, lang)}
+
+
+def _render_key_findings(slide, findings: list[dict], lang: str, ctx: dict) -> None:
+    el = lang == "el"
+    client = _clean_text(ctx.get("client") or "", 60)
+    topic = _clean_text(ctx.get("topic") or "", 60)
+    who = " · ".join(x for x in (client, topic) if x)
+    note = (f"τα {len(findings)} ευρήματα που καθορίζουν την εικόνα" if el
+            else f"the {len(findings)} findings that define the picture")
+    when = " · ".join(x for x in (_period_label(ctx.get("date_from"), ctx.get("date_to"), lang), note) if x)
+    if who:
+        _add_text(slide, who, 7.35, 0.36, 5.38, 0.28, size=12, color=INK, bold=True, align=PP_ALIGN.RIGHT)
+    _add_text(slide, when, 7.35, 0.66, 5.38, 0.24, size=9.5, color=MUTED, align=PP_ALIGN.RIGHT)
+
+    items = (findings or [])[:4]
+    gw, gh = 5.975, 2.62
+    gx, gy = [0.58, 6.73], [1.46, 4.24]
+    for i, f in enumerate(items):
+        x, y = gx[i % 2], gy[min(1, i // 2)]
+        tone = FINALE_TONES.get(str(f.get("tone") or "teal"), AEGEAN)
+        _dash_card(slide, x, y, gw, gh)
+        _add_text(slide, f"0{i + 1}", x + gw - 1.95, y - 0.12, 1.9, 1.5, size=78, bold=True,
+                  color=_tint(tone, 0.86), align=PP_ALIGN.RIGHT)
+        bar = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(x + 0.28), Inches(y + 0.26), Inches(0.34), Inches(0.10))
+        bar.adjustments[0] = 0.5; bar.fill.solid(); bar.fill.fore_color.rgb = _rgb(tone)
+        bar.line.fill.background(); bar.shadow.inherit = False
+        _add_text(slide, _clean_text(f.get("title"), 90), x + 0.28, y + 0.44, gw - 1.35, 0.72,
+                  size=14.5, bold=True, color=INK)
+        _add_text(slide, _clean_text(f.get("body"), 460), x + 0.28, y + 1.14, gw - 0.56, 1.06, size=9.3, color=INK)
+        chip_w = min(3.6, 0.5 + len(str(f.get("chip") or "")) * 0.075)
+        chip = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(x + 0.28), Inches(y + gh - 0.42), Inches(chip_w), Inches(0.28))
+        chip.adjustments[0] = 0.5; chip.fill.solid(); chip.fill.fore_color.rgb = _rgb(tone)
+        chip.line.fill.background(); chip.shadow.inherit = False
+        _add_text(slide, _clean_text(f.get("chip"), 60), x + 0.28, y + gh - 0.42, chip_w, 0.28,
+                  size=8.5, color=WHITE, bold=True, align=PP_ALIGN.CENTER, valign=MSO_ANCHOR.MIDDLE)
+
+
+def _render_strategic_position(slide, position: dict, lang: str, ctx: dict) -> None:
+    el = lang == "el"
+    client = _clean_text(ctx.get("client") or "", 60)
+    topic = _clean_text(ctx.get("topic") or "", 60)
+    who = " · ".join(x for x in (client, topic) if x)
+    if who:
+        _add_text(slide, who, 7.35, 0.36, 5.38, 0.28, size=12, color=INK, bold=True, align=PP_ALIGN.RIGHT)
+    _add_text(slide, ("η εικόνα της περιόδου σε τέσσερα πεδία · όλα από μετρήσεις" if el
+                      else "the period's picture in four fields · all from measurements"),
+              7.35, 0.66, 5.38, 0.24, size=9.5, color=MUTED, align=PP_ALIGN.RIGHT)
+
+    Q = [("assets", ("ΤΙ ΔΟΥΛΕΥΕΙ ΥΠΕΡ ΤΟΥ" if el else "WHAT WORKS IN THEIR FAVOUR"), POS),
+         ("vulnerabilities", ("ΠΟΥ ΕΙΝΑΙ ΕΥΑΛΩΤΟΣ" if el else "WHERE THEY ARE VULNERABLE"), MIXED),
+         ("pressures", ("ΤΙ ΤΟΝ ΠΙΕΖΕΙ ΤΩΡΑ — ΚΑΙ ΔΥΝΑΜΩΝΕΙ" if el else "WHAT PRESSES NOW — AND GROWS"), NEG),
+         ("openings", ("ΤΙ ΜΠΟΡΕΙ ΝΑ ΑΞΙΟΠΟΙΗΣΕΙ" if el else "WHAT CAN BE USED"), AEGEAN)]
+    gw, gh = 5.975, 2.55
+    gx, gy = [0.58, 6.73], [1.46, 4.17]
+    for i, (key, label, tone) in enumerate(Q):
+        x, y = gx[i % 2], gy[i // 2]
+        card = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(x), Inches(y), Inches(gw), Inches(gh))
+        card.adjustments[0] = 0.05
+        card.fill.solid(); card.fill.fore_color.rgb = _rgb(_tint(tone, 0.94))
+        card.line.color.rgb = _rgb(STONE_DARK); card.line.width = Pt(1)
+        card.shadow.inherit = False
+        _panel_label(slide, label, x + 0.28, y + 0.24, tone)
+        yy = y + 0.72
+        for item in (position.get(key) or [])[:2]:
+            dot = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(x + 0.32), Inches(yy + 0.06), Inches(0.09), Inches(0.09))
+            dot.fill.solid(); dot.fill.fore_color.rgb = _rgb(tone)
+            dot.line.fill.background(); dot.shadow.inherit = False
+            _add_text(slide, _clean_text(item.get("lead"), 90), x + 0.52, yy, gw - 0.8, 0.24, size=10.5, bold=True, color=INK)
+            _add_text(slide, _clean_text(item.get("measurement"), 90), x + 0.52, yy + 0.25, gw - 0.8, 0.22,
+                      size=9, bold=True, color=tone)
+            yy += 0.86
+    score = None
+    try:
+        score = _safe_float(((ctx.get("_finale_score")) if isinstance(ctx, dict) else None), None)
+    except Exception:
+        score = None
+    if score is not None:
+        ccx, ccy, cd = 6.655, 4.11, 1.24
+        halo = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(ccx - cd / 2 - 0.05), Inches(ccy - cd / 2 - 0.05), Inches(cd + 0.1), Inches(cd + 0.1))
+        halo.fill.solid(); halo.fill.fore_color.rgb = _rgb(WHITE)
+        halo.line.color.rgb = _rgb(STONE_DARK); halo.line.width = Pt(1)
+        ring = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(ccx - cd / 2), Inches(ccy - cd / 2), Inches(cd), Inches(cd))
+        ring.fill.solid(); ring.fill.fore_color.rgb = _rgb(WHITE)
+        ring.line.color.rgb = _rgb(_val_color(score)); ring.line.width = Pt(2.2); ring.shadow.inherit = False
+        _add_text(slide, f"{score:.1f}", ccx - cd / 2, ccy - 0.36, cd, 0.42, size=21, bold=True, color=INK, align=PP_ALIGN.CENTER)
+        _add_text(slide, ("σήμερα · /100" if el else "today · /100"), ccx - cd / 2, ccy + 0.06, cd, 0.22,
+                  size=7.5, color=MUTED, align=PP_ALIGN.CENTER)
+    _add_text(slide, ("Όλα τα παραπάνω περιγράφουν ό,τι μετρήθηκε σε αυτή την περίοδο — δεν είναι προβλέψεις." if el
+                      else "Everything above describes what was measured in this period — these are not forecasts."),
+              0.58, 6.82, 12.15, 0.2, size=7.5, color=NEUTRAL)
+
+
+def _render_recommendation(slide, reco: dict, watch: list[dict], lang: str, ctx: dict) -> None:
+    el = lang == "el"
+    client = _clean_text(ctx.get("client") or "", 60)
+    topic = _clean_text(ctx.get("topic") or "", 60)
+    who = " · ".join(x for x in (client, topic) if x)
+    if who:
+        _add_text(slide, who, 7.35, 0.36, 5.38, 0.28, size=12, color=INK, bold=True, align=PP_ALIGN.RIGHT)
+    _add_text(slide, ("μία κίνηση · στηριγμένη στα ευρήματα · ελέγχεται στο επόμενο report" if el
+                      else "one move · grounded in the findings · checked by the next report"),
+              7.35, 0.66, 5.38, 0.24, size=9.5, color=MUTED, align=PP_ALIGN.RIGHT)
+
+    hero = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(0.58), Inches(1.46), Inches(8.10), Inches(3.20))
+    hero.adjustments[0] = 0.05
+    hero.fill.solid(); hero.fill.fore_color.rgb = _rgb("0F2630")
+    hero.line.fill.background(); hero.shadow.inherit = False
+    tag = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(0.86), Inches(1.66), Inches(1.6), Inches(0.30))
+    tag.adjustments[0] = 0.5; tag.fill.solid(); tag.fill.fore_color.rgb = _rgb("1C3F4D")
+    tag.line.fill.background(); tag.shadow.inherit = False
+    _add_text(slide, ("Η ΚΙΝΗΣΗ" if el else "THE MOVE"), 0.86, 1.66, 1.6, 0.30, size=9.5, bold=True,
+              color="7FC4D6", align=PP_ALIGN.CENTER, valign=MSO_ANCHOR.MIDDLE, font=LABEL_FONT)
+    _add_text(slide, _clean_text(reco.get("move"), 120), 0.86, 2.06, 7.5, 0.80, size=19, bold=True, color=WHITE)
+    _add_rich(slide, [(("Γιατί αυτή: " if el else "Why this: "), True), (_clean_text(reco.get("why"), 520), False)],
+              0.86, 2.90, 7.5, 1.15, size=9.8, color="D8E4E9")
+    _add_text(slide, _clean_text(reco.get("basis"), 140), 0.86, 4.28, 7.5, 0.22, size=8, color="8FB0BC")
+
+    _dash_card(slide, 8.88, 1.46, 3.85, 3.20)
+    _panel_label(slide, ("ΤΙ ΑΠΟΦΕΥΓΕΙΣ" if el else "WHAT TO AVOID"), 9.16, 1.70, MIXED)
+    _add_text(slide, _clean_text(reco.get("avoid"), 90), 9.16, 2.10, 3.30, 0.60, size=12.5, bold=True, color=INK)
+    _add_text(slide, _clean_text(reco.get("avoid_why"), 320), 9.16, 2.74, 3.30, 1.55, size=9.2, color=INK)
+
+    _dash_card(slide, 0.58, 4.92, 12.15, 1.80)
+    _panel_label(slide, ("ΤΙ ΠΑΡΑΚΟΛΟΥΘΟΥΜΕ · ΤΟ ΕΠΟΜΕΝΟ REPORT ΤΑ ΜΕΤΡΑΕΙ ΑΥΤΟΜΑΤΑ" if el
+                         else "WHAT WE WATCH · THE NEXT REPORT MEASURES THESE AUTOMATICALLY"), 0.86, 5.11)
+    items = (watch or [])[:4]
+    if items:
+        iw = (12.15 - 0.56 - 0.16 * (len(items) - 1)) / len(items)
+        for i, k in enumerate(items):
+            x = 0.86 + i * (iw + 0.16)
+            tone = FINALE_TONES.get(str(k.get("tone") or "teal"), AEGEAN)
+            cell = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(x), Inches(5.42), Inches(iw), Inches(1.06))
+            cell.adjustments[0] = 0.06
+            cell.fill.solid(); cell.fill.fore_color.rgb = _rgb(WHITE)
+            cell.line.color.rgb = _rgb(STONE_DARK); cell.line.width = Pt(0.75); cell.shadow.inherit = False
+            _add_text(slide, _clean_text(k.get("name"), 40), x + 0.12, 5.50, iw - 0.24, 0.22, size=9.5, bold=True, color=INK)
+            _add_text(slide, _clean_text(k.get("rule"), 90), x + 0.12, 5.72, iw - 0.24, 0.34, size=7.6, bold=True, color=tone)
+            bx, bw2, by, bh = x + 0.12, iw - 0.24, 6.12, 0.09
+            track = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(bx), Inches(by), Inches(bw2), Inches(bh))
+            track.adjustments[0] = 0.5; track.fill.solid(); track.fill.fore_color.rgb = _rgb(DASH_TRACK)
+            track.line.fill.background(); track.shadow.inherit = False
+            frac = max(0.0, min(1.0, _safe_float(k.get("frac"), 0.0)))
+            if frac > 0.03:
+                fill = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(bx), Inches(by), Inches(max(bw2 * frac, bh)), Inches(bh))
+                fill.adjustments[0] = 0.5; fill.fill.solid(); fill.fill.fore_color.rgb = _rgb(tone)
+                fill.line.fill.background(); fill.shadow.inherit = False
+            tick = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(bx + bw2 - 0.015), Inches(by - 0.035), Inches(0.03), Inches(bh + 0.07))
+            tick.fill.solid(); tick.fill.fore_color.rgb = _rgb(INK)
+            tick.line.fill.background(); tick.shadow.inherit = False
+            _add_text(slide, _clean_text(k.get("now"), 40), x + 0.12, 6.26, iw - 0.24, 0.2, size=7.8, color=MUTED)
+    _add_text(slide, ("Αν κάποιο από αυτά συμβεί, η εικόνα έχει αλλάξει — και η πρόταση ξαναζυγίζεται με τα νέα δεδομένα." if el
+                      else "If any of these trigger, the picture has changed — and the recommendation is re-weighed on the new data."),
+              0.86, 6.53, 11, 0.2, size=7.5, color=NEUTRAL)
+
+
 def generate_pptx(presentation_plan: dict, visual_pack: dict, output_path: Path, logo_path: Path) -> dict:
     prs = Presentation(); prs.slide_width = Inches(13.333333); prs.slide_height = Inches(7.5)
     blank = prs.slide_layouts[6]
@@ -3241,6 +3575,16 @@ def generate_pptx(presentation_plan: dict, visual_pack: dict, output_path: Path,
                     slot = f"anatomy_{key}"
                     _render_emotion_anatomy(slide, item, ((presentation_plan.get("slide_narratives") or {}).get(slot) or []),
                                             lang, ctx, presentation_plan.get("display_policy") or {})
+            elif typ == "key_findings":
+                fin = presentation_plan.get("finale") or {}
+                _render_key_findings(slide, fin.get("findings") or [], lang, ctx)
+            elif typ == "strategic_position":
+                fin = presentation_plan.get("finale") or {}
+                ctx2 = dict(ctx); ctx2["_finale_score"] = fin.get("score")
+                _render_strategic_position(slide, fin.get("position") or {}, lang, ctx2)
+            elif typ == "final_recommendation":
+                fin = presentation_plan.get("finale") or {}
+                _render_recommendation(slide, fin.get("recommendation") or {}, fin.get("watch") or [], lang, ctx)
             elif typ == "evidence_split":
                 pos=[c for c in claims if str((c.get("source_values") or {}).get("sentiment"))=="positive"]
                 neg=[c for c in claims if str((c.get("source_values") or {}).get("sentiment"))=="negative"]
@@ -3565,6 +3909,25 @@ def build_exports(folder: Path, plan: dict, *, force: bool=False, cancel_check: 
     narratives=_build_analyst_narratives(folder,plan,lang_now,top,emo,tl,visual_pack,anatomy)
     pplan["slide_narratives"]=narratives.get("slots") or {}
     pplan["slide_narratives_provider"]=narratives.get("provider")
+    # Finale (slides 10-12): findings, position map, ONE recommendation + watch
+    # indicators computed from the run's own numbers.
+    profile=_run_profile_block(plan,visual_pack,top,emo,tl)
+    finale=_fallback_finale(profile,top,emo,tl,lang_now)
+    finale["score"]=profile.get("brand_reputation_score_0_100")
+    pplan["finale"]=finale
+    slides_list=pplan.get("slides") or []
+    fin_titles={"key_findings":("Κρίσιμα Ευρήματα" if lang_now=="el" else "Key Findings"),
+        "strategic_position":("Πού Στέκεται Σήμερα" if lang_now=="el" else "Where It Stands Today"),
+        "final_recommendation":("Τι Προτείνουμε" if lang_now=="el" else "What We Recommend")}
+    for sid in ("key_findings","strategic_position","final_recommendation"):
+        slides_list.append({"slide_id":sid,"slide_type":sid,"title":fin_titles[sid],
+            "chart_ids":[],"claims":[],"section":"closing","priority":94,"required":False,"notes":{}})
+    # CONTRACT: the client deck is cover + our 11 designed slides — nothing else.
+    keep={"cover","executive_summary","reputation_timeline","top_comments_positive",
+          "top_comments_negative","emotion_profile_bars","key_findings",
+          "strategic_position","final_recommendation"}
+    pplan["slides"]=[sp for sp in slides_list
+                     if sp.get("slide_id") in keep or sp.get("slide_type")=="emotion_anatomy"]
     if top:
         pplan["top_comments"]=top
         slides_list=pplan.get("slides") or []
