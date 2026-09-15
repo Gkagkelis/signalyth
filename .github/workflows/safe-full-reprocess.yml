@@ -1,0 +1,56 @@
+name: Safe full-report reprocess patch
+
+on:
+  push:
+    branches:
+      - safe/full-report-reprocess
+    paths:
+      - 'scripts/apply_full_reprocess_patch.py'
+      - '.github/workflows/safe-full-reprocess.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch-test-commit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      SIGNALYTH_DRY_RUN: 'true'
+      SIGNALYTH_AI_ENABLED: 'false'
+      APIFY_TOKEN: ''
+      OPENAI_API_KEY: ''
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+      - name: Apply exact-anchor patch
+        run: python scripts/apply_full_reprocess_patch.py
+      - name: Compile
+        run: python -m compileall -q app tests
+      - name: Targeted full-reprocess safety tests
+        run: pytest -q tests/test_full_reprocess.py --tb=short
+      - name: Full regression suite
+        run: pytest -q --tb=short
+      - name: Commit only tested integration changes
+        run: |
+          git config user.name 'SIGNALYTH CI'
+          git config user.email 'signalyth-ci@users.noreply.github.com'
+          if git diff --quiet -- app/main.py app/services/run_manager.py; then
+            echo 'No integration changes to commit.'
+            exit 0
+          fi
+          git add app/main.py app/services/run_manager.py
+          git commit -m 'Add safe full report reprocessing'
+          git pull --rebase --autostash origin safe/full-report-reprocess
+          git push origin HEAD:safe/full-report-reprocess
