@@ -1624,12 +1624,54 @@ def _executive_dashboard_data(folder: Path, visual_pack: dict) -> dict | None:
                   if isinstance(r, dict) and r.get("brand_reputation_index") is not None]
         dash["delta"] = round(series[-1] - series[0], 1) if len(series) >= 2 else None
 
+        # ④ Brand Reputation per channel: the per-platform indices computed by
+        # the SAME methodology transformation (intelligence._brand_reputation on
+        # each platform's records), read from the run's source_comparison chart.
+        # Only the platforms of this run exist there; n = reputation-eligible
+        # records, i.e. exactly the records the channel's score is made of.
+        src_rows = ((charts.get("source_comparison") or {}).get("data") or {}).get("rows") or []
+        channels = []
+        for r in src_rows:
+            name = str((r or {}).get("source") or "").strip()
+            if not name:
+                continue
+            score = (r or {}).get("brand_reputation")
+            channels.append({
+                "name": name,
+                "n": _safe_int((r or {}).get("reputation_eligible")),
+                "score": None if score is None else round(_safe_float(score), 1),
+            })
+        channels.sort(key=lambda c: (-c["n"], c["name"]))
+        dash["channels"] = channels
+
         followers, views = _reach_totals(folder)
         dash["followers_total"] = followers
         dash["views_total"] = views
         return dash
     except Exception:
         return None
+
+
+# Canonical channel display names for the aggregate strip. Platforms appear by
+# name ONLY in aggregate views like this one; individual comments never carry
+# their platform (display policy).
+_CHANNEL_NAMES = {
+    "youtube": "YouTube", "tiktok": "TikTok", "facebook": "Facebook",
+    "instagram": "Instagram", "x": "X", "twitter": "X", "reddit": "Reddit",
+    "linkedin": "LinkedIn", "threads": "Threads",
+    "news": ("News", "Ειδήσεις"), "web": ("Web", "Web"),
+    "google_news": ("Google News", "Google News"),
+}
+
+
+def _channel_label(name, lang: str) -> str:
+    key = str(name or "").strip().casefold()
+    v = _CHANNEL_NAMES.get(key)
+    if isinstance(v, tuple):
+        return v[1] if lang == "el" else v[0]
+    if v:
+        return v
+    return (str(name or "").strip().title() or "—")
 
 
 def _render_executive_dashboard(slide, dash: dict, lang: str, ctx: dict) -> None:
@@ -1738,7 +1780,8 @@ def _render_executive_dashboard(slide, dash: dict, lang: str, ctx: dict) -> None
             _add_text(slide, f"{c['share']:.1f}%", dx + dw - 1.28, ly, 1.0, 0.22, size=9, color=MUTED, bold=True, align=PP_ALIGN.RIGHT)
 
     # --- KPI row: five cards, everything from this run ---
-    k_y, k_h, gap = 4.86, 1.38, 0.18
+    # Slightly tighter than v1 so the per-channel reputation strip fits below.
+    k_y, k_h, gap = 4.78, 1.26, 0.18
     k_w = (12.15 - 4 * gap) / 5
     ev_score = dash.get("evidence_score")
     ev_label = None
@@ -1763,11 +1806,58 @@ def _render_executive_dashboard(slide, dash: dict, lang: str, ctx: dict) -> None
         x = 0.58 + i * (k_w + gap)
         _dash_card(slide, x, k_y, k_w, k_h)
         accent = AEGEAN if i == 2 else INK
-        _add_text(slide, value, x + 0.06, k_y + 0.16, k_w - 0.12, 0.5, size=22 if len(value) <= 7 else 18,
+        _add_text(slide, value, x + 0.06, k_y + 0.12, k_w - 0.12, 0.46, size=22 if len(value) <= 7 else 18,
                   color=accent, bold=True, align=PP_ALIGN.CENTER)
         if sub:
-            _add_text(slide, _upper_label(sub), x + 0.06, k_y + 0.64, k_w - 0.12, 0.2, size=8, color=POS, bold=True, align=PP_ALIGN.CENTER, font=LABEL_FONT)
-        _add_text(slide, label, x + 0.12, k_y + (0.86 if sub else 0.74), k_w - 0.24, 0.46, size=8.5, color=MUTED, align=PP_ALIGN.CENTER)
+            _add_text(slide, _upper_label(sub), x + 0.06, k_y + 0.58, k_w - 0.12, 0.2, size=8, color=POS, bold=True, align=PP_ALIGN.CENTER, font=LABEL_FONT)
+        _add_text(slide, label, x + 0.12, k_y + (0.80 if sub else 0.66), k_w - 0.24, 0.42, size=8.5, color=MUTED, align=PP_ALIGN.CENTER)
+
+    # --- ④ Brand Reputation per channel (aggregate strip) ---
+    # Per-platform indices from the run's own source breakdown — the same
+    # (weighted sentiment + 1) / 2 × 100 transformation as the headline score,
+    # applied within each channel. n = reputation-eligible records per channel.
+    # Platform names are visible here (aggregates) and ONLY here; individual
+    # comment cards never show a platform.
+    chans = dash.get("channels") or []
+    if chans:
+        sy, sh_ = 6.18, 0.76
+        _dash_card(slide, 0.58, sy, 12.15, sh_)
+        _panel_label(slide, "BRAND REPUTATION ΑΝΑ ΚΑΝΑΛΙ" if el else "BRAND REPUTATION BY CHANNEL",
+                     0.84, sy + 0.20)
+        _add_text(slide, ("n = εγγραφές που μετρούν στον δείκτη" if el
+                          else "n = records counted in the index"),
+                  0.84, sy + 0.52, 3.1, 0.16, size=6.8, color=NEUTRAL)
+        shown = chans if len(chans) <= 6 else chans[:5]
+        extra = len(chans) - len(shown)
+        cells = shown + ([{"name": None, "n": extra, "score": None}] if extra else [])
+        area_x, area_w = 4.14, 12.53 - 4.14
+        cw = area_w / len(cells)
+        name_size = 7.5 if cw >= 1.25 else 6.8
+        for i, c in enumerate(cells):
+            x = area_x + i * cw
+            if i:  # hairline divider between channel cells
+                div = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(x), Inches(sy + 0.14), Inches(0.012), Inches(sh_ - 0.28))
+                div.fill.solid(); div.fill.fore_color.rgb = _rgb(DASH_TRACK)
+                div.line.fill.background(); div.shadow.inherit = False
+            if c["name"] is None:  # overflow cell (rare: > 6 channels in one run)
+                _add_text(slide, f"+{c['n']}", x, sy + 0.16, cw, 0.28, size=13, color=MUTED, bold=True, align=PP_ALIGN.CENTER)
+                _add_text(slide, "ΑΚΟΜΗ ΚΑΝΑΛΙΑ" if el else "MORE CHANNELS", x, sy + 0.46, cw, 0.16,
+                          size=6.5, color=NEUTRAL, bold=True, align=PP_ALIGN.CENTER, font=LABEL_FONT)
+                continue
+            _add_text(slide, _upper_label(_channel_label(c["name"], lang)), x + 0.04, sy + 0.09, cw - 0.08, 0.16,
+                      size=name_size, color=NEUTRAL, bold=True, align=PP_ALIGN.CENTER, font=LABEL_FONT)
+            # score + n on one centred line, per-run typography
+            box = slide.shapes.add_textbox(Inches(x + 0.02), Inches(sy + 0.26), Inches(cw - 0.04), Inches(0.40))
+            tf = box.text_frame; tf.word_wrap = False
+            tf.vertical_anchor = MSO_ANCHOR.MIDDLE
+            tf.margin_left = tf.margin_right = tf.margin_top = tf.margin_bottom = 0
+            para = tf.paragraphs[0]; para.alignment = PP_ALIGN.CENTER
+            r1 = para.add_run(); r1.text = "—" if c["score"] is None else f"{_safe_float(c['score']):.1f}"
+            r1.font.name = FONT; r1.font.size = Pt(14.5); r1.font.bold = True
+            r1.font.color.rgb = _rgb(NEUTRAL if c["score"] is None else _val_color(c["score"]))
+            r2 = para.add_run(); r2.text = f"  n={_safe_int(c['n'])}"
+            r2.font.name = FONT; r2.font.size = Pt(8); r2.font.bold = False
+            r2.font.color.rgb = _rgb(MUTED)
 
 
 # ---------- Brand Reputation Timeline (slide 3) ----------
@@ -2224,6 +2314,90 @@ def _top_comments_data(folder: Path, plan: dict, lang: str) -> dict | None:
         return None
 
 
+# --- Continuation geometry: the same numbers _render_top_comments draws with,
+# lifted to module level so the PLANNER can decide a (1/2)-(2/2) split with the
+# exact fit math the RENDERER will use. Rule: a comment is never truncated and
+# never shrunk below the font ladder — when Top-N stops fitting, the slide
+# continues on a second page instead.
+_TC_TOTAL_H = 5.44
+_TC_GAP = 0.055
+_TC_TEXT_W = 8.10 - 1.42            # card width minus rank badge and value chip
+_TC_FONT_LADDER = (8.3, 7.9, 7.5, 7.1, 6.7, 6.4)
+_TC_READABLE_MIN = 7.5              # below this a Top-10 stops being readable -> split
+
+
+def _tc_card_heights(entries: list[dict], font: float) -> list[float]:
+    cpl = max(30, int(_TC_TEXT_W * 12.2 * 8.3 / font))
+    line_h = 0.0172 * font
+    return [0.245 + max(1, math.ceil(len(str(e.get("text") or "")) / cpl)) * line_h
+            for e in entries]
+
+
+def _tc_fits(entries: list[dict], *, min_font: float = _TC_FONT_LADDER[-1]) -> float | None:
+    """Largest ladder font (>= min_font) at which every card fits unscaled; None if none."""
+    if not entries:
+        return _TC_FONT_LADDER[0]
+    avail = _TC_TOTAL_H - _TC_GAP * (len(entries) - 1)
+    for font in _TC_FONT_LADDER:
+        if font < min_font:
+            break
+        if sum(_tc_card_heights(entries, font)) <= avail:
+            return font
+    return None
+
+
+def _top_comments_parts(entries: list[dict]) -> list[tuple[int, int]]:
+    """Continuation plan for a Top-N comments slide: ordered [(start, end)] slices.
+    One slide when everything fits at readable size; otherwise a height-balanced
+    (1/2)-(2/2) split, each page free to use the full font ladder. More pages
+    only when even that cannot hold the text unscaled - never truncation."""
+    n = len(entries)
+    if n <= 1 or _tc_fits(entries, min_font=_TC_READABLE_MIN) is not None:
+        return [(0, n)]
+    heights = _tc_card_heights(entries, _TC_FONT_LADDER[0])
+    total = sum(heights)
+    prefix = [0.0]
+    for h in heights:
+        prefix.append(prefix[-1] + h)
+
+    def _balanced(parts: int) -> list[tuple[int, int]]:
+        cut_idx = [0]
+        for pi in range(1, parts):
+            target = total * pi / parts
+            lo, hi = cut_idx[-1] + 1, n - (parts - pi)
+            cut_idx.append(min(range(lo, hi + 1), key=lambda i: abs(prefix[i] - target)))
+        cut_idx.append(n)
+        return list(zip(cut_idx, cut_idx[1:]))
+
+    for parts in range(2, n + 1):
+        slices = _balanced(parts)
+        if all(_tc_fits(entries[s:e]) is not None for s, e in slices):
+            return slices
+    return [(i, i + 1) for i in range(n)]
+
+
+def _tc_commentary_slice(paras: list[dict], part: int, parts: int,
+                         entries_slice: list[dict], start: int, end: int, lang: str) -> list[dict]:
+    """Analyst commentary for one page of a split slide: paragraphs distribute
+    contiguously and front-loaded across the parts (never repeated); a page left
+    without prose gets a deterministic continuation note computed from its own
+    entries - the panel is never empty and never invents content."""
+    m = len(paras or [])
+    lo_i = math.ceil((part - 1) * m / parts)
+    hi_i = math.ceil(part * m / parts)
+    chunk = list((paras or [])[lo_i:hi_i])
+    if chunk:
+        return chunk
+    vals = [_safe_float(e.get("score")) for e in entries_slice] or [0.0]
+    sgn = lambda v: ("+" if v > 0 else "\u2212") + f"{abs(v):.2f}"
+    lo, hi = min(vals), max(vals)
+    if lang == "el":
+        return [{"lead": "Συνέχεια κατάταξης.",
+                 "body": f"Θέσεις {start + 1}\u2013{end} της ίδιας λίστας · sentiment από {sgn(lo)} έως {sgn(hi)}."}]
+    return [{"lead": "Ranking continued.",
+             "body": f"Ranks {start + 1}\u2013{end} of the same list · sentiment from {sgn(lo)} to {sgn(hi)}."}]
+
+
 def _scrub_display_text(text: str, policy: dict) -> str:
     """Client-deck scrub: platform names never show; in political research,
     third-party commenter names become their stable pseudonyms."""
@@ -2300,8 +2474,14 @@ def _scrubbed_plan_for_display(presentation_plan: dict, charts: dict) -> tuple[d
 
 
 def _render_top_comments(slide, entries: list[dict], commentary: list[dict],
-                         polarity: str, lang: str, ctx: dict, policy: dict) -> None:
+                         polarity: str, lang: str, ctx: dict, policy: dict,
+                         *, part: dict | None = None, all_scores: list | None = None) -> None:
+    """One page of the Top-comments slide. `part` carries {"start": global_offset}
+    on a (1/2)-(2/2) continuation so rank badges keep counting; `all_scores` is
+    the WHOLE ranked list, so the Avg/Range chips show identical whole-list
+    numbers on every page instead of per-page fragments."""
     el = lang == "el"
+    rank_offset = _safe_int((part or {}).get("start"), 0)
     is_pos = polarity == "positive"
     accent = POS if is_pos else NEG
     soft = "E7F2EC" if is_pos else "FBE9EA"
@@ -2353,7 +2533,8 @@ def _render_top_comments(slide, entries: list[dict], commentary: list[dict],
         badge = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(lx + 0.12), Inches(y + h / 2 - 0.115), Inches(0.23), Inches(0.23))
         badge.fill.solid(); badge.fill.fore_color.rgb = _rgb(accent)
         badge.line.fill.background(); badge.shadow.inherit = False
-        num = _add_text(slide, str(i + 1), lx + 0.035, y + h / 2 - 0.115, 0.40, 0.23, size=9 if i < 9 else 7.5,
+        rank = rank_offset + i + 1
+        num = _add_text(slide, str(rank), lx + 0.035, y + h / 2 - 0.115, 0.40, 0.23, size=9 if rank < 10 else 7.5,
                         color=WHITE, bold=True, align=PP_ALIGN.CENTER, valign=MSO_ANCHOR.MIDDLE)
         num.text_frame.margin_left = num.text_frame.margin_right = 0
         chip_w = 0.74
@@ -2375,7 +2556,9 @@ def _render_top_comments(slide, entries: list[dict], commentary: list[dict],
     _dash_card(slide, nx, 1.42, nw_, 4.30)
     _panel_label(slide, ("Η ΜΑΤΙΑ ΤΟΥ ΑΝΑΛΥΤΗ" if el else "THE ANALYST'S VIEW"), nx + 0.28, 1.64, accent)
     paras = (commentary or [])[:3]
-    block = (4.30 - 0.72) / max(1, len(paras) or 1)
+    # Sparse panels (a split page may carry 1 paragraph) pack from the top with
+    # a natural reading rhythm instead of stretching over the whole card.
+    block = min(1.35, (4.30 - 0.72) / max(1, len(paras) or 1))
     py = 1.98
     for item in paras:
         lead = item.get("lead") or ""
@@ -2385,8 +2568,8 @@ def _render_top_comments(slide, entries: list[dict], commentary: list[dict],
     _add_text(slide, ("Γράφεται αυτόματα από την AI ανάλυση του run" if el else "Written automatically by the run's AI analysis"),
               nx + 0.28, 5.42, nw_ - 0.56, 0.2, size=7, color=NEUTRAL)
 
-    # --- Range chips ---
-    vals = [e["score"] for e in entries] or [0.0]
+    # --- Range chips: always the WHOLE ranked list, identical on every page ---
+    vals = list(all_scores) if all_scores else ([e["score"] for e in entries] or [0.0])
     ky, kh_ = 5.90, 0.96
     kw_ = (nw_ - 0.12) / 2
     sgn = lambda v: ("+" if v > 0 else "−") + f"{abs(v):.2f}"
@@ -2781,7 +2964,7 @@ def _build_analyst_narratives(folder: Path, plan: dict, lang: str,
                                        "properties": {k: {"type": "string"} for k in ("move", "why", "avoid", "avoid_why")}},
                 }}
             schema = {"type": "object", "additionalProperties": False, "required": slot_names + ["finale"],
-                      "properties": {**{k: {"type": "array", "maxItems": 3, "items": item} for k in slot_names},
+                      "properties": {**{k: {"type": "array", "minItems": 3, "maxItems": 3, "items": item} for k in slot_names},
                                      "finale": finale_schema}}
             response = client.responses.create(
                 model=settings.signalyth_ai_reasoning_model, store=False,
@@ -3562,18 +3745,21 @@ def generate_pptx(presentation_plan: dict, visual_pack: dict, output_path: Path,
     # Client-deck display policy (platform hiding; pseudonyms in political runs).
     presentation_plan, charts = _scrubbed_plan_for_display(presentation_plan, charts)
     render_audit=[]
+    cont_seen=0  # (1/2)-(2/2) continuation pages share their part-1 section number
     for idx, spec in enumerate(presentation_plan.get("slides") or [], start=1):
         slide=prs.slides.add_slide(blank); _set_bg(slide)
         typ=spec.get("slide_type")
         if typ=="cover":
             _render_cover(slide, spec, ctx, lang, logo_path, presentation_plan)
         else:
+            if _safe_int((spec.get("notes") or {}).get("part"),1)>=2:
+                cont_seen+=1
             accent_pair=None
             if typ=="emotion_anatomy":
                 ekey=str((spec.get("notes") or {}).get("emotion_key") or "")
                 if ekey:
                     accent_pair=(_cat_label(ekey,lang),EMOTION_COLORS.get(ekey,NEUTRAL))
-            _add_header(slide,spec.get("title"),idx-1,accent_pair)
+            _add_header(slide,spec.get("title"),idx-1-cont_seen,accent_pair)
             _add_footer(slide,idx,ctx)
             if spec.get("subtitle"):
                 _add_text(slide,spec.get("subtitle"),1.15,1.35,11.3,.72,size=12.5,color=MUTED)
@@ -3604,10 +3790,21 @@ def generate_pptx(presentation_plan: dict, visual_pack: dict, output_path: Path,
                 tc = presentation_plan.get("top_comments") or {}
                 polarity = "positive" if typ.endswith("positive") else "negative"
                 entries = tc.get(polarity) or []
-                if entries:
+                notes_tc = spec.get("notes") or {}
+                parts_n = max(1, _safe_int(notes_tc.get("parts"), 1))
+                start_i = _safe_int(notes_tc.get("start"), 0)
+                end_i = _safe_int(notes_tc.get("end"), len(entries)) or len(entries)
+                sliced = entries[start_i:end_i] if parts_n > 1 else entries
+                if sliced:
                     slot = "top_positive" if polarity == "positive" else "top_negative"
-                    _render_top_comments(slide, entries, ((presentation_plan.get("slide_narratives") or {}).get(slot) or []),
-                                         polarity, lang, ctx, presentation_plan.get("display_policy") or {})
+                    paras = ((presentation_plan.get("slide_narratives") or {}).get(slot) or [])
+                    if parts_n > 1:
+                        paras = _tc_commentary_slice(paras, max(1, _safe_int(notes_tc.get("part"), 1)),
+                                                     parts_n, sliced, start_i, end_i, lang)
+                    _render_top_comments(slide, sliced, paras,
+                                         polarity, lang, ctx, presentation_plan.get("display_policy") or {},
+                                         part=({"start": start_i} if parts_n > 1 else None),
+                                         all_scores=[e.get("score") for e in entries])
             elif typ == "emotion_profile_bars":
                 emo = presentation_plan.get("emotion_profile") or {}
                 if emo.get("rows"):
@@ -3987,13 +4184,21 @@ def build_exports(folder: Path, plan: dict, *, force: bool=False, cancel_check: 
                 continue
             adjective=("Θετικά" if pol=="positive" else "Αρνητικά") if lang_now=="el" else ("Positive" if pol=="positive" else "Negative")
             noun="Σχόλια" if lang_now=="el" else "Comments"
-            slides_list.insert(insert_at,{"slide_id":f"top_comments_{pol}","slide_type":f"top_comments_{pol}",
-                "title":f"Top {count} {adjective} {noun}","chart_ids":[],"claims":[],
-                "section":"opening","priority":97,"required":False,"notes":{}})
-            insert_at+=1
+            # Continuation contract: when the Top-N no longer fits at readable
+            # size, the slide continues as (1/2)-(2/2) - nothing is ever cut.
+            parts=_top_comments_parts(top.get(pol) or [])
+            for pi,(s,e) in enumerate(parts,start=1):
+                title=f"Top {count} {adjective} {noun}"+(f" ({pi}/{len(parts)})" if len(parts)>1 else "")
+                sid=f"top_comments_{pol}"+("" if pi==1 else f"_p{pi}")
+                notes={"part":pi,"parts":len(parts),"start":s,"end":e} if len(parts)>1 else {}
+                slides_list.insert(insert_at,{"slide_id":sid,"slide_type":f"top_comments_{pol}",
+                    "title":title,"chart_ids":[],"claims":[],
+                    "section":"opening","priority":97,"required":False,"notes":notes})
+                insert_at+=1
     if emo:
         slides_list=pplan.get("slides") or []
-        after=next((i for i,sp in enumerate(slides_list) if sp.get("slide_id")=="top_comments_negative"),None)
+        after=max((i for i,sp in enumerate(slides_list)
+                   if str(sp.get("slide_type") or "").startswith("top_comments")),default=None)
         if after is None:
             after=next((i for i,sp in enumerate(slides_list) if sp.get("slide_id") in ("top_comments_positive","reputation_timeline","executive_summary")),0)
         slides_list.insert(after+1,{"slide_id":"emotion_profile_bars","slide_type":"emotion_profile_bars",
@@ -4014,7 +4219,8 @@ def build_exports(folder: Path, plan: dict, *, force: bool=False, cancel_check: 
           "top_comments_negative","emotion_profile_bars","key_findings",
           "strategic_position","final_recommendation"}
     pplan["slides"]=[sp for sp in slides_list
-                     if sp.get("slide_id") in keep or sp.get("slide_type")=="emotion_anatomy"]
+                     if sp.get("slide_id") in keep or sp.get("slide_type")=="emotion_anatomy"
+                     or str(sp.get("slide_type") or "").startswith("top_comments")]
     # Display policy for the client deck (internal docx keeps real details).
     policy_names=sorted(((top or {}).get("name_index") or {}).items(),key=lambda kv:-len(kv[0]))
     pplan["display_policy"]={
