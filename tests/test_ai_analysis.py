@@ -185,12 +185,28 @@ class AIAnalysisTests(unittest.TestCase):
         analyze_records([row(1, "Τέλεια, άλλη μία απολύτως αξιόπιστη κλήρωση...")], plan(), provider)
         self.assertEqual([c["tier"] for c in provider.calls], ["bulk", "reasoning"])
 
-    def test_material_model_disagreement_forces_human_review(self):
+    def test_confident_reasoning_tier_adjudicates_model_disagreement(self):
+        # Intentional behavior change: the reasoning tier re-reads the full text
+        # as adjudicator. A confident verdict (>= ADJUDICATION_CONFIDENCE) is
+        # accepted — flagged, audited, but NOT parked in the human queue.
         def fn(rec, tier):
             if tier == "bulk":
                 return annotation(rec, semantic_relevance="uncertain", relevance_confidence=0.6, overall_confidence=0.6,
                                   sentiment_label="negative", sentiment_score=-0.8, target_stance="critical")
             return annotation(rec, semantic_relevance="relevant", relevance_confidence=0.95, overall_confidence=0.95,
+                              sentiment_label="positive", sentiment_score=0.8, target_stance="supportive")
+        result = analyze_records([row(1, "Eurojackpot comment")], plan(), ScriptedProvider(fn))
+        self.assertEqual(len(result["review_queue"]), 0)
+        ai = result["analyzed"][0]["ai_analysis"]
+        self.assertIn("model_disagreement", ai["flags"])
+        self.assertIn("model_disagreement_adjudicated_by_reasoning_tier", ai["decision_reasons"])
+
+    def test_unconfident_disagreement_still_forces_human_review(self):
+        def fn(rec, tier):
+            if tier == "bulk":
+                return annotation(rec, semantic_relevance="uncertain", relevance_confidence=0.6, overall_confidence=0.6,
+                                  sentiment_label="negative", sentiment_score=-0.8, target_stance="critical")
+            return annotation(rec, semantic_relevance="relevant", relevance_confidence=0.7, overall_confidence=0.7,
                               sentiment_label="positive", sentiment_score=0.8, target_stance="supportive")
         result = analyze_records([row(1, "Eurojackpot comment")], plan(), ScriptedProvider(fn))
         ai = result["review_queue"][0]["ai_analysis"]

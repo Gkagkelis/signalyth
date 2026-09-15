@@ -413,13 +413,16 @@ class Step7LifecycleTests(unittest.TestCase):
         from app.services.visualizations import VisualizationCancelled
         run_id=self.make_run(); clean,ai,intel,inv,_=self.reports(); entered=threading.Event()
         def cancellable(*args,cancel_check=None,**kwargs):
-            entered.set(); deadline=time.time()+2
+            # Generous wall-clock bound: the pass path exits the instant the
+            # cancel is observed; the deadline only limits the FAILURE case, so
+            # a loaded machine (full-suite runs) cannot flake this test.
+            entered.set(); deadline=time.time()+10
             while time.time()<deadline:
                 if cancel_check and cancel_check(): raise VisualizationCancelled('cancelled')
                 time.sleep(.01)
             raise AssertionError('cancel was not observed')
         with patch('app.services.collector.ApifyRunner',FastRunner), patch('app.services.run_manager.clean_run',return_value=clean), patch('app.services.run_manager.analyze_run',return_value=ai), patch('app.services.run_manager.build_intelligence',return_value=intel), patch('app.services.run_manager.build_investigations',return_value=inv), patch('app.services.run_manager.build_visualizations',side_effect=cancellable):
-            self.manager.enqueue(run_id); self.assertTrue(entered.wait(timeout=1)); self.manager.cancel(run_id); done=wait_terminal(self.store,run_id)
+            self.manager.enqueue(run_id); self.assertTrue(entered.wait(timeout=5)); self.manager.cancel(run_id); done=wait_terminal(self.store,run_id)
         self.assertEqual(done['status'],'cancelled'); self.assertEqual(done['investigations']['status'],'succeeded'); self.assertEqual(done['visualizations']['status'],'cancelled')
 
     def test_restart_during_visualizations_marks_visual_layer_interrupted(self):
