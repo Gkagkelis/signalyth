@@ -112,7 +112,41 @@ const sourceHost=document.getElementById('view-sources');if(sourceHost)new Mutat
 setTimeout(decorateCommentActors,0);
 })();
 </script>'''
-    html=html.replace("</body>",panel+comment_panel+"</body>") if "</body>" in html else html+panel+comment_panel
+    reprocess_panel = r'''<script>
+(()=>{
+document.addEventListener('click',async(ev)=>{
+  const btn=ev.target&&ev.target.closest?ev.target.closest('[data-build-exports]'):null;
+  if(!btn||!btn.classList.contains('secondary'))return;
+  const runId=btn.dataset.buildExports||'';
+  const host=document.getElementById('view-exports');
+  const sel=host?host.querySelector(`[data-export-media="${runId}"]`):null;
+  // An explicit media-policy choice keeps the old, export-only rebuild behavior.
+  if(sel&&sel.value)return;
+  ev.preventDefault();ev.stopImmediatePropagation();
+  const ok=window.confirm(
+    'Πλήρης επανεπεξεργασία report;\n\n'+
+    'Θα ξανατρέξουν Cleaning → AI Analysis → Intelligence → Charts → Report πάνω στα ΗΔΗ αποθηκευμένα δεδομένα.\n'+
+    'ΔΕΝ θα γίνει νέα συλλογή και ΔΕΝ θα γίνει καμία κλήση Apify.\n'+
+    'Μπορεί να υπάρξει χρέωση OpenAI για records που δεν καλύπτονται από το υπάρχον cache.\n\n'+
+    'Αν υπάρχει manual review που κινδυνεύει να χαθεί, το SIGNALYTH θα σταματήσει πριν αλλάξει οτιδήποτε.'
+  );
+  if(!ok)return;
+  const original=btn.textContent;
+  btn.disabled=true;btn.textContent='Προετοιμασία πλήρους επανεπεξεργασίας…';
+  try{
+    const rr=await fetch('/api/runs/'+encodeURIComponent(runId)+'/reprocess',{method:'POST'});
+    let data={};try{data=await rr.json()}catch(_){}
+    if(!rr.ok)throw new Error(data.detail||'Η πλήρης επανεπεξεργασία δεν ξεκίνησε.');
+    btn.textContent='Η πλήρης επανεπεξεργασία ξεκίνησε';
+    window.alert('Η επανεπεξεργασία ξεκίνησε με safety backup. Δες την πρόοδο στις Αναλύσεις. Το προηγούμενο report παραμένει ασφαλές και επανέρχεται αυτόματα αν αποτύχει κάποιο στάδιο.');
+  }catch(e){
+    btn.disabled=false;btn.textContent=original;
+    window.alert(String(e&&e.message?e.message:e));
+  }
+},true);
+})();
+</script>'''
+    html=html.replace("</body>",panel+comment_panel+reprocess_panel+"</body>") if "</body>" in html else html+panel+comment_panel+reprocess_panel
     return HTMLResponse(html)
 
 
@@ -575,6 +609,17 @@ def cancel_run(run_id: str):
         return manager.cancel(run_id)
     except RunNotFound:
         raise HTTPException(status_code=404, detail="Run not found")
+
+
+@app.post("/api/runs/{run_id}/reprocess")
+def reprocess_existing_run(run_id: str):
+    """Rebuild Cleaning -> AI -> Intelligence -> Visuals -> Exports from saved evidence only."""
+    try:
+        return manager.enqueue_reprocess(run_id)
+    except RunNotFound:
+        raise HTTPException(status_code=404, detail="Run not found")
+    except RunStateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
 
 
 @app.post("/api/runs/{run_id}/clean")
