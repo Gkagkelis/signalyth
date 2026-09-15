@@ -9,6 +9,7 @@ from app.services.reprocess import (
     assert_normalized_unchanged,
     backup_exists,
     create_backup,
+    recover_stale_backup,
     restore_backup,
 )
 from app.services.run_manager import RunManager
@@ -75,6 +76,17 @@ class FullReprocessSafetyTests(unittest.TestCase):
         (self.folder / "analysis" / "analyzed.json").write_text(json.dumps(analyzed), encoding="utf-8")
         with self.assertRaises(ReprocessSafetyError):
             create_backup(self.folder)
+        self.assertFalse(backup_exists(self.folder))
+
+    def test_stale_orphan_backup_restores_previous_state(self):
+        create_backup(self.folder)
+        (self.folder / "cleaning" / "sentinel.txt").write_text("partial reprocess", encoding="utf-8")
+        recovered = recover_stale_backup(
+            self.folder,
+            {"status": "running", "reprocess": {"status": "running", "stage": "ai_analysis"}},
+        )
+        self.assertEqual(recovered["status"], "succeeded")
+        self.assertEqual((self.folder / "cleaning" / "sentinel.txt").read_text(), "old cleaning")
         self.assertFalse(backup_exists(self.folder))
 
 
