@@ -6,8 +6,6 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
-from app.services.storage import RunStore
-
 
 PROCESSED_DIRS = (
     "cleaning",
@@ -200,20 +198,21 @@ def discard_backup(folder: Path) -> None:
 
 
 def recover_stale_backup(folder: Path, current_status: dict) -> dict:
-    """Heal a backup left by an interrupted process before accepting a new request."""
+    """Heal a backup left by an interrupted/stale process before a new request starts.
+
+    The caller (RunManager.enqueue_reprocess) has already returned early for a live,
+    non-stale worker. Therefore a remaining queued/running backup here is an orphan
+    and the safest action is to restore the exact pre-reprocess downstream state.
+    """
     if not backup_exists(folder):
         return current_status
 
     rp = current_status.get("reprocess") if isinstance(current_status, dict) else {}
     rp_status = str((rp or {}).get("status") or "")
-    top_status = str((current_status or {}).get("status") or "")
 
     if rp_status in {"succeeded", "failed", "cancelled"}:
         discard_backup(folder)
         return current_status
-
-    if top_status in {"queued", "running", "cancelling"} and rp_status in {"queued", "running"}:
-        raise ReprocessSafetyError("A full reprocess is already active for this run.")
 
     previous = restore_backup(folder)
     discard_backup(folder)
