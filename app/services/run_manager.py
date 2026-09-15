@@ -159,6 +159,116 @@ class RunManager:
             self._jobs[run_id] = future
             return self.store.read_status(run_id)
 
+
+    def enqueue_reprocess(self, run_id: str) -> dict:
+        """Rebuild a completed run from saved normalized evidence without any new collection."""
+        from app.services.reprocess import (
+            ReprocessSafetyError,
+            backup_exists,
+            create_backup,
+            recover_stale_backup,
+        )
+
+        with self._lock:
+            folder = self.store.folder_for(run_id)
+            status = self.store.read_status(run_id)
+            existing = self._jobs.get(run_id)
+            rp = status.get("reprocess") or {}
+            age = self._status_age_seconds(status)
+            stale_after = max(60, int(settings.signalyth_stale_running_after_seconds))
+
+            if (
+                str(rp.get("status") or "") in {"queued", "running"}
+                and str(status.get("status") or "") in {"queued", "running", "cancelling"}
+                and (
+                    (existing is not None and not existing.done())
+                    or age is None
+                    or age < stale_after
+                )
+            ):
+                return status
+
+            if backup_exists(folder):
+                try:
+                    status = recover_stale_backup(folder, status)
+                    self.store.write_status(run_id, status)
+                    self.store.reset_control(run_id)
+                    try:
+                        self.store.checkpoint_run(run_id)
+                    except Exception:
+                        pass
+                except ReprocessSafetyError as exc:
+                    raise RunStateError(str(exc)) from exc
+
+            current = str(status.get("status") or "")
+            if current not in self.store.TERMINAL_STATUSES:
+                raise RunStateError(
+                    f"Full reprocess requires a completed/terminal run; current state is {current or 'unknown'}."
+                )
+            if not settings.signalyth_ai_enabled:
+                raise RunStateError("Full reprocess requires AI Analysis to be enabled.")
+            if not settings.openai_api_key:
+                raise RunStateError("Full reprocess requires OPENAI_API_KEY. No Apify collection will be started.")
+
+            try:
+                meta = create_backup(folder)
+            except ReprocessSafetyError as exc:
+                raise RunStateError(str(exc)) from exc
+
+            previous_status = current
+            previous_phase = str(status.get("phase") or "")
+            self.store.reset_control(run_id)
+            status = dict(status)
+            status.update({
+                "status": "queued",
+                "phase": "reprocess_cleaning",
+                "completed_at": None,
+                "cancel_requested": False,
+                "fatal_error": None,
+                "current": {
+                    "source": None,
+                    "code": "reprocess_waiting_worker",
+                    "message": "Full reprocess queued from saved evidence; collection/Apify will not run",
+                },
+                "reprocess": {
+                    "status": "queued",
+                    "stage": "cleaning",
+                    "requested_at": _utcnow(),
+                    "started_at": None,
+                    "completed_at": None,
+                    "previous_status": previous_status,
+                    "previous_phase": previous_phase,
+                    "normalized_sha256": meta.get("normalized_sha256"),
+                    "no_collection": True,
+                    "error": None,
+                },
+            })
+            status.setdefault("progress", {})["percent"] = 0
+            self.store.write_status(run_id, status)
+
+            # The backup must be durable before another serverless/Celery worker can claim the run.
+            try:
+                self.store.checkpoint_run(run_id)
+            except Exception as exc:
+                self._rollback_reprocess(run_id, "failed", f"Could not persist reprocess backup: {exc}")
+                raise RunStateError("Could not persist the safety backup; full reprocess was not started.") from exc
+
+            if settings.signalyth_execution_backend.strip().lower() == "celery":
+                try:
+                    from app.worker.tasks import run_signalyth
+                    result = run_signalyth.apply_async(args=[run_id], task_id=f"{run_id}-r{uuid4().hex[:8]}")
+                    status = self.store.read_status(run_id)
+                    status["queue_message_id"] = str(result.id)
+                    self.store.write_status(run_id, status)
+                    return self.store.read_status(run_id)
+                except Exception as exc:
+                    self._rollback_reprocess(run_id, "failed", f"Could not enqueue full reprocess: {exc}")
+                    raise RunStateError(f"Could not enqueue full reprocess: {exc}") from exc
+
+            future = self.executor.submit(self._worker, run_id)
+            self._jobs[run_id] = future
+            return self.store.read_status(run_id)
+
     def run_now(self, run_id: str) -> None:
         """Execute one run in the current process (used by the Vercel Celery subscriber)."""
         self.set_invocation_deadline(settings.signalyth_worker_soft_deadline_seconds)
@@ -200,6 +310,11 @@ class RunManager:
                 self._mark_cancelled_before_start(run_id)
                 return
             plan = self.store.read_plan(run_id)
+
+            current_status = self.store.read_status(run_id)
+            if str((current_status.get("reprocess") or {}).get("status") or "") in {"queued", "running"}:
+                self._run_reprocess(run_id, folder, plan)
+                return
 
             # Durable resume: if an earlier invocation already finished collection and
             # cleaning, do NOT re-run paid collection. Jump straight to the analysis
@@ -279,6 +394,342 @@ class RunManager:
                 pass
             with self._lock:
                 self._jobs.pop(run_id, None)
+
+
+    def _set_reprocess_stage(self, run_id: str, stage: str, message: str, percent: int) -> dict:
+        status = self.store.read_status(run_id)
+        rp = dict(status.get("reprocess") or {})
+        rp.update({
+            "status": "running",
+            "stage": stage,
+            "started_at": rp.get("started_at") or _utcnow(),
+            "error": None,
+        })
+        status.update({
+            "status": "running",
+            "phase": f"reprocess_{stage}",
+            "completed_at": None,
+            "cancel_requested": False,
+            "reprocess": rp,
+            "current": {"source": None, "code": f"reprocess_{stage}", "message": message},
+        })
+        status.setdefault("progress", {})["percent"] = max(0, min(99, int(percent)))
+        return self.store.write_status(run_id, status)
+
+    def _complete_reprocess_stage(self, run_id: str, status_key: str, report: dict, next_stage: str) -> None:
+        status = self.store.read_status(run_id)
+        status[status_key] = {
+            **(status.get(status_key) or {}),
+            "status": "succeeded",
+            "completed_at": report.get("generated_at") or _utcnow(),
+            "error": None,
+            "summary": report,
+        }
+        rp = dict(status.get("reprocess") or {})
+        rp["stage"] = next_stage
+        status["reprocess"] = rp
+        self.store.write_status(run_id, status)
+        try:
+            self.store.checkpoint_run(run_id)
+        except Exception:
+            pass
+
+    def _queue_reprocess_continuation(self, run_id: str, stage: str, message: str) -> None:
+        status = self.store.read_status(run_id)
+        rp = dict(status.get("reprocess") or {})
+        rp.update({"status": "queued", "stage": stage, "error": None})
+        status.update({
+            "status": "queued",
+            "phase": f"reprocess_{stage}",
+            "reprocess": rp,
+            "current": {"source": None, "code": "reprocess_continuation", "message": message},
+        })
+        self.store.write_status(run_id, status)
+        try:
+            self.store.checkpoint_run(run_id)
+        except Exception:
+            pass
+        try:
+            self._requeue_continuation(run_id)
+        except Exception as exc:
+            status = self.store.read_status(run_id)
+            status["current"] = {
+                "source": None,
+                "code": "reprocess_continuation_failed",
+                "message": f"Full reprocess is safely checkpointed but continuation could not be enqueued ({exc}); retry Rebuild report to resume.",
+            }
+            self.store.write_status(run_id, status)
+
+    def _rollback_reprocess(self, run_id: str, outcome: str, error: str | None) -> None:
+        from app.services.reprocess import (
+            assert_normalized_unchanged,
+            discard_backup,
+            restore_backup,
+        )
+
+        try:
+            folder = self.store.folder_for(run_id)
+            active_status = self.store.read_status(run_id)
+            active_rp = dict(active_status.get("reprocess") or {})
+            normalized_error = None
+            try:
+                assert_normalized_unchanged(folder)
+            except Exception as exc:
+                normalized_error = str(exc)
+
+            previous = restore_backup(folder)
+            restored = dict(previous or {})
+            restored["reprocess"] = {
+                **active_rp,
+                "status": outcome,
+                "stage": "rolled_back",
+                "completed_at": _utcnow(),
+                "rolled_back": True,
+                "no_collection": True,
+                "error": error or normalized_error,
+            }
+            restored["cancel_requested"] = False
+            restored["current"] = {
+                "source": None,
+                "code": "reprocess_cancelled_rolled_back" if outcome == "cancelled" else "reprocess_failed_rolled_back",
+                "message": (
+                    "Full reprocess cancelled; previous report and processed state were restored"
+                    if outcome == "cancelled"
+                    else "Full reprocess failed safely; previous report and processed state were restored"
+                ),
+            }
+            self.store.write_status(run_id, restored)
+            self.store.reset_control(run_id)
+            try:
+                self.store.checkpoint_run(run_id)
+            except Exception:
+                pass
+            discard_backup(folder)
+            try:
+                self.store.checkpoint_run(run_id)
+            except Exception:
+                pass
+        except Exception as rollback_exc:
+            try:
+                status = self.store.read_status(run_id)
+                status.update({
+                    "status": "failed",
+                    "phase": "reprocess_rollback_failed",
+                    "completed_at": _utcnow(),
+                    "fatal_error": f"Full reprocess rollback needs attention: {rollback_exc}",
+                    "current": {
+                        "source": None,
+                        "code": "reprocess_rollback_failed",
+                        "message": "Safety backup was kept because automatic rollback could not be completed",
+                    },
+                })
+                status["reprocess"] = {
+                    **(status.get("reprocess") or {}),
+                    "status": "rollback_failed",
+                    "error": str(rollback_exc),
+                }
+                self.store.write_status(run_id, status)
+            except Exception:
+                pass
+
+    def _reprocess_deadline_checkpoint(self, run_id: str, next_stage: str) -> bool:
+        if not self._deadline_reached(margin_seconds=60.0):
+            return False
+        self._queue_reprocess_continuation(
+            run_id,
+            next_stage,
+            "Worker time budget reached; full reprocess will continue from the saved downstream stage",
+        )
+        return True
+
+    def _run_reprocess(self, run_id: str, folder: Path, plan: dict) -> None:
+        from app.services.reprocess import assert_normalized_unchanged, discard_backup
+
+        if not self._lease_ok(run_id):
+            return
+
+        try:
+            status = self.store.read_status(run_id)
+            stage = str((status.get("reprocess") or {}).get("stage") or "cleaning")
+
+            if self.store.cancel_requested_folder(folder):
+                self._rollback_reprocess(run_id, "cancelled", None)
+                return
+
+            if stage == "cleaning":
+                self._set_reprocess_stage(
+                    run_id, "cleaning",
+                    "Reprocessing saved evidence: Cleaning & Relevance (no collection/Apify)",
+                    10,
+                )
+                report = clean_run(
+                    folder,
+                    plan=plan,
+                    cancel_check=lambda: self.store.cancel_requested_folder(folder),
+                )
+                self._complete_reprocess_stage(run_id, "cleaning", report, "ai_analysis")
+                stage = "ai_analysis"
+                if self._reprocess_deadline_checkpoint(run_id, stage):
+                    return
+
+            if self.store.cancel_requested_folder(folder):
+                self._rollback_reprocess(run_id, "cancelled", None)
+                return
+
+            if stage == "ai_analysis":
+                self._set_reprocess_stage(
+                    run_id, "ai_analysis",
+                    "Reprocessing saved evidence: AI semantic analysis (OpenAI; no Apify)",
+                    30,
+                )
+                try:
+                    report = analyze_run(
+                        folder,
+                        plan=plan,
+                        cancel_check=lambda: self.store.cancel_requested_folder(folder),
+                        force=True,
+                        deadline_check=self._analysis_deadline_check,
+                    )
+                except AIAnalysisTimeBudgetExceeded:
+                    self._queue_reprocess_continuation(
+                        run_id,
+                        "ai_analysis",
+                        "AI reprocess checkpointed; continuing automatically from the saved OpenAI cache",
+                    )
+                    return
+                self._complete_reprocess_stage(run_id, "analysis", report, "intelligence")
+                stage = "intelligence"
+                if self._reprocess_deadline_checkpoint(run_id, stage):
+                    return
+
+            if self.store.cancel_requested_folder(folder):
+                self._rollback_reprocess(run_id, "cancelled", None)
+                return
+
+            if stage == "intelligence":
+                self._set_reprocess_stage(
+                    run_id, "intelligence",
+                    "Reprocessing saved evidence: Intelligence Engine",
+                    72,
+                )
+                report = build_intelligence(folder, plan=plan, force=True)
+                self._complete_reprocess_stage(run_id, "intelligence", report, "investigations")
+                stage = "investigations"
+                if self._reprocess_deadline_checkpoint(run_id, stage):
+                    return
+
+            if self.store.cancel_requested_folder(folder):
+                self._rollback_reprocess(run_id, "cancelled", None)
+                return
+
+            if stage == "investigations":
+                self._set_reprocess_stage(
+                    run_id, "investigations",
+                    "Reprocessing saved evidence: Automatic Investigations",
+                    82,
+                )
+                report = build_investigations(
+                    folder,
+                    plan=plan,
+                    force=True,
+                    cancel_check=lambda: self.store.cancel_requested_folder(folder),
+                )
+                self._complete_reprocess_stage(run_id, "investigations", report, "visualizations")
+                stage = "visualizations"
+                if self._reprocess_deadline_checkpoint(run_id, stage):
+                    return
+
+            if self.store.cancel_requested_folder(folder):
+                self._rollback_reprocess(run_id, "cancelled", None)
+                return
+
+            if stage == "visualizations":
+                self._set_reprocess_stage(
+                    run_id, "visualizations",
+                    "Reprocessing saved evidence: Charts & Dashboard",
+                    90,
+                )
+                report = build_visualizations(
+                    folder,
+                    plan=plan,
+                    force=True,
+                    cancel_check=lambda: self.store.cancel_requested_folder(folder),
+                )
+                self._complete_reprocess_stage(run_id, "visualizations", report, "exports")
+                stage = "exports"
+                if self._reprocess_deadline_checkpoint(run_id, stage):
+                    return
+
+            if self.store.cancel_requested_folder(folder):
+                self._rollback_reprocess(run_id, "cancelled", None)
+                return
+
+            if stage == "exports":
+                self._set_reprocess_stage(
+                    run_id, "exports",
+                    "Reprocessing saved evidence: rebuilding presentation & exports",
+                    96,
+                )
+                report = build_exports(
+                    folder,
+                    plan=plan,
+                    force=True,
+                    cancel_check=lambda: self.store.cancel_requested_folder(folder),
+                )
+                self._complete_reprocess_stage(run_id, "exports", report, "completed")
+
+            assert_normalized_unchanged(folder)
+
+            status = self.store.read_status(run_id)
+            rp = dict(status.get("reprocess") or {})
+            previous_terminal = str(rp.get("previous_status") or "")
+            terminal = (
+                previous_terminal
+                if previous_terminal in {"succeeded", "completed_shortfall", "completed_with_errors"}
+                else "succeeded"
+            )
+            rp.update({
+                "status": "succeeded",
+                "stage": "completed",
+                "completed_at": _utcnow(),
+                "rolled_back": False,
+                "no_collection": True,
+                "error": None,
+            })
+            status.update({
+                "status": terminal,
+                "phase": "exports_ready",
+                "completed_at": _utcnow(),
+                "cancel_requested": False,
+                "fatal_error": None,
+                "reprocess": rp,
+                "current": {
+                    "source": None,
+                    "code": "reprocess_completed",
+                    "message": "Full reprocess completed from saved evidence; no collection/Apify was run",
+                },
+            })
+            status.setdefault("progress", {})["percent"] = 100
+            self.store.write_status(run_id, status)
+            self.store.reset_control(run_id)
+
+            # First checkpoint commits the new outputs while the rollback backup still exists.
+            # Only after that succeeds do we drop the backup and checkpoint once more.
+            self.store.checkpoint_run(run_id)
+            discard_backup(folder)
+            try:
+                self.store.checkpoint_run(run_id)
+            except Exception:
+                # A remote archive may temporarily retain the backup, but status marks
+                # the new state successful; the next reprocess preflight cleans it up.
+                pass
+
+        except (CleaningCancelled, AIAnalysisCancelled, InvestigationCancelled, VisualizationCancelled, PresentationCancelled):
+            self._rollback_reprocess(run_id, "cancelled", None)
+        except AIAnalysisProviderOutage as exc:
+            self._rollback_reprocess(run_id, "failed", f"OpenAI analysis failed for every batch: {exc}")
+        except Exception as exc:
+            self._rollback_reprocess(run_id, "failed", str(exc))
 
     def _run_cleaning(self, run_id: str, folder: Path, plan: dict):
         if not self._lease_ok(run_id):
@@ -824,6 +1275,9 @@ class RunManager:
 
     def _mark_cancelled_before_start(self, run_id: str):
         status = self.store.read_status(run_id)
+        if str((status.get("reprocess") or {}).get("status") or "") in {"queued", "running"}:
+            self._rollback_reprocess(run_id, "cancelled", None)
+            return
         status.update({
             "status": "cancelled",
             "phase": "completed",
