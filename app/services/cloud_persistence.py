@@ -95,6 +95,63 @@ class CloudPersistence:
             return None
 
 
+    def reprocess_backup_exists(self, run_id: str) -> bool:
+        """Return whether the separate rollback archive exists in durable Blob storage.
+
+        Unlike get_json(), transport errors are intentionally not swallowed: a cloud
+        connectivity problem must fail reprocess preflight safely rather than be
+        mistaken for "no backup".
+        """
+        if not self.enabled:
+            return False
+        target = self._run_path(run_id, "reprocess-backup.zip")
+        with self._client() as client:
+            for item in client.iter_objects(prefix=target, limit=10):
+                path = str(getattr(item, "pathname", "") or getattr(item, "url", "") or "")
+                if path == target or path.endswith("/reprocess-backup.zip"):
+                    return True
+        return False
+
+    def persist_reprocess_backup(self, run_id: str, archive: Path) -> None:
+        """Persist the rollback archive separately from the normal run archive."""
+        if not self.enabled:
+            return
+        if not archive.is_file():
+            raise CloudPersistenceError("Reprocess backup archive is missing.")
+        with self._client() as client:
+            client.upload_file(
+                archive,
+                self._run_path(run_id, "reprocess-backup.zip"),
+                access="private",
+                content_type="application/zip",
+                overwrite=True,
+                multipart=archive.stat().st_size >= 8 * 1024 * 1024,
+            )
+
+    def restore_reprocess_backup(self, run_id: str, destination: Path) -> bool:
+        """Materialize the durable rollback archive into the worker scratch space."""
+        if not self.enabled:
+            return False
+        target = self._run_path(run_id, "reprocess-backup.zip")
+        tmp = destination.with_name(destination.name + ".download")
+        tmp.unlink(missing_ok=True)
+        try:
+            with self._client() as client:
+                result = client.get(target, access="private", use_cache=False)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_bytes(result.content)
+            tmp.replace(destination)
+            return True
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    def delete_reprocess_backup(self, run_id: str) -> None:
+        """Delete the durable rollback archive. Errors propagate so cleanup is safe."""
+        if not self.enabled:
+            return
+        with self._client() as client:
+            client.delete(self._run_path(run_id, "reprocess-backup.zip"))
+
     def delete_run(self, run_id: str) -> None:
         """Best-effort removal of every stored object for one run."""
         if not self.enabled:

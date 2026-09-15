@@ -3,8 +3,11 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
+
+from app.services.cloud_persistence import cloud_persistence
 
 
 PROCESSED_DIRS = (
@@ -15,7 +18,9 @@ PROCESSED_DIRS = (
     "visualizations",
     "exports",
 )
-BACKUP_DIRNAME = ".reprocess-backup"
+LEGACY_BACKUP_DIRNAME = ".reprocess-backup"
+BACKUP_ARCHIVE_SUFFIX = ".reprocess-backup.zip"
+BACKUP_TEMP_SUFFIX = ".reprocess-backup.tmp.zip"
 
 
 class ReprocessSafetyError(RuntimeError):
@@ -37,11 +42,39 @@ def _sha256(path: Path) -> str | None:
 
 
 def backup_dir(folder: Path) -> Path:
-    return folder / BACKUP_DIRNAME
+    """Legacy v1 backup directory, kept only for safe recovery of an old attempt."""
+    return folder / LEGACY_BACKUP_DIRNAME
+
+
+def backup_archive(folder: Path) -> Path:
+    # IMPORTANT: sibling of the run folder, never inside it. Therefore the normal
+    # archive.zip cannot recursively include/duplicate the rollback payload.
+    return folder.parent / f".{folder.name}{BACKUP_ARCHIVE_SUFFIX}"
+
+
+def _backup_temp(folder: Path) -> Path:
+    return folder.parent / f".{folder.name}{BACKUP_TEMP_SUFFIX}"
+
+
+def _ensure_backup_archive(folder: Path) -> Path | None:
+    target = backup_archive(folder)
+    if target.is_file():
+        return target
+    if not cloud_persistence.enabled:
+        return None
+    # First ask Blob whether the object exists. Connectivity errors deliberately
+    # propagate and stop preflight rather than risking a false "no backup" result.
+    if not cloud_persistence.reprocess_backup_exists(folder.name):
+        return None
+    if not cloud_persistence.restore_reprocess_backup(folder.name, target):
+        raise ReprocessSafetyError("The durable reprocess backup exists but could not be restored safely.")
+    return target
 
 
 def backup_exists(folder: Path) -> bool:
-    return backup_dir(folder).is_dir()
+    if backup_dir(folder).is_dir():
+        return True
+    return _ensure_backup_archive(folder) is not None
 
 
 def _read_json(path: Path, default):
@@ -50,6 +83,20 @@ def _read_json(path: Path, default):
             return default
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
+        return default
+
+
+def _read_archive_json(folder: Path, name: str, default):
+    legacy = backup_dir(folder) / name
+    if legacy.is_file():
+        return _read_json(legacy, default)
+    archive = _ensure_backup_archive(folder)
+    if archive is None:
+        return default
+    try:
+        with zipfile.ZipFile(archive, "r") as zf:
+            return json.loads(zf.read(name).decode("utf-8"))
+    except (KeyError, json.JSONDecodeError, UnicodeDecodeError, zipfile.BadZipFile):
         return default
 
 
@@ -114,53 +161,65 @@ def assert_safe_to_reprocess(folder: Path) -> None:
 
 
 def read_backup_status(folder: Path) -> dict | None:
-    payload = _read_json(backup_dir(folder) / "status.json", None)
+    payload = _read_archive_json(folder, "status.json", None)
     return payload if isinstance(payload, dict) else None
 
 
 def normalized_hash_from_backup(folder: Path) -> str | None:
-    meta = _read_json(backup_dir(folder) / "meta.json", {})
+    meta = _read_archive_json(folder, "meta.json", {})
     return (str(meta.get("normalized_sha256") or "") or None) if isinstance(meta, dict) else None
 
 
 def create_backup(folder: Path) -> dict:
-    """Snapshot only mutable downstream state; raw/normalized evidence is never changed."""
-    target = backup_dir(folder)
-    temp = folder / f"{BACKUP_DIRNAME}.tmp"
-    if target.exists():
+    """Create a compact rollback ZIP and persist it separately from archive.zip."""
+    target = backup_archive(folder)
+    temp = _backup_temp(folder)
+    if backup_exists(folder):
         raise ReprocessSafetyError(
             "A previous full-reprocess safety backup still exists. "
             "The run must be recovered before another reprocess starts."
         )
 
     assert_safe_to_reprocess(folder)
-    shutil.rmtree(temp, ignore_errors=True)
-    temp.mkdir(parents=True, exist_ok=False)
+    target.unlink(missing_ok=True)
+    temp.unlink(missing_ok=True)
+
+    meta = {
+        "created_at": _utcnow(),
+        "normalized_sha256": _sha256(folder / "normalized-all.json"),
+        "processed_dirs": list(PROCESSED_DIRS),
+        "storage": "separate-zip-v2",
+    }
 
     try:
-        for name in PROCESSED_DIRS:
-            src = folder / name
-            if src.is_dir():
-                shutil.copytree(src, temp / name)
-
-        for name in ("status.json", "control.json"):
-            src = folder / name
-            if src.is_file():
-                shutil.copy2(src, temp / name)
-
-        meta = {
-            "created_at": _utcnow(),
-            "normalized_sha256": _sha256(folder / "normalized-all.json"),
-            "processed_dirs": list(PROCESSED_DIRS),
-        }
-        (temp / "meta.json").write_text(
-            json.dumps(meta, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
+        with zipfile.ZipFile(temp, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+            for name in PROCESSED_DIRS:
+                src = folder / name
+                if not src.is_dir():
+                    continue
+                for path in sorted(src.rglob("*")):
+                    if path.is_file():
+                        zf.write(path, arcname=path.relative_to(folder).as_posix())
+            for name in ("status.json", "control.json"):
+                src = folder / name
+                if src.is_file():
+                    zf.write(src, arcname=name)
+            zf.writestr("meta.json", json.dumps(meta, ensure_ascii=False, indent=2) + "\n")
         temp.replace(target)
+
+        # Cloud workers run in separate scratch filesystems. Upload the rollback
+        # payload BEFORE the run is queued, but never put it inside archive.zip.
+        if cloud_persistence.enabled:
+            try:
+                cloud_persistence.persist_reprocess_backup(folder.name, target)
+            except Exception as exc:
+                target.unlink(missing_ok=True)
+                raise ReprocessSafetyError(
+                    f"Could not persist the separate safety backup; full reprocess was not started: {exc}"
+                ) from exc
         return meta
     except Exception:
-        shutil.rmtree(temp, ignore_errors=True)
+        temp.unlink(missing_ok=True)
         raise
 
 
@@ -174,26 +233,60 @@ def assert_normalized_unchanged(folder: Path) -> None:
         )
 
 
+def _safe_member_target(folder: Path, member_name: str) -> Path:
+    target = (folder / member_name).resolve()
+    root = folder.resolve()
+    if target != root and root not in target.parents:
+        raise ReprocessSafetyError("Unsafe path in full-reprocess backup archive.")
+    return target
+
+
 def restore_backup(folder: Path) -> dict:
     """Restore the exact downstream state captured before reprocessing."""
-    source = backup_dir(folder)
-    if not source.is_dir():
+    legacy = backup_dir(folder)
+    if legacy.is_dir():
+        previous_status = _read_json(legacy / "status.json", {}) or {}
+        for name in PROCESSED_DIRS:
+            dst = folder / name
+            if dst.exists():
+                shutil.rmtree(dst, ignore_errors=True)
+            src = legacy / name
+            if src.is_dir():
+                shutil.copytree(src, dst)
+        return previous_status
+
+    archive = _ensure_backup_archive(folder)
+    if archive is None:
         raise ReprocessSafetyError("Full-reprocess backup is missing; automatic rollback is not possible.")
 
     previous_status = read_backup_status(folder) or {}
-
-    for name in PROCESSED_DIRS:
-        dst = folder / name
-        if dst.exists():
-            shutil.rmtree(dst, ignore_errors=True)
-        src = source / name
-        if src.is_dir():
-            shutil.copytree(src, dst)
-
+    try:
+        with zipfile.ZipFile(archive, "r") as zf:
+            members = zf.infolist()
+            for name in PROCESSED_DIRS:
+                dst = folder / name
+                if dst.exists():
+                    shutil.rmtree(dst, ignore_errors=True)
+                prefix = f"{name}/"
+                for member in members:
+                    if member.is_dir() or not member.filename.startswith(prefix):
+                        continue
+                    target = _safe_member_target(folder, member.filename)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with zf.open(member, "r") as source, target.open("wb") as out:
+                        shutil.copyfileobj(source, out)
+    except zipfile.BadZipFile as exc:
+        raise ReprocessSafetyError("Full-reprocess backup archive is corrupt; rollback stopped safely.") from exc
     return previous_status
 
 
 def discard_backup(folder: Path) -> None:
+    # Delete durable copy first. If cloud cleanup fails, keep the local copy and
+    # propagate the error so we never silently lose rollback capability.
+    if cloud_persistence.enabled:
+        cloud_persistence.delete_reprocess_backup(folder.name)
+    backup_archive(folder).unlink(missing_ok=True)
+    _backup_temp(folder).unlink(missing_ok=True)
     shutil.rmtree(backup_dir(folder), ignore_errors=True)
 
 
