@@ -1,0 +1,61 @@
+name: Reprocess backup v2 safety gate
+
+on:
+  push:
+    branches:
+      - safe/reprocess-backup-v2
+    paths:
+      - 'app/services/cloud_persistence.py'
+      - 'app/services/reprocess.py'
+      - 'tests/test_full_reprocess.py'
+      - 'tests/test_reprocess_backup_v2.py'
+      - 'scripts/apply_reprocess_backup_v2.py'
+      - '.github/workflows/reprocess-backup-v2.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch-test-commit:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      SIGNALYTH_DRY_RUN: 'true'
+      SIGNALYTH_AI_ENABLED: 'false'
+      APIFY_TOKEN: ''
+      OPENAI_API_KEY: ''
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+      - name: Apply exact-anchor patch
+        run: python scripts/apply_reprocess_backup_v2.py
+      - name: Compile
+        run: python -m compileall -q app tests
+      - name: Targeted backup and reprocess safety tests
+        run: pytest -q tests/test_reprocess_backup_v2.py tests/test_full_reprocess.py --tb=short
+      - name: Full regression suite
+        run: pytest -q --tb=short
+      - name: Commit only tested production changes
+        run: |
+          git config user.name 'SIGNALYTH CI'
+          git config user.email 'signalyth-ci@users.noreply.github.com'
+          if git diff --quiet -- app/services/cloud_persistence.py app/services/reprocess.py; then
+            echo 'No production changes to commit.'
+            exit 0
+          fi
+          git add app/services/cloud_persistence.py app/services/reprocess.py
+          git commit -m 'Persist reprocess backup outside run archive'
+          git pull --rebase --autostash origin safe/reprocess-backup-v2
+          git push origin HEAD:safe/reprocess-backup-v2
