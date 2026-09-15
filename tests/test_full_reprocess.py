@@ -137,8 +137,11 @@ class FullReprocessManagerTests(unittest.TestCase):
                 return self._report(name)
             return _fn
 
+        paid_path_error = AssertionError("full reprocess must never start collection/refill")
         with (
-            patch("app.services.run_manager.execute_plan", side_effect=AssertionError("collection must not run")) as collect,
+            patch("app.services.run_manager.execute_plan", side_effect=paid_path_error) as collect,
+            patch("app.services.run_manager.adaptive_expand_after_cleaning", side_effect=paid_path_error) as adaptive,
+            patch("app.services.run_manager.semantic_refill", side_effect=paid_path_error) as refill,
             patch("app.services.run_manager.clean_run", side_effect=mark("cleaning")),
             patch("app.services.run_manager.analyze_run", side_effect=mark("analysis")),
             patch("app.services.run_manager.build_intelligence", side_effect=mark("intelligence")),
@@ -149,6 +152,8 @@ class FullReprocessManagerTests(unittest.TestCase):
             self.manager._run_reprocess(self.run_id, self.folder, self.store.read(self.folder / "plan.json"))
 
         collect.assert_not_called()
+        adaptive.assert_not_called()
+        refill.assert_not_called()
         self.assertEqual(
             calls,
             ["cleaning", "analysis", "intelligence", "investigations", "visualizations", "exports"],
