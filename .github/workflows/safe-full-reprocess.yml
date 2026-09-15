@@ -5,6 +5,10 @@ on:
     branches:
       - safe/full-report-reprocess
     paths:
+      - 'app/main.py'
+      - 'app/services/reprocess.py'
+      - 'app/services/run_manager.py'
+      - 'tests/test_full_reprocess.py'
       - 'scripts/apply_full_reprocess_patch.py'
       - '.github/workflows/safe-full-reprocess.yml'
   workflow_dispatch:
