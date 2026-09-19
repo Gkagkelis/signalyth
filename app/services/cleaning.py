@@ -15,7 +15,7 @@ from typing import Callable
 from app.services.normalizer import parse_date
 from app.services.storage import RunStore
 
-CLEANING_RULESET_VERSION = "0.9.0"
+CLEANING_RULESET_VERSION = "0.10.0"
 RULESET_CONFIG = {
     "relevance_exclude_below": 0.28,
     "relevance_review_below": 0.58,
@@ -37,6 +37,11 @@ RULESET_CONFIG = {
 
 TOKEN_RE = re.compile(r"[A-Za-zΑ-Ωα-ωΆ-ώ0-9]+", re.UNICODE)
 HASHTAG_RE = re.compile(r"#[\wΑ-Ωα-ωΆ-ώ]+", re.UNICODE)
+ANNOUNCEMENT_RE = re.compile(
+    r"τυχερο[ιί] αριθμο[ιί]|κληρωτ[ιί]δα|winning numbers|results for|gewinnzahlen|estrazione|"
+    r"αποτελ[εέ]σματα.{0,60}αριθμο|αριθμο[ιί].{0,60}κερδ[ιί]ζ|κλ[ηή]ρωσ.{0,60}αριθμο|"
+    r"αποτελ[εέ]σματα της κλ[ηή]ρωσης|πραγματοποι[ηή]θηκε.{0,40}κλ[ηή]ρωσ|"
+    r"μοιρ[αά]ζ\w*.{0,25}εκατ|κλ[ηή]ρωση.{0,50}τρελα[ιί]νει", re.IGNORECASE)
 URL_RE = re.compile(r"https?://\S+|www\.\S+", re.I)
 PHONE_RE = re.compile(r"(?:\+?\d[\s().-]*){8,}")
 
@@ -47,6 +52,12 @@ GREEK_COMMON = {
 GREEKLISH_COMMON = {
     "kai", "sto", "sti", "stin", "apo", "gia", "me", "tin", "ton", "ellada", "ellhn", "athina", "thessaloniki",
     "kerdisa", "kerdise", "kerd", "xthes", "simera", "stoixima", "tzoker", "opap",
+    # Function words and everyday verbs that are distinctive of Greek written in
+    # Latin script. Ambiguous-with-English tokens are deliberately left out.
+    "tipota", "pali", "einai", "eimai", "dhen", "tha", "opws", "kala", "krima", "aplws",
+    "mazi", "xwris", "prepei", "mporei", "ekane", "paizw", "paizei", "epaiksa", "lefta",
+    "xrimata", "klhrwsh", "klirosi", "deltio", "tyxi", "tuxi", "aurio", "avrio", "twra",
+    "eixa", "exoun", "ela", "pame", "vre", "giati", "poly", "poli",
 }
 GREECE_MARKET_TERMS = {
     "greece", "greek", "hellas", "ellada", "ellhn", "ελλαδα", "ελλάδα", "ελλην", "athens", "athina", "αθηνα", "αθήνα",
@@ -186,6 +197,12 @@ def _content_class(row: dict, account_type: str, view: TextView) -> tuple[str, f
         if len(hashtags) >= 6:
             reasons.append("heavy_hashtag_usage")
         return "promotional", min(0.95, 0.65 + 0.07 * len(reasons)), reasons
+    raw_text = str(row.get("text") or "")
+    if ANNOUNCEMENT_RE.search(raw_text) and re.search(r"\d", raw_text):
+        # Draw-numbers / results bulletins: legitimate brand coverage, but an
+        # announcement, not an opinion. Routed to the media bucket so the
+        # report's media-handling policy (blended/separate/excluded) governs it.
+        return "announcement", 0.85, ["draw_results_announcement"]
     if account_type == "person_or_creator":
         return "organic", 0.62, ["person_or_creator_without_promo_signal"]
     return "unknown", 0.4, reasons
@@ -210,10 +227,27 @@ def _market_score(row: dict, plan: dict, view: TextView) -> tuple[float, list[st
         reasons.append("some_greek_script")
 
     ambiguous_own_terms = {_fold(plan.get("topic")), _fold(plan.get("client"))}
-    market_hits = [term for term in GREECE_MARKET_TERMS if _fold(term) not in ambiguous_own_terms and _term_present(view.folded, term)]
+    # Market terms must appear in prose. A domain like greece-powerball.co.za or
+    # a reach hashtag like #greece is not evidence of the Greek market.
+    prose = re.sub(r"https?://\S+|\bwww\.\S+|#[A-Za-z0-9_]+", " ", text)
+    prose = re.sub(r"\b[\w-]+\.(?:com|net|org|gr|co|io|eu|za|info|de|it)(?:\.[a-z]{2})?(?:/\S*)?", " ", prose)
+    prose_folded = _fold(prose)
+    market_hits = [term for term in GREECE_MARKET_TERMS if _fold(term) not in ambiguous_own_terms and _term_present(prose_folded, term)]
     if market_hits:
         score += min(0.45, 0.18 + 0.09 * len(market_hits))
         reasons.extend([f"greece_term:{x}" for x in sorted(market_hits)[:3]])
+
+    # Subject transliterations from the plan (e.g. "eurotzakpot", "tsipras") are
+    # Greek phonetic spellings: they are produced by Greek speakers writing in
+    # Latin script, so they are market evidence in their own right.
+    # Only a genuinely transliterated spelling counts: a "variant" identical to
+    # the brand/person name itself proves nothing (a German writes "Eurojackpot"
+    # too), so it is excluded exactly like the ambiguous market terms above.
+    subject_greeklish = [x for x in (plan.get("greeklish_variants") or [])
+                         if str(x).strip() and _fold(x) not in ambiguous_own_terms]
+    if any(_term_present(view.folded, x) for x in subject_greeklish):
+        score += 0.45
+        reasons.append("greeklish_subject_variant")
 
     greeklish_hits = [term for term in GREEKLISH_COMMON if _fold(term) not in ambiguous_own_terms and _term_present(view.folded, term)]
     greek_common_hits = [term for term in GREEK_COMMON if _term_present(view.folded, term)]
@@ -229,6 +263,17 @@ def _market_score(row: dict, plan: dict, view: TextView) -> tuple[float, list[st
     if any(term in location for term in ("greece", "athens", "attica", "thessaloniki", "ελλαδα", "αθηνα")):
         score += 0.35
         reasons.append("greek_location_metadata")
+
+    letters = [ch for ch in text if ch.isalpha()]
+    if letters:
+        foreign = sum(1 for ch in letters
+                      if not ("a" <= ch.lower() <= "z")
+                      and not ("\u0370" <= ch <= "\u03ff" or "\u1f00" <= ch <= "\u1fff"))
+        if foreign / len(letters) > 0.4 and greek_ratio < 0.05:
+            # Dominant non-Greek, non-Latin script (Vietnamese, CJK, Cyrillic …)
+            # with no Greek text: not the Greek market conversation.
+            score = min(score, 0.10)
+            reasons.append("dominant_foreign_script")
 
     return min(1.0, score), reasons
 
@@ -291,6 +336,12 @@ def _relevance_score(row: dict, plan: dict, view: TextView, market_score: float)
         score -= 0.18
         flags.append("core_term_missing")
         reasons.append("core_term_missing")
+        # Subject gate: the research subject is not mentioned at all — no core
+        # term, no context term, and no parent that mentions it. Hashtag- and
+        # location-based discovery returns such off-topic rows in bulk; they are
+        # not evidence about the subject and must not reach paid analysis.
+        if core_terms and not direct_context_hits and not parent_context_hits:
+            flags.append("no_subject_signal")
 
     return max(0.0, min(1.0, score)), reasons, flags
 
@@ -507,7 +558,7 @@ def _author_behavior(rows: list[dict], views: list[TextView]) -> tuple[dict[int,
 def _origin_class(account_type: str, content_class: str) -> str:
     if account_type == "brand_owned" or content_class == "owned":
         return "owned"
-    if account_type == "media" or content_class == "news":
+    if account_type == "media" or content_class in {"news", "announcement"}:
         return "earned_media"
     if account_type == "person_or_creator":
         return "earned_person"
@@ -518,7 +569,7 @@ def _origin_class(account_type: str, content_class: str) -> str:
 
 def _decision(relevance: float, market: float, spam: float, bot_risk: float, bot_reason_count: int, flags: list[str], content_class: str, impact: int) -> tuple[str, list[str]]:
     reasons: list[str] = []
-    if "exact_duplicate" in flags or "near_duplicate_same_author" in flags:
+    if "exact_duplicate" in flags or "near_duplicate_same_author" in flags or "syndicated_duplicate_content" in flags:
         return "excluded", ["duplicate_not_independent_evidence"]
     if "explicit_exclusion_context" in flags:
         return "excluded", ["explicit_exclusion_context"]
@@ -526,6 +577,10 @@ def _decision(relevance: float, market: float, spam: float, bot_risk: float, bot
         return "excluded", ["high_spam_risk"]
     if bot_risk >= RULESET_CONFIG["bot_likely_automated_at"] and bot_reason_count >= 2:
         return "excluded", ["high_automation_or_manipulation_risk"]
+    if "no_subject_signal" in flags and "contextual_parent_match" not in flags:
+        # No mention of the subject in the text or its parent: off-topic noise
+        # from hashtag/location discovery, not a brand/person mention.
+        return "excluded", ["subject_not_mentioned"]
     if market < RULESET_CONFIG["market_exclude_below"] and "contextual_parent_match" not in flags:
         # No market language, no market terms, no market location, no market
         # parent: this is another country's conversation about the same brand.
@@ -685,6 +740,20 @@ def clean_records(records: list[dict], plan: dict, cancel_check: Callable[[], bo
             relevance_flags[i].append("exact_duplicate")
         else:
             duplicate_seen[key] = i
+
+    # Syndicated copies: the SAME long text published by DIFFERENT pages
+    # (draw-numbers bulletins pushed to many outlet pages). They stay visible to
+    # the coordination layer but only one copy counts as an independent voice.
+    synd_seen: dict[str, int] = {}
+    for i, row in enumerate(rows):
+        if i in duplicate_of or len(views[i].token_set) < 18:
+            continue
+        key = " ".join(sorted(views[i].token_set))
+        if key in synd_seen and _author_key(rows[synd_seen[key]]) != _author_key(row):
+            duplicate_of[i] = rows[synd_seen[key]].get("id") or str(synd_seen[key])
+            relevance_flags[i].append("syndicated_duplicate_content")
+        else:
+            synd_seen.setdefault(key, i)
 
     # Near duplicate only within the same author. Cross-author similarity is handled as story/coordination evidence.
     by_author: dict[str, list[int]] = defaultdict(list)
