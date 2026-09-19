@@ -27,7 +27,7 @@ class CleaningApiTests(unittest.TestCase):
             "date_from": "2026-08-01", "date_to": "2026-08-31", "keywords": ["Eurojackpot"],
             "sources": ["x"], "sample_mode": "perSource", "sample_target": 2, "per_source": {"x": 2},
             "comments": False, "max_budget_usd": 5, "smart_search": True,
-            "report_language": "Ελληνικά", "additional_context": ["ΟΠΑΠ"], "exclusions": ["KNVB"],
+            "report_language": "Ελληνικά", "additional_context": ["ΟΠΑΠ", "κλήρωση"], "exclusions": ["KNVB"],
         }
 
     def normalized(self):
@@ -60,7 +60,7 @@ class CleaningApiTests(unittest.TestCase):
         self.assertIn('data_quality_score', r.json())
         g = self.client.get(f'/api/runs/{run_id}/cleaning')
         self.assertEqual(g.status_code, 200)
-        self.assertEqual(g.json()['ruleset_version'], '0.9.0')
+        self.assertEqual(g.json()['ruleset_version'], '0.10.0')
 
     def test_review_queue_and_decision_api(self):
         run_id = self.make_run_with_data()

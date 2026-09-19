@@ -23,7 +23,7 @@ def plan(topic="Eurojackpot", client="OPAP", exclusions=None, target=20, sources
         "date_to": "2026-08-31",
         "target_total": target,
         "core_terms": [topic],
-        "context_terms": [client, "Greece", "Ελλάδα", "Ellada"],
+        "context_terms": [client, "Greece", "Ελλάδα", "Ellada", "κλήρωση"],
         "greeklish_variants": ["opap", "ellada"],
         "exclusions": list(exclusions or []),
         "sources": sources or [{"source": "x"}, {"source": "news"}],
