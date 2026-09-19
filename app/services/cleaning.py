@@ -52,12 +52,6 @@ GREEK_COMMON = {
 GREEKLISH_COMMON = {
     "kai", "sto", "sti", "stin", "apo", "gia", "me", "tin", "ton", "ellada", "ellhn", "athina", "thessaloniki",
     "kerdisa", "kerdise", "kerd", "xthes", "simera", "stoixima", "tzoker", "opap",
-    # Function words and everyday verbs that are distinctive of Greek written in
-    # Latin script. Ambiguous-with-English tokens are deliberately left out.
-    "tipota", "pali", "einai", "eimai", "dhen", "tha", "opws", "kala", "krima", "aplws",
-    "mazi", "xwris", "prepei", "mporei", "ekane", "paizw", "paizei", "epaiksa", "lefta",
-    "xrimata", "klhrwsh", "klirosi", "deltio", "tyxi", "tuxi", "aurio", "avrio", "twra",
-    "eixa", "exoun", "ela", "pame", "vre", "giati", "poly", "poli",
 }
 GREECE_MARKET_TERMS = {
     "greece", "greek", "hellas", "ellada", "ellhn", "ελλαδα", "ελλάδα", "ελλην", "athens", "athina", "αθηνα", "αθήνα",
@@ -236,18 +230,6 @@ def _market_score(row: dict, plan: dict, view: TextView) -> tuple[float, list[st
     if market_hits:
         score += min(0.45, 0.18 + 0.09 * len(market_hits))
         reasons.extend([f"greece_term:{x}" for x in sorted(market_hits)[:3]])
-
-    # Subject transliterations from the plan (e.g. "eurotzakpot", "tsipras") are
-    # Greek phonetic spellings: they are produced by Greek speakers writing in
-    # Latin script, so they are market evidence in their own right.
-    # Only a genuinely transliterated spelling counts: a "variant" identical to
-    # the brand/person name itself proves nothing (a German writes "Eurojackpot"
-    # too), so it is excluded exactly like the ambiguous market terms above.
-    subject_greeklish = [x for x in (plan.get("greeklish_variants") or [])
-                         if str(x).strip() and _fold(x) not in ambiguous_own_terms]
-    if any(_term_present(view.folded, x) for x in subject_greeklish):
-        score += 0.45
-        reasons.append("greeklish_subject_variant")
 
     greeklish_hits = [term for term in GREEKLISH_COMMON if _fold(term) not in ambiguous_own_terms and _term_present(view.folded, term)]
     greek_common_hits = [term for term in GREEK_COMMON if _term_present(view.folded, term)]
