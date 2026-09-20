@@ -117,6 +117,9 @@ class CollectionPlan(BaseModel):
     search_strategy: SearchStrategy = "balanced_smart"
     keyword_roles: dict[str, str] = Field(default_factory=dict)
     query_preview: dict[str, list[dict]] = Field(default_factory=dict)
+    # Advisory only: names the public may use for the subject. Shown to the
+    # operator before the run; NEVER searched or measured unless they add them.
+    subject_name_suggestions: list[str] = Field(default_factory=list)
     topup_policy: str = "shared_source_target_until_analyzable_or_exhausted"
     master_spec_version: str = "SIGNALYTH-master30-v1"
     benchmark: dict[str, object] | None = None
