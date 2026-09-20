@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import copy
 import math
 import re
@@ -72,6 +74,76 @@ def _role_terms(draft: AnalysisDraft, role: str) -> list[str]:
         if roles.get(str(term).casefold(), default) == role:
             values.append(term)
     return uniq(values)
+
+
+PUBLIC_ALIAS_STOPLIST = {
+    "greece", "greek", "hellas", "ellada", "ελλαδα", "ελλάδα", "europe", "ευρωπη", "ευρώπη",
+    "brand", "company", "εταιρεια", "εταιρεία", "lottery", "λοταρια", "λοταρία",
+}
+
+
+def _fold_alias(x: str) -> str:
+    return re.sub(r"\s+", " ", str(x or "").strip().casefold())
+
+
+def suggest_public_names(draft: AnalysisDraft) -> list[str]:
+    """ADVISORY ONLY. Ask the model under which names the public in this market
+    may talk about the subject (native script, greeklish, nicknames, a local
+    brand the public knows the entity by). The result is shown to the operator
+    before the run; it is NEVER searched or measured unless the operator adds
+    it explicitly. The research subject stays exactly what the client asked.
+
+    Strictly fail-open: any missing key, timeout, refusal or malformed output
+    returns an empty list.
+    """
+    try:
+        from app.config import settings
+        if not draft.smart_search or not settings.signalyth_ai_enabled or not settings.openai_api_key:
+            return []
+        known = {_fold_alias(x) for x in [draft.topic, draft.client, *(draft.keywords or []), *(draft.additional_context or [])]}
+        known.discard("")
+        from openai import OpenAI
+        client = OpenAI(api_key=settings.openai_api_key, max_retries=0, timeout=8.0)
+        schema = {"type": "object", "additionalProperties": False, "required": ["aliases"],
+                  "properties": {"aliases": {"type": "array", "maxItems": 8,
+                                             "items": {"type": "string"}}}}
+        response = client.responses.create(
+            model=settings.signalyth_ai_bulk_model,
+            input=[
+                {"role": "developer", "content": (
+                    "You expand a social-listening search subject into the names the PUBLIC in the given "
+                    "market actually uses for it on social media. Return names of the SAME subject only: "
+                    "native-script spellings, latin/greeklish spellings, widespread nicknames, and the "
+                    "current or former public-facing brand name when the entity was renamed, merged or is "
+                    "known to consumers under a different brand in that market (e.g. a parent company whose "
+                    "local operations the public knows by the local brand). NEVER include: different "
+                    "companies or products, competitors, generic category words, the market or country "
+                    "name, or terms already provided. If the public simply uses the given name, return an "
+                    "empty list. Output only the JSON."
+                )},
+                {"role": "user", "content": json.dumps({
+                    "subject": str(draft.topic or ""), "client": str(draft.client or ""),
+                    "market": str(draft.market or ""), "already_known": sorted(known),
+                }, ensure_ascii=False)},
+            ],
+            text={"format": {"type": "json_schema", "name": "public_aliases", "schema": schema, "strict": True}},
+            max_output_tokens=300,
+        )
+        decoded = json.loads(response.output_text or "{}")
+        cleaned: list[str] = []
+        for raw in (decoded.get("aliases") or []):
+            term = re.sub(r"\s+", " ", str(raw or "").strip())
+            tf = _fold_alias(term)
+            if not (2 <= len(term) <= 40) or tf in known or tf in PUBLIC_ALIAS_STOPLIST:
+                continue
+            if any(tf == _fold_alias(x) for x in cleaned):
+                continue
+            cleaned.append(term)
+            if len(cleaned) >= 6:
+                break
+        return cleaned
+    except Exception:
+        return []
 
 
 def build_terms(draft: AnalysisDraft):
@@ -551,6 +623,7 @@ def _preflight_forecast(draft: AnalysisDraft, plans: list[SourcePlan], registry:
     }
 
 def build_collection_plan(draft: AnalysisDraft) -> CollectionPlan:
+    name_suggestions=suggest_public_names(draft)  # advisory, never alters the subject
     registry=load_registry(); core,context,aliases=build_terms(draft); queries=base_queries(core,context,aliases) if draft.smart_search else uniq([draft.topic,*draft.keywords])
     targets=per_source_targets(draft); selected=[s for s in draft.sources if targets.get(s,0)>0]
     estimates={s:(None if registry[s].get("price_per_1000_hint") is None else targets[s]*registry[s].get("price_per_1000_hint")/1000) for s in selected}
@@ -577,5 +650,5 @@ def build_collection_plan(draft: AnalysisDraft) -> CollectionPlan:
                           core_terms=core,context_terms=context,greeklish_variants=aliases,exclusions=uniq([*draft.exclusions,*_role_terms(draft,"exclude")]),
                           search_strategy_version="master30-search-v1",target_semantics="requested_final_analyzable_unique_in_range",
                           resilience_policy_version="multisource-resilience-master30-v1",preflight_forecast=_preflight_forecast(draft,plans,registry),sources=plans,
-                          search_strategy=draft.search_strategy,keyword_roles={str(k):str(v) for k,v in (draft.keyword_roles or {}).items()},query_preview=preview,
+                          search_strategy=draft.search_strategy,keyword_roles={str(k):str(v) for k,v in (draft.keyword_roles or {}).items()},query_preview=preview,subject_name_suggestions=name_suggestions,
                           topup_policy="shared_source_target_until_analyzable_or_exhausted",master_spec_version="SIGNALYTH-master30-v1",benchmark=draft.benchmark)
