@@ -143,3 +143,38 @@ def test_draw_results_bulletins_are_media_announcements_not_organic_voices():
         _plan())["cleaned"][0]
     assert genuine["cleaning"]["content_class"] != "announcement"
     assert genuine["cleaning"]["decision"] != "excluded"
+
+
+def test_greeklish_subject_mentions_are_inside_the_greek_market():
+    # A Greek writing in Latin script ("eurotzakpot") must never be dropped as
+    # foreign, while the same subject in German/Italian still stays out.
+    p = _plan()
+    p["greeklish_variants"] = ["eurotzakpot", "tzakpot"]
+    greeklish = clean_records([
+        _row("eurotzakpot pali tipota, ta idia kai ta idia", "gk1"),
+        _row("Epaiksa eurotzakpot kai kerdisa 20 euro!", "gk2"),
+    ], p)["cleaned"]
+    for rec in greeklish:
+        assert rec["cleaning"]["decision"] != "excluded", rec["cleaning"]["reasons"]
+        assert "greeklish_subject_variant" in rec["cleaning"]["reasons"]
+    foreign = clean_records([
+        _row("Eurojackpot Gewinnzahlen vom Freitag: 3, 17, 30", "de1"),
+        _row("Estrazione EuroJackPot di venerdi 11 settembre", "it1"),
+    ], p)["cleaned"]
+    for rec in foreign:
+        assert rec["cleaning"]["decision"] == "excluded"
+        assert "outside_target_market" in rec["cleaning"]["reasons"]
+
+
+def test_every_genuine_greek_mention_survives_whatever_its_tone():
+    p = _plan()
+    p["context_terms"] = ["κλήρωση", "τζακποτ", "ΟΠΑΠ"]
+    rows = [
+        _row("Κέρδισα 50 ευρώ στο eurojackpot χαχαχα, πλούτισα!", "s1"),
+        _row("Τι απάτη είναι αυτό το eurojackpot, ποτέ δεν κερδίζει κανείς", "s2"),
+        _row("Πάλι τζίφος στο eurojackpot. 12 χρόνια παίζω, ούτε ένα πεντάρι", "s3"),
+        _row("Αν κερδίσω το eurojackpot φεύγω αύριο για Μαλδίβες", "s4"),
+        _row("Μπράβο ρε ΟΠΑΠ, 39 εκατ. στο eurojackpot και πάλι κανένας Έλληνας", "s5"),
+    ]
+    for rec in clean_records(rows, p)["cleaned"]:
+        assert rec["cleaning"]["decision"] != "excluded", rec["cleaning"]["reasons"]
