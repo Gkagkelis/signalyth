@@ -124,8 +124,50 @@ class RunStore:
             # Freshness sync is best-effort; the existing local copy stays usable.
             pass
 
+    def prune_local_scratch(self, keep_run_id: str | None = None, min_free_mb: int = 300) -> int:
+        """Free serverless scratch space by deleting old local run folders.
+
+        On Vercel the function's /tmp survives across warm invocations, so run
+        folders accumulate until every new write fails with ENOSPC ("No space
+        left on device") — which surfaced as an Internal Server Error on run
+        creation. Durable copies of every run live in the Blob mirror and are
+        re-hydrated on demand, so local run folders are disposable caches:
+        when free space is low, the oldest folders are removed until there is
+        room to work. Local (non-cloud) installs are never pruned — there the
+        filesystem IS the store.
+        """
+        if not self.cloud.enabled:
+            return 0
+        removed = 0
+        try:
+            runs_root = self.root / "runs"
+            if not runs_root.is_dir():
+                return 0
+
+            def free_mb() -> float:
+                try:
+                    return shutil.disk_usage(str(self.root)).free / 1e6
+                except Exception:
+                    return float("inf")
+
+            if free_mb() >= min_free_mb:
+                return 0
+            folders = sorted(
+                (p for p in runs_root.iterdir() if p.is_dir() and p.name != keep_run_id),
+                key=lambda p: p.stat().st_mtime,
+            )
+            for p in folders:
+                shutil.rmtree(p, ignore_errors=True)
+                removed += 1
+                if free_mb() >= min_free_mb:
+                    break
+        except Exception:
+            pass
+        return removed
+
     def create(self, plan: dict) -> tuple[str, Path]:
         self.cloud.require()
+        self.prune_local_scratch()
         run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid4().hex[:8]
         folder = self.root / "runs" / run_id
         folder.mkdir(parents=True, exist_ok=False)

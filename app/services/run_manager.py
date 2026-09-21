@@ -303,6 +303,9 @@ class RunManager:
 
     def _worker(self, run_id: str):
         try:
+            # The worker's serverless scratch disk fills up across warm
+            # invocations just like the API's; make room before heavy writes.
+            self.store.prune_local_scratch(keep_run_id=run_id)
             folder = self.store.folder_for(run_id)
             lease_token = self._claim_lease(run_id)
             self._lease_tokens[run_id] = lease_token
