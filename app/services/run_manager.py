@@ -756,7 +756,15 @@ class RunManager:
             # and the requested *trusted/analyzable* target.  It may diversify a
             # dominant context and, when Comments is ON, deepen into direct replies.
             # Every adaptive Actor call remains inside the existing run budget.
-            if int(report.get("trusted_sample_shortfall", 0) or 0) > 0 and plan.get("search_strategy_version") in {"smart-collection-v2", "master30-search-v1"}:
+            # The adaptive phase must also run when Comments is ON with no sample
+            # shortfall: comment deepening is requested audience evidence, not a
+            # shortfall repair, so meeting the primary target must not silently
+            # skip the comment layer the operator paid attention to enable.
+            needs_adaptive = (
+                int(report.get("trusted_sample_shortfall", 0) or 0) > 0
+                or bool(plan.get("comments_requested"))
+            )
+            if needs_adaptive and plan.get("search_strategy_version") in {"smart-collection-v2", "master30-search-v1"}:
                 adaptive_status = self.store.read_status(run_id)
                 adaptive_status.update({
                     "status": "running",

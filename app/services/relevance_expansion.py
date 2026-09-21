@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 import math
 from pathlib import Path
 from typing import Callable
@@ -162,6 +162,34 @@ def _update_budget(folder: Path, charged: float) -> dict:
     return status
 
 
+def _comment_status_update(folder: Path, source: str, *, current_message: str | None = None, **fields) -> None:
+    """Live, durable visibility for the comment layer.
+
+    The run screen previously showed only the generic adaptive-collection message
+    while comment Actors were running, so the operator could not tell whether
+    comments were being collected, how many, or why a source was skipped. This
+    writes a per-source ``comment_deepening`` block into status.json on every
+    transition, and optionally updates the ``current`` step line, so the process
+    is observable while it happens — not only in the final audit file.
+    """
+    try:
+        store = RunStore()
+        status = store.read(folder / "status.json", {}) or {}
+        block = dict(status.get("comment_deepening") or {})
+        row = dict(block.get(source) or {})
+        row.update({k: v for k, v in fields.items() if v is not None})
+        row["updated_at"] = datetime.now(timezone.utc).isoformat()
+        block[source] = row
+        status["comment_deepening"] = block
+        if current_message:
+            status["current"] = {"source": source, "code": "comment_deepening", "message": current_message}
+        store.write_status_folder(folder, status)
+    except Exception:
+        # Observability must never break collection: a failed status write is
+        # dropped, the paid pipeline continues.
+        pass
+
+
 def adaptive_expand_after_cleaning(
     folder: Path,
     plan: dict,
@@ -318,24 +346,30 @@ def adaptive_expand_after_cleaning(
                 comment_info = {**comment_info, "status": plan_comment_info.get("status"), "enabled": True}
             if comment_info.get("status") in {"verified_disabled", "configured_disabled"}:
                 audit["warnings"].append(f"{source}:comment_actor_disabled_in_settings")
+                _comment_status_update(folder, source, status="skipped", reason="comment_actor_disabled_in_settings")
                 continue
             if comment_info.get("status") not in {"verified_available", "configured_available"}:
                 audit["warnings"].append(f"{source}:comment_deepening_not_operational")
+                _comment_status_update(folder, source, status="skipped", reason="comment_deepening_not_operational")
                 continue
             # Durable idempotence: a resumed run must not pay for the same layer twice.
             existing_comments = store.read(folder / f"normalized-comments-{source}.json", []) or []
             if existing_comments:
                 audit["warnings"].append(f"{source}:comment_deepening_already_collected")
+                _comment_status_update(folder, source, status="collected", collected=len(existing_comments),
+                                       reason="already_collected_in_previous_invocation")
                 continue
             actor_id = str(cfg.get("comment_actor_id") or comment_info.get("candidate_actor_id") or "")
             if not actor_id:
                 audit["warnings"].append(f"{source}:comment_deepening_missing_actor")
+                _comment_status_update(folder, source, status="skipped", reason="no_comment_actor_configured")
                 continue
             max_parents = max(1, min(40, int(cfg.get("comment_max_parents") or 12)))
             max_per_parent = max(1, min(1000, int(cfg.get("comment_max_per_parent") or 40)))
             refs, seed_meta = _comment_seed_refs(source, cleaned, max_seeds=max_parents)
             if not refs:
                 audit["warnings"].append(f"{source}:no_relevant_parent_with_comments")
+                _comment_status_update(folder, source, status="skipped", reason="no_relevant_parent_with_comments")
                 continue
             max_possible = len(refs) * max_per_parent
             # Second layer should add depth without allowing one viral thread to dominate.
@@ -349,6 +383,7 @@ def adaptive_expand_after_cleaning(
                 )
             except ValueError as exc:
                 audit["warnings"].append(f"{source}:comment_input_unavailable:{exc}")
+                _comment_status_update(folder, source, status="skipped", reason=f"comment_input_unavailable:{exc}")
                 continue
             audit.setdefault("comment_seeds", {})[source] = seed_meta
             seed_context = {str(m.get("ref")): str(m.get("text") or "") for m in seed_meta if m.get("ref")}
@@ -357,11 +392,32 @@ def adaptive_expand_after_cleaning(
             if deadline_check():
                 audit["warnings"].append(f"{source}:comment_deepening_deferred_worker_deadline")
                 audit["deadline_reached"] = True
+                _comment_status_update(folder, source, status="deferred", reason="worker_deadline_reached_resumes_automatically")
                 break
             heartbeat(source)
-            do_call(
+            _comment_status_update(
+                folder, source, status="running", actor_id=actor_id,
+                parents=len(refs), requested=wanted, collected=0,
+                current_message=f"Collecting comments — {source}: up to {wanted} comments under {len(refs)} relevant posts",
+            )
+            ok = do_call(
                 source, actor_id, "comment_deepening", inp, wanted, rate, mapping=mapping,
                 evidence_layer="comment", seed_refs=refs, seed_context=seed_context,
+            )
+            collected_now = len(store.read(folder / f"normalized-comments-{source}.json", []) or [])
+            last_step = next(
+                (st for st in reversed(audit.get("steps") or [])
+                 if st.get("source") == source and st.get("kind") == "comment_deepening"),
+                {},
+            )
+            _comment_status_update(
+                folder, source,
+                status="collected" if ok else "failed",
+                collected=collected_now,
+                returned_items=int(last_step.get("returned_items") or 0) or None,
+                cost_usd=float(last_step.get("accounted_cost_usd") or 0) or None,
+                reason=None if ok else "actor_call_failed_or_budget_exhausted",
+                current_message=f"Comments — {source}: {collected_now} collected",
             )
             shortfall = int(report.get("trusted_sample_shortfall", 0) or 0)
 
