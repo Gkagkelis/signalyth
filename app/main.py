@@ -41,6 +41,12 @@ from app.services.integrations import (
     test_openai_connection, update_actor_candidate, validate_actor_input, write_server_secrets,
 )
 from app.services.source_capabilities import source_capabilities, build_comment_smoke_input
+from app.services.scratch import disk_report, ensure_free_space
+
+# A warm serverless instance can be reached with its /tmp already full from
+# earlier runs, in which case even creating the data/config directories fails
+# and every endpoint answers 500. Reclaim space before anything touches disk.
+_STARTUP_SCRATCH_REPORT = ensure_free_space(settings.signalyth_data_dir)
 
 store = RunStore()
 manager = RunManager(store=store)
@@ -88,6 +94,18 @@ async def _unhandled_exception_to_json(request: Request, exc: Exception):
     except Exception:
         pass
     return JSONResponse(status_code=500, content={"detail": f"Server error: {record['error']}"})
+
+
+@app.get("/api/debug/disk")
+def debug_disk():
+    """What is occupying the serverless scratch disk, and what start-up freed."""
+    return {"startup_cleanup": _STARTUP_SCRATCH_REPORT, **disk_report(settings.signalyth_data_dir)}
+
+
+@app.post("/api/debug/cleanup")
+def debug_cleanup():
+    """Reclaim scratch space on demand (run folders are caches of the mirror)."""
+    return ensure_free_space(settings.signalyth_data_dir, aggressive=True)
 
 
 @app.get("/api/debug/last-error")

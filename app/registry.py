@@ -9,6 +9,7 @@ from typing import Any
 
 from app.config import BASE_DIR, settings
 from app.services.cloud_persistence import cloud_persistence
+from app.services.scratch import ensure_free_space, is_no_space_error
 
 RUNTIME_CONFIG_DIR = Path(settings.signalyth_runtime_config_dir)
 REGISTRY_PATH = RUNTIME_CONFIG_DIR / "source_registry.json"
@@ -26,7 +27,16 @@ COMMENT_PRODUCTION_ROLLOUT = {
 
 
 def _ensure_runtime_file(path: Path, baseline: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        # A full serverless scratch disk breaks even this tiny directory. Free
+        # space (run folders are disposable caches of the Blob mirror) and retry
+        # once, so a full disk degrades into a slow request, not a 500.
+        if not is_no_space_error(exc):
+            raise
+        ensure_free_space(settings.signalyth_data_dir, aggressive=True)
+        path.parent.mkdir(parents=True, exist_ok=True)
     if cloud_persistence.enabled and cloud_persistence.restore_config_file(path.name, path):
         return
     if not path.exists() and baseline.exists():
@@ -38,12 +48,21 @@ def _utcnow() -> str:
 
 
 def _write_json_atomic(path: Path, data: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as tmp:
-        json.dump(data, tmp, ensure_ascii=False, indent=2)
-        tmp.write("\n")
-        temp_path = Path(tmp.name)
-    temp_path.replace(path)
+    def _attempt() -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as tmp:
+            json.dump(data, tmp, ensure_ascii=False, indent=2)
+            tmp.write("\n")
+            temp_path = Path(tmp.name)
+        temp_path.replace(path)
+
+    try:
+        _attempt()
+    except OSError as exc:
+        if not is_no_space_error(exc):
+            raise
+        ensure_free_space(settings.signalyth_data_dir, aggressive=True)
+        _attempt()
     if path.parent == RUNTIME_CONFIG_DIR:
         cloud_persistence.put_config_file(path.name, path)
 
