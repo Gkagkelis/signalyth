@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import tempfile
+import time
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -68,17 +69,38 @@ class CloudPersistence:
         return f"{cls.CONFIG_PREFIX}/{name}"
 
     def put_json(self, run_id: str, name: str, payload: Any) -> None:
+        """Mirror a small JSON file to Blob without ever failing the request.
+
+        This mirror runs inline inside API calls (create run, enqueue, every
+        status heartbeat). An unguarded transient Blob failure here used to
+        surface as a bare 500 ("Internal Server Error" → "is not valid JSON"
+        in the UI) even though the local write had already succeeded. The local
+        file remains the source of truth for the invocation and the next
+        status write re-uploads the full document, so after bounded retries a
+        failed mirror is dropped instead of killing the pipeline.
+        """
         if not self.enabled:
             return
         body = (json.dumps(payload, ensure_ascii=False, indent=2, default=str) + "\n").encode("utf-8")
-        with self._client() as client:
-            client.put(
-                self._run_path(run_id, name),
-                body,
-                access="private",
-                content_type="application/json; charset=utf-8",
-                overwrite=True,
-            )
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            try:
+                with self._client() as client:
+                    client.put(
+                        self._run_path(run_id, name),
+                        body,
+                        access="private",
+                        content_type="application/json; charset=utf-8",
+                        overwrite=True,
+                    )
+                return
+            except Exception as exc:  # transient Blob/API/network failure
+                last_exc = exc
+                if attempt < 2:
+                    time.sleep(0.4 * (attempt + 1))
+        # All retries failed: degrade to local-only for this write. The next
+        # write_status/checkpoint re-mirrors the complete state.
+        _ = last_exc
 
     def get_json(self, run_id: str, name: str) -> Any | None:
         if not self.enabled:
