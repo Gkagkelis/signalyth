@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from app.config import settings
 from app.services.cloud_persistence import cloud_persistence
+from app.services.scratch import ensure_free_space, is_no_space_error
 
 _RUN_ID_RE = re.compile(r"^[A-Za-z0-9T:-]+$")
 _LOCKS_GUARD = threading.Lock()
@@ -54,7 +55,16 @@ class RunStore:
 
     def __init__(self):
         self.root = Path(settings.signalyth_data_dir)
-        self.root.mkdir(parents=True, exist_ok=True)
+        try:
+            self.root.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            # Cold start on a warm instance whose /tmp is already full: clean
+            # first, then create. Without this the module fails at import and
+            # every endpoint answers 500.
+            if not is_no_space_error(exc):
+                raise
+            ensure_free_space(self.root, aggressive=True)
+            self.root.mkdir(parents=True, exist_ok=True)
         self.cloud = cloud_persistence
 
     _refresh_checked: dict[str, float] = {}
@@ -124,46 +134,16 @@ class RunStore:
             # Freshness sync is best-effort; the existing local copy stays usable.
             pass
 
-    def prune_local_scratch(self, keep_run_id: str | None = None, min_free_mb: int = 300) -> int:
-        """Free serverless scratch space by deleting old local run folders.
+    def prune_local_scratch(self, keep_run_id: str | None = None, aggressive: bool = False) -> dict:
+        """Free serverless scratch space before writing.
 
-        On Vercel the function's /tmp survives across warm invocations, so run
-        folders accumulate until every new write fails with ENOSPC ("No space
-        left on device") — which surfaced as an Internal Server Error on run
-        creation. Durable copies of every run live in the Blob mirror and are
-        re-hydrated on demand, so local run folders are disposable caches:
-        when free space is low, the oldest folders are removed until there is
-        room to work. Local (non-cloud) installs are never pruned — there the
-        filesystem IS the store.
+        Local (non-cloud) installs are never pruned — there the filesystem IS
+        the store. In cloud mode every run folder is a disposable cache of the
+        Blob mirror, so they can be reclaimed whenever the disk runs low.
         """
         if not self.cloud.enabled:
-            return 0
-        removed = 0
-        try:
-            runs_root = self.root / "runs"
-            if not runs_root.is_dir():
-                return 0
-
-            def free_mb() -> float:
-                try:
-                    return shutil.disk_usage(str(self.root)).free / 1e6
-                except Exception:
-                    return float("inf")
-
-            if free_mb() >= min_free_mb:
-                return 0
-            folders = sorted(
-                (p for p in runs_root.iterdir() if p.is_dir() and p.name != keep_run_id),
-                key=lambda p: p.stat().st_mtime,
-            )
-            for p in folders:
-                shutil.rmtree(p, ignore_errors=True)
-                removed += 1
-                if free_mb() >= min_free_mb:
-                    break
-        except Exception:
-            pass
-        return removed
+            return {"stage": "local_install_not_pruned", "removed": []}
+        return ensure_free_space(self.root, keep_run_id=keep_run_id, aggressive=aggressive)
 
     def create(self, plan: dict) -> tuple[str, Path]:
         self.cloud.require()
@@ -293,14 +273,26 @@ class RunStore:
 
     @staticmethod
     def write(path: Path, payload):
-        path.parent.mkdir(parents=True, exist_ok=True)
-        lock = _path_lock(path)
-        with lock:
+        def _attempt() -> None:
+            path.parent.mkdir(parents=True, exist_ok=True)
             with NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as tmp:
                 json.dump(payload, tmp, ensure_ascii=False, indent=2, default=str)
                 tmp.flush()
                 temp_path = Path(tmp.name)
             temp_path.replace(path)
+
+        lock = _path_lock(path)
+        with lock:
+            try:
+                _attempt()
+            except OSError as exc:
+                # Last line of defence: any write anywhere in the pipeline that
+                # hits a full scratch disk reclaims space and retries once,
+                # instead of failing the whole run.
+                if not is_no_space_error(exc):
+                    raise
+                ensure_free_space(settings.signalyth_data_dir, aggressive=True)
+                _attempt()
 
     @staticmethod
     def read(path: Path, default=None):
