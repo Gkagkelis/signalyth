@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+import json
 import re
+import traceback
+from pathlib import Path as _Path
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 
 from app.config import BASE_DIR, RUNNING_ON_VERCEL, settings
@@ -52,6 +55,55 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="SIGNALYTH", version="1.8.4", lifespan=lifespan)
 templates = Jinja2Templates(directory=str(BASE_DIR / "app" / "templates"))
+
+# ---------------------------------------------------------------------------
+# Operational diagnostics.
+#
+# On Vercel an unhandled exception used to surface as a bare-text
+# "Internal Server Error", which the UI reported as "... is not valid JSON"
+# with no way to see the actual cause without digging through platform logs.
+# This handler (a) records the full traceback of the last unhandled error in
+# a place the operator can read back (/api/debug/last-error), and (b) returns
+# the exception type and message as proper JSON so the UI alert shows the
+# real cause instead of a JSON parse failure.
+# ---------------------------------------------------------------------------
+_LAST_ERROR_PATH = _Path("/tmp/signalyth-last-error.json")
+
+
+@app.exception_handler(Exception)
+async def _unhandled_exception_to_json(request: Request, exc: Exception):
+    record = {
+        "at": datetime.now(timezone.utc).isoformat(),
+        "path": str(request.url.path),
+        "method": request.method,
+        "error": f"{type(exc).__name__}: {exc}",
+        "traceback": traceback.format_exc(),
+    }
+    try:
+        _LAST_ERROR_PATH.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+    try:
+        cloud_persistence.put_json("debug", "last-error.json", record)
+    except Exception:
+        pass
+    return JSONResponse(status_code=500, content={"detail": f"Server error: {record['error']}"})
+
+
+@app.get("/api/debug/last-error")
+def debug_last_error():
+    """The most recent unhandled server error, readable without platform logs."""
+    for reader in (
+        lambda: json.loads(_LAST_ERROR_PATH.read_text(encoding="utf-8")),
+        lambda: cloud_persistence.get_json("debug", "last-error.json"),
+    ):
+        try:
+            payload = reader()
+        except Exception:
+            payload = None
+        if payload:
+            return payload
+    return {"error": None, "message": "No unhandled server error has been recorded."}
 
 
 @app.middleware("http")
