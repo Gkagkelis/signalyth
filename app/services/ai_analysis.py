@@ -1366,3 +1366,169 @@ def apply_ai_review_decision(
         raise KeyError(record_id)
     report = _rebuild_analysis_outputs(folder, analyzed)
     return {"record": found, "report": report}
+
+
+# --------------------------------------------------------------------------
+# Second-pass adjudication of the review queue.
+#
+# Records land in the queue because the first pass was not confident enough,
+# not because they are unreadable. They do not count towards Brand Reputation
+# while they sit there, so a queue of 300 is 300 pieces of paid evidence
+# excluded from the answer.
+#
+# This runs the REASONING tier once more over the pending records — the same
+# model the pipeline already escalates to — and admits only the verdicts that
+# come back confident. Anything still uncertain stays for a human. The report
+# is rebuilt from the result, so the numbers move the moment it finishes.
+# --------------------------------------------------------------------------
+
+#: A second-pass verdict is accepted only above this confidence. Higher than
+#: the in-pipeline adjudication bar, because nothing adjudicates this one.
+AUTO_ADJUDICATION_CONFIDENCE = 0.82
+
+
+def auto_adjudicate_review_queue(
+    folder: Path,
+    provider: AIProvider | None = None,
+    max_records: int = 400,
+    confidence_floor: float = AUTO_ADJUDICATION_CONFIDENCE,
+) -> dict:
+    """Re-judge pending records with the reasoning tier; admit the confident ones."""
+    store = RunStore()
+    plan = store.read(folder / "plan.json", {}) or {}
+    analyzed = store.read(folder / "analysis" / "analyzed.json", []) or []
+    if not isinstance(analyzed, list):
+        raise RuntimeError("analysis/analyzed.json is not a valid list")
+
+    pending = [
+        r for r in analyzed
+        if str((r.get("ai_analysis") or {}).get("decision")) == "review"
+        and not (r.get("ai_analysis") or {}).get("human_override")
+    ]
+    if not pending:
+        return {
+            "pending_before": 0, "resolved": 0, "still_pending": 0,
+            "kept": 0, "excluded": 0, "cost_usd": 0.0,
+            "note": "nothing_pending",
+        }
+
+    batch_slice = pending[: max(1, int(max_records))]
+    provider = provider or OpenAIResponsesProvider()
+    context = _context_from_plan(plan)
+
+    batch_size = max(1, min(12, int(settings.signalyth_ai_batch_size)))
+    batches: list[list[dict]] = [
+        batch_slice[start:start + batch_size]
+        for start in range(0, len(batch_slice), batch_size)
+    ]
+
+    verdicts: dict[str, dict] = {}
+    cost = 0.0
+    for batch in batches:
+        payload_records = []
+        for row in batch:
+            record, _truncated = _record_for_model(row)
+            payload_records.append(record)
+        try:
+            result = provider.analyze_batch(payload_records, context, "reasoning")
+        except Exception:
+            # A failed batch leaves its records pending: never guess a verdict.
+            continue
+        cost += float(getattr(result, "cost_usd", 0.0) or 0.0)
+        for annotation in (getattr(result, "annotations", None) or []):
+            rid = str(annotation.get("record_id") or "")
+            if rid:
+                verdicts[rid] = annotation
+
+    kept = excluded = 0
+    for row in batch_slice:
+        rid = str(row.get("id"))
+        annotation = verdicts.get(rid)
+        if not annotation:
+            continue
+        confidence = _safe_confidence(annotation)
+        if confidence < float(confidence_floor):
+            continue
+        relevance = str(annotation.get("semantic_relevance") or "")
+        if relevance == "uncertain":
+            continue
+
+        ai = row.setdefault("ai_analysis", {})
+        for key in (
+            "semantic_relevance", "relevance_confidence", "sentiment_label",
+            "sentiment_score", "sentiment_confidence", "primary_emotion",
+            "emotion_confidence", "target_stance", "topic", "narrative",
+            "sarcasm", "impact_score", "overall_confidence",
+        ):
+            if annotation.get(key) is not None:
+                ai[key] = annotation.get(key)
+        if relevance == "irrelevant":
+            ai["decision"] = "excluded"
+            excluded += 1
+        else:
+            ai["decision"] = "ready"
+            kept += 1
+        # A record promoted to "ready" is read by the report builder, which
+        # indexes these fields directly. A provider answer that omits one must
+        # not be able to crash report rebuilding, so every required field is
+        # guaranteed present before the promotion stands.
+        for key, fallback in (
+            ("sentiment_label", "neutral"),
+            ("sentiment_score", 0.0),
+            ("sentiment_confidence", confidence),
+            ("primary_emotion", "neutral"),
+            ("emotion_confidence", 0.0),
+            ("target_stance", "not_applicable"),
+            ("topic", "unspecified"),
+            ("narrative", ""),
+            ("sarcasm", False),
+            ("impact_score", 0.0),
+            ("overall_confidence", confidence),
+            ("relevance_confidence", confidence),
+            ("language", "other"),
+            ("flags", []),
+        ):
+            if ai.get(key) is None:
+                ai[key] = fallback
+        # The report counts these into fixed buckets, so a value outside the
+        # closed vocabulary would raise while rebuilding. Snap to the safe
+        # member instead of trusting the provider's spelling.
+        for key, allowed, safe in (
+            ("sentiment_label", SENTIMENT, "neutral"),
+            ("primary_emotion", EMOTIONS, "neutral"),
+            ("language", LANGUAGES, "other"),
+        ):
+            if ai.get(key) not in allowed:
+                ai[key] = safe
+        ai["analysis_tier"] = "reasoning"
+        ai["decision_reasons"] = ["auto_adjudicated_second_pass"]
+        ai["auto_adjudication"] = {
+            "confidence": round(confidence, 4),
+            "floor": float(confidence_floor),
+            "adjudicated_at": _utcnow(),
+        }
+
+    resolved = kept + excluded
+    report = _rebuild_analysis_outputs(folder, analyzed) if resolved else None
+    return {
+        "pending_before": len(pending),
+        "examined": len(batch_slice),
+        "resolved": resolved,
+        "kept": kept,
+        "excluded": excluded,
+        "still_pending": len(pending) - resolved,
+        "cost_usd": round(cost, 4),
+        "confidence_floor": float(confidence_floor),
+        "report": report,
+    }
+
+
+def _safe_confidence(annotation: dict) -> float:
+    for key in ("overall_confidence", "relevance_confidence", "sentiment_confidence"):
+        try:
+            value = float(annotation.get(key))
+        except (TypeError, ValueError):
+            continue
+        if value == value:  # not NaN
+            return value
+    return 0.0
