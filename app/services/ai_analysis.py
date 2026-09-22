@@ -1192,7 +1192,14 @@ def analyze_run(
     current_hash = _trusted_input_hash(trusted)
     existing = store.read(folder / "analysis" / "report.json")
     if not force and isinstance(existing, dict) and existing.get("trusted_input_hash") == current_hash:
-        return existing
+        # The cached report is only usable if the FILES it summarises are still
+        # here. A replacement worker can restore a run whose report.json came
+        # back while analysis-ready.json did not; returning the summary then
+        # tells the pipeline "analysis done" and Step 5 finds nothing to read.
+        # Re-running is nearly free — every settled batch is in the OpenAI cache.
+        if (folder / "analysis" / "analysis-ready.json").exists() \
+                and (folder / "analysis" / "analyzed.json").exists():
+            return existing
 
     provider = provider or OpenAIResponsesProvider()
     run_id = folder.name
