@@ -22,7 +22,10 @@ class Settings(BaseSettings):
     # must therefore stop at a SOFT deadline, persist its durable state and requeue a
     # continuation instead of dying mid-phase with an eternally "running" status.
     # 0 disables the soft deadline (local/long-lived workers).
-    signalyth_worker_soft_deadline_seconds: int = 240 if RUNNING_ON_VERCEL else 0
+    # 700 leaves 100s of headroom under vercel.json's 800s hard kill, which is
+    # the Pro ceiling. At 240 a three-source run with comments needed five or
+    # six handovers and the last sources never got their turn.
+    signalyth_worker_soft_deadline_seconds: int = 700 if RUNNING_ON_VERCEL else 0
     # A run whose status is "running" but whose status.json has not been updated for
     # this long is treated as orphaned by a killed worker and may be resumed.
     signalyth_stale_running_after_seconds: int = 600
