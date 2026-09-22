@@ -459,3 +459,78 @@ class WorkerReplacedTest(WholePipelineTest):
                         "the analysis output did not survive")
         summary = self.store.read(restored / "intelligence" / "summary.json", None)
         self.assertIsInstance(summary, dict, "the report did not survive")
+
+
+class CachedReportTest(unittest.TestCase):
+    """The cached analysis report must never outlive the files it summarises.
+
+    A replacement worker restored a run whose report.json came back while
+    analysis-ready.json did not. The short circuit saw a matching hash, returned
+    "analysis already done", and Step 5 then found nothing to aggregate — which
+    is the error the operator saw three times in one afternoon.
+    """
+
+    FULL = dict(
+        semantic_relevance="relevant", relevance_score=0.9, relevance_confidence=0.9,
+        relevance_reason="r", target_entity="T", target_stance="neutral",
+        sentiment_label="neutral", sentiment_score=0.0, sentiment_confidence=0.9,
+        primary_emotion="neutral", secondary_emotion="neutral", emotion_intensity=0.3,
+        emotion_confidence=0.8, topic="T", narrative="n", sarcasm=False,
+        sarcasm_confidence=0.02, language="greek", evidence_quotes=[], overall_confidence=0.9,
+    )
+
+    class _Provider:
+        calls = 0
+
+        def analyze_batch(self, records, context, tier):
+            CachedReportTest._Provider.calls += 1
+            return ProviderBatchResult(
+                items=[{"record_id": r["record_id"], **CachedReportTest.FULL} for r in records],
+                model="m", response_id=None,
+                usage={"input_tokens": 1, "output_tokens": 1, "total_tokens": 2})
+
+    def setUp(self):
+        from uuid import uuid4
+        self.store = RunStore()
+        self.folder = self.store.root / "runs" / f"20260922T200000Z-{uuid4().hex[:8]}"
+        (self.folder / "cleaning").mkdir(parents=True, exist_ok=True)
+        (self.folder / "analysis").mkdir(parents=True, exist_ok=True)
+        self.store.write(self.folder / "plan.json",
+                         {"client": "C", "topic": "T", "market": "Greece", "core_terms": ["T"]})
+        self.store.write(self.folder / "cleaning" / "semantic-candidates.json",
+                         [{"id": "1", "text": "Το T είναι καλό", "platform": "x",
+                           "cleaning": {"confidence": 0.8}}])
+        CachedReportTest._Provider.calls = 0
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.folder, ignore_errors=True)
+
+    def test_a_healthy_second_pass_reuses_the_cached_report(self):
+        from app.services.ai_analysis import analyze_run
+        analyze_run(self.folder, provider=self._Provider())
+        self.assertTrue((self.folder / "analysis" / "analysis-ready.json").exists())
+        before = CachedReportTest._Provider.calls
+        analyze_run(self.folder, provider=self._Provider())
+        self.assertEqual(CachedReportTest._Provider.calls, before,
+                         "an unchanged run must not be re-analysed")
+
+    def test_a_report_whose_files_are_gone_is_rebuilt_not_trusted(self):
+        from app.services.ai_analysis import analyze_run
+        analyze_run(self.folder, provider=self._Provider())
+        (self.folder / "analysis" / "analysis-ready.json").unlink()
+
+        analyze_run(self.folder, provider=self._Provider())
+
+        rebuilt = self.store.read(self.folder / "analysis" / "analysis-ready.json", None)
+        self.assertIsInstance(rebuilt, list, "the missing output was not rebuilt")
+        self.assertTrue(rebuilt, "the rebuilt output is empty")
+
+    def test_the_same_holds_when_analyzed_json_is_the_one_missing(self):
+        from app.services.ai_analysis import analyze_run
+        analyze_run(self.folder, provider=self._Provider())
+        (self.folder / "analysis" / "analyzed.json").unlink()
+
+        analyze_run(self.folder, provider=self._Provider())
+
+        self.assertTrue((self.folder / "analysis" / "analyzed.json").exists())
