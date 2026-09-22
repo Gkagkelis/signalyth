@@ -903,7 +903,25 @@ def build_intelligence(folder: Path, plan: dict, force: bool = False) -> dict:
     store = RunStore()
     ready_path = folder / "analysis" / "analysis-ready.json"
     if not ready_path.exists():
-        raise RuntimeError("Step 5 requires Step 4 analysis-ready evidence.")
+        # Say which of the two very different things happened. "Requires Step 4
+        # evidence" reads as "the analysis found nothing", when the usual cause
+        # is that the analysis DID run and its files were never stored durably —
+        # the serverless instance recycled and took them with it.
+        status = store.read(folder / "status.json", {}) or {}
+        summary = ((status.get("analysis") or {}).get("summary") or {}) if isinstance(status, dict) else {}
+        analysed = str(((status.get("analysis") or {}).get("status")) or "") == "succeeded"
+        durability = status.get("durability") if isinstance(status, dict) else None
+        if analysed:
+            ready = summary.get("analysis_ready_records")
+            detail = (f"The AI analysis completed ({ready} records were ready) but its files are gone "
+                      "from this run's workspace, so nothing can be aggregated. The evidence was not "
+                      "stored durably before the worker was replaced.")
+            if isinstance(durability, dict) and durability.get("saved") is False:
+                detail += f" Saving the run failed earlier: {durability.get('error')}"
+            raise RuntimeError(detail)
+        raise RuntimeError(
+            "Step 4 produced no analysis-ready file for this run, so Step 5 has nothing to aggregate."
+        )
     records = store.read(ready_path, []) or []
     cleaning_report = store.read(folder / "cleaning" / "report.json", {}) or {}
     current_hash = _input_hash(records, cleaning_report)

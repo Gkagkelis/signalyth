@@ -453,12 +453,129 @@ class RunStore:
             shutil.rmtree(folder, ignore_errors=True)
         return {"run_id": run_id, "freed_mb": round(freed / 1e6, 2), "kept_in_cloud": True}
 
+    def storage_overview(self) -> dict:
+        """Every run the operator could delete, with what it costs on disk.
+
+        The operator needs one place that answers "what is filling the disk and
+        what can I remove", without reading logs or asking anyone.
+        """
+        rows = []
+        try:
+            listed = self.list_runs() or []
+        except Exception:
+            listed = []
+        seen = set()
+        for run in listed:
+            run_id = str(run.get("run_id") or "").strip()
+            if not run_id or run_id in seen:
+                continue
+            seen.add(run_id)
+            folder = self.root / "runs" / run_id
+            rows.append({
+                "run_id": run_id,
+                "client": run.get("client"),
+                "topic": run.get("topic"),
+                "status": run.get("status"),
+                "created_at": run.get("created_at") or run.get("updated_at"),
+                "present_locally": folder.is_dir(),
+                "local_mb": round(self._tree_bytes(folder) / 1e6, 2),
+            })
+        # Folders left on disk whose status is gone are pure waste; they must be
+        # listed too, or the numbers never add up for the person looking.
+        runs_root = self.root / "runs"
+        if runs_root.is_dir():
+            for folder in runs_root.iterdir():
+                if not folder.is_dir() or folder.name in seen:
+                    continue
+                seen.add(folder.name)
+                rows.append({
+                    "run_id": folder.name, "client": None, "topic": None,
+                    "status": "orphan", "created_at": None,
+                    "present_locally": True,
+                    "local_mb": round(self._tree_bytes(folder) / 1e6, 2),
+                })
+        rows.sort(key=lambda r: (-float(r["local_mb"]), str(r["run_id"])), reverse=False)
+        try:
+            probe = self.root if Path(self.root).is_dir() else Path("/tmp")
+            usage = shutil.disk_usage(str(probe))
+            disk = {
+                "total_mb": round(usage.total / 1e6, 1),
+                "free_mb": round(usage.free / 1e6, 1),
+                "used_mb": round((usage.total - usage.free) / 1e6, 1),
+            }
+        except Exception:
+            disk = {}
+        return {
+            "disk": disk,
+            "runs": rows,
+            "run_count": len(rows),
+            "runs_mb": round(sum(float(r["local_mb"]) for r in rows), 2),
+            "cloud_enabled": bool(self.cloud.enabled),
+        }
+
+    def delete_all_runs(self, keep: set[str] | None = None) -> dict:
+        """Remove every run, on disk and in the mirror. There is no undo."""
+        keep = {str(x) for x in (keep or set())}
+        deleted, failed = [], []
+        targets = {str(r.get("run_id") or "") for r in (self.storage_overview().get("runs") or [])}
+        for run_id in sorted(x for x in targets if x and x not in keep):
+            try:
+                self.delete_run(run_id)
+                deleted.append(run_id)
+            except Exception as exc:
+                failed.append({"run_id": run_id, "error": str(exc)})
+        return {"deleted": deleted, "deleted_count": len(deleted),
+                "failed": failed, "kept": sorted(keep)}
+
+    def _record_durability(self, run_id: str, **fields) -> None:
+        """Write down whether this run's evidence is actually saved.
+
+        Most checkpoint call sites are wrapped in ``try/except: pass`` so that a
+        transient mirror hiccup cannot kill a healthy pipeline. That silence is
+        what let a run lose every file while still reporting a successful
+        analysis. Recording the outcome here means the truth survives the
+        swallow: later steps and the operator can both see it.
+        """
+        try:
+            folder = self.root / "runs" / run_id
+            status = self.read(folder / "status.json", {}) or {}
+            if not isinstance(status, dict):
+                return
+            status["durability"] = {**fields, "at": _utcnow()}
+            self.write_status_folder(folder, status)
+        except Exception:
+            pass
+
     def checkpoint_run(self, run_id: str) -> None:
-        """Persist the complete run workspace after an expensive pipeline boundary."""
+        """Persist the complete run workspace after an expensive pipeline boundary.
+
+        Raises on failure ON PURPOSE. A checkpoint that quietly does nothing
+        leaves the run alive with no durable evidence: the instance recycles and
+        everything the operator paid for becomes unreachable, while the status
+        still says the step succeeded.
+        """
         if not self.cloud.enabled:
             return
         folder = self.folder_for(run_id)
-        self.cloud.persist_run_archive(run_id, folder)
+        try:
+            stamp = self.cloud.persist_run_archive(run_id, folder)
+        except Exception as exc:
+            self._record_durability(run_id, saved=False, error=str(exc)[:400])
+            raise
+        self._record_durability(run_id, saved=True, checkpointed_at=stamp)
+
+    def evidence_is_durable(self, run_id: str) -> tuple[bool, str]:
+        """Is this run's evidence really saved? Returns (ok, reason)."""
+        if not self.cloud.enabled:
+            return True, "local install: the filesystem is the store"
+        try:
+            status = self.read_status(run_id)
+        except Exception:
+            status = {}
+        record = status.get("durability") if isinstance(status, dict) else None
+        if isinstance(record, dict) and record.get("saved") is False:
+            return False, str(record.get("error") or "the run archive could not be stored")
+        return True, "ok"
 
     def get_run(self, run_id: str) -> dict:
         status = self.read_status(run_id)

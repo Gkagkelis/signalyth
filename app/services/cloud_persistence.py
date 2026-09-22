@@ -13,8 +13,22 @@ from typing import Any
 from app.config import settings
 
 
+from app.services.scratch import ensure_free_space, is_no_space_error
+
+
 class CloudPersistenceError(RuntimeError):
     pass
+
+
+def _tree_bytes(path: Path) -> int:
+    total = 0
+    for child in path.rglob("*"):
+        try:
+            if child.is_file():
+                total += child.stat().st_size
+        except Exception:
+            continue
+    return total
 
 
 class CloudPersistence:
@@ -213,17 +227,70 @@ class CloudPersistence:
             return []
         return sorted(found, reverse=True)[:limit]
 
+    def archive_exists(self, run_id: str) -> int | None:
+        """Size in bytes of the stored archive, or None when it is not there.
+
+        Used to VERIFY a checkpoint instead of trusting that the upload call
+        returned. A run whose archive is missing has no durable evidence, and
+        the pipeline must find that out at the checkpoint, not three steps
+        later when a fresh instance cannot read the files any more.
+        """
+        if not self.enabled:
+            return None
+        target = self._run_path(run_id, "archive.zip")
+        try:
+            with self._client() as client:
+                for item in client.iter_objects(prefix=f"{self.RUN_PREFIX}/{run_id}/", limit=1000):
+                    path = str(getattr(item, "pathname", "") or "")
+                    if path.endswith("archive.zip") and (path == target or target in path):
+                        size = getattr(item, "size", None)
+                        return int(size) if size is not None else 0
+        except Exception:
+            return None
+        return None
+
     def persist_run_archive(self, run_id: str, folder: Path) -> str | None:
+        """Store the run's whole workspace durably, or raise.
+
+        This is the ONLY thing that makes a run survive the serverless instance
+        it ran on. It builds a zip in the same scratch space the run is using,
+        so a full disk breaks it — which is why space is reclaimed first and the
+        result is verified afterwards. Callers must not swallow the failure: a
+        run that believes it is saved and is not loses everything it paid for.
+        """
         if not self.enabled or not folder.is_dir():
             return None
         stamp = datetime.now(timezone.utc).isoformat()
+        try:
+            # The archive needs room next to the run it is archiving.
+            needed_mb = max(120.0, (_tree_bytes(folder) / 1e6) * 0.6 + 60.0)
+            ensure_free_space(folder.parent.parent, min_free_mb=needed_mb, keep_run_id=run_id)
+        except Exception:
+            pass
         tmp_dir = Path(tempfile.mkdtemp(prefix="signalyth-archive-", dir="/tmp" if Path("/tmp").exists() else None))
         try:
             archive = tmp_dir / f"{run_id}.zip"
-            with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
-                for path in sorted(folder.rglob("*")):
-                    if path.is_file():
-                        zf.write(path, arcname=path.relative_to(folder).as_posix())
+            try:
+                with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+                    for path in sorted(folder.rglob("*")):
+                        if path.is_file():
+                            zf.write(path, arcname=path.relative_to(folder).as_posix())
+            except OSError as exc:
+                if is_no_space_error(exc):
+                    # Second attempt with everything else on the disk removed.
+                    try:
+                        ensure_free_space(folder.parent.parent, min_free_mb=needed_mb,
+                                          keep_run_id=run_id, aggressive=True)
+                    except Exception:
+                        pass
+                    archive.unlink(missing_ok=True)
+                    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+                        for path in sorted(folder.rglob("*")):
+                            if path.is_file():
+                                zf.write(path, arcname=path.relative_to(folder).as_posix())
+                else:
+                    raise
+            local_size = archive.stat().st_size
             with self._client() as client:
                 client.upload_file(
                     archive,
@@ -231,10 +298,16 @@ class CloudPersistence:
                     access="private",
                     content_type="application/zip",
                     overwrite=True,
-                    multipart=archive.stat().st_size >= 8 * 1024 * 1024,
+                    multipart=local_size >= 8 * 1024 * 1024,
+                )
+            stored = self.archive_exists(run_id)
+            if stored is not None and stored > 0 and local_size > 0 and stored < local_size * 0.5:
+                raise CloudPersistenceError(
+                    f"Stored run archive is truncated ({stored} of {local_size} bytes)."
                 )
             try:
-                self.put_json(run_id, "archive-meta.json", {"checkpointed_at": stamp})
+                self.put_json(run_id, "archive-meta.json",
+                              {"checkpointed_at": stamp, "bytes": local_size})
             except Exception:
                 pass
             try:
