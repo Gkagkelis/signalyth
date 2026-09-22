@@ -189,6 +189,87 @@ def build_comment_deepening_input(
     return {field: refs, "maxItems": max_items}
 
 
+#: How a page/profile reference must be written for each source's discovery Actor.
+PAGE_REF_STYLE = {
+    "facebook": "page_url",
+    "instagram": "profile_url",
+    "tiktok": "username",
+    "x": "username",
+}
+
+
+def normalise_page_ref(source: str, raw: str) -> str:
+    """Accept whatever the operator pastes and hand each Actor what it wants.
+
+    People paste a full URL, a bare @handle, or a URL with tracking junk on the
+    end. Two of the four Actors want a username and two want a URL, and getting
+    that wrong costs a paid call that returns nothing — so normalise here, once.
+    """
+    value = str(raw or "").strip()
+    if not value:
+        return ""
+    value = value.split("?")[0].split("#")[0].rstrip("/")
+    style = PAGE_REF_STYLE.get(source)
+    if style == "username":
+        tail = value.rsplit("/", 1)[-1] if "/" in value else value
+        return tail.lstrip("@").strip()
+    low = value.lower()
+    if low.startswith("http"):
+        return value
+    # "facebook.com/x" and "www.facebook.com/x" are already addresses; only a
+    # bare handle needs the host put in front of it.
+    if low.startswith(("www.", "m.")) or "." in low.split("/", 1)[0]:
+        return "https://" + value.lstrip("/")
+    host = {"facebook": "https://www.facebook.com/",
+            "instagram": "https://www.instagram.com/"}.get(source, "https://")
+    return host + value.lstrip("@/")
+
+
+def build_page_discovery_input(
+    source: str,
+    page_refs: list[str],
+    max_posts: int,
+    *,
+    date_from: str | None = None,
+    date_to: str | None = None,
+) -> dict:
+    """Ask a source for the posts of the pages the operator named.
+
+    This is the first half of "give me the comments of this page": no comment
+    Actor accepts a page, so the page must first be turned into post URLs.
+    """
+    refs = [normalise_page_ref(source, x) for x in page_refs]
+    refs = [x for x in dict.fromkeys(refs) if x]
+    if not refs:
+        raise ValueError("At least one page reference is required.")
+    limit = max(1, int(max_posts))
+
+    if source == "facebook":
+        out = {"startUrls": [{"url": u} for u in refs], "resultsLimit": limit}
+        if date_from:
+            out["onlyPostsNewerThan"] = date_from
+        if date_to:
+            out["onlyPostsOlderThan"] = date_to
+        return out
+    if source == "instagram":
+        out = {"directUrls": refs, "resultsType": "posts", "resultsLimit": limit,
+               "addParentData": True}
+        if date_from:
+            out["onlyPostsNewerThan"] = date_from
+        return out
+    if source == "tiktok":
+        out = {"profiles": refs, "resultsPerPage": limit, "profileSorting": "latest",
+               "excludePinnedPosts": True}
+        if date_from:
+            out["oldestPostDateUnified"] = date_from
+        if date_to:
+            out["newestPostDate"] = date_to
+        return out
+    if source == "x":
+        return {"twitterHandles": refs, "mode": "profile", "maxItems": limit}
+    raise ValueError(f"Page discovery is not configured for source {source}.")
+
+
 def build_comment_smoke_input(source: str, seed_refs: list[str], max_items: int) -> dict:
     """Build a capped one-time paid smoke input; live validation remains mandatory."""
     capped = max(1, min(10, int(max_items)))

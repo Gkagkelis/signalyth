@@ -653,6 +653,8 @@ def build_collection_plan(draft: AnalysisDraft) -> CollectionPlan:
                           per_source_comments={s:int((draft.per_source_comments or {}).get(s,0) or 0) for s in selected},
                           comment_target_total=sum(int((draft.per_source_comments or {}).get(s,0) or 0) for s in selected),
                           comment_seed_urls=[str(u).strip() for u in (draft.comment_seed_urls or []) if str(u or "").strip()],
+                          source_pages={s:[str(u).strip() for u in ((draft.source_pages or {}).get(s) or []) if str(u or "").strip()] for s in selected},
+                          owned_share_pct=int(draft.owned_share_pct),
                           budget_check=budget_check,rebalancing_enabled=(draft.sample_mode=="automatic"),rebalance_max_rounds=2,
                           core_terms=core,context_terms=context,greeklish_variants=aliases,exclusions=uniq([*draft.exclusions,*_role_terms(draft,"exclude")]),
                           search_strategy_version="master30-search-v1",target_semantics="requested_final_analyzable_unique_in_range",

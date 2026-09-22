@@ -603,6 +603,24 @@ def _decision(relevance: float, market: float, spam: float, bot_risk: float, bot
         reasons.append("entity_disambiguation_needed")
     return ("review", list(dict.fromkeys(reasons))) if reasons else ("trusted", [])
 
+def _sampling_origin(cleaned: list[dict]) -> dict:
+    """How much of the evidence came from the operator's pages vs open search."""
+    owned = open_web = 0
+    for row in cleaned:
+        origin = str(row.get("evidence_origin") or "")
+        if origin in {"owned", "owned_backfill"}:
+            owned += 1
+        elif origin == "open":
+            open_web += 1
+    labelled = owned + open_web
+    return {
+        "owned_pages": owned,
+        "open_search": open_web,
+        "unlabelled": len(cleaned) - labelled,
+        "owned_share_pct": round(100.0 * owned / labelled, 1) if labelled else 0.0,
+    }
+
+
 def _quality_report(cleaned: list[dict], plan: dict) -> dict:
     total = len(cleaned)
     trusted = [r for r in cleaned if r["cleaning"]["decision"] == "trusted"]
@@ -661,6 +679,10 @@ def _quality_report(cleaned: list[dict], plan: dict) -> dict:
         "review_records": len(review),
         "excluded_records": len(excluded),
         "organic_opinion_records": len(organic),
+        # Where the sample came from. A comment under the brand's own post is a
+        # different public from one found by open search, and a report that
+        # cannot state the split cannot defend itself when a client asks.
+        "sampling_origin": _sampling_origin(cleaned),
         "independent_evidence_units": round(independent_units, 4),
         "sample_target": target,
         "trusted_sample_shortfall": max(0, target - len(trusted)),

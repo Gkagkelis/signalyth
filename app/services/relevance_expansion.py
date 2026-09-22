@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import math
 from pathlib import Path
 from typing import Callable
@@ -18,7 +18,12 @@ from app.services.smart_collection import (
     refine_x_input_from_source_plan,
 )
 from app.services.storage import RunStore
-from app.services.source_capabilities import build_comment_deepening_input, comments_forecast
+from app.services.source_capabilities import (
+    build_comment_deepening_input,
+    build_page_discovery_input,
+    comments_forecast,
+    normalise_page_ref,
+)
 
 
 def _x_source_plan(plan: dict) -> dict | None:
@@ -71,6 +76,7 @@ def _append_source_items(
     *,
     mapping: dict | None = None,
     evidence_layer: str = "primary",
+    origin: str | None = None,
     seed_refs: list[str] | None = None,
     seed_context: dict[str, str] | None = None,
 ) -> dict:
@@ -88,6 +94,12 @@ def _append_source_items(
         new_norm = normalize_comment_dataset(source, data_items, seed_refs=seed_refs or [], seed_context=seed_context or {}, mapping=mapping)
         # Comments outside the requested research window are not analysis evidence.
         new_norm = [r for r in new_norm if in_range(r, date_from, date_to)]
+        if origin:
+            # Where this evidence came from decides what the report may claim:
+            # a comment under the brand's own post is not the same public as a
+            # comment found by open search, and the split must be stateable.
+            for row in new_norm:
+                row["evidence_origin"] = origin
         existing_comments = store.read(comment_norm_path, []) or []
         comment_dedup = {str(r.get("id")): r for r in [*existing_comments, *new_norm] if r.get("id")}
         store.write(comment_norm_path, list(comment_dedup.values()))
@@ -129,6 +141,42 @@ _SEED_URL_HOSTS = {
     "x": ("x.com", "twitter.com"),
     "youtube": ("youtube.com", "youtu.be"),
 }
+
+
+#: Parent posts are searched further back than the comment window, because a
+#: post from three weeks ago still collects comments inside it. Filtering the
+#: PARENTS by the comment window silently throws those comments away.
+PARENT_LOOKBACK_DAYS = 30
+
+
+def operator_page_refs(plan: dict, source: str) -> list[str]:
+    """Pages/accounts the operator named for this source, ready for its Actor."""
+    raw = (plan.get("source_pages") or {}).get(source) or []
+    out: list[str] = []
+    for value in raw:
+        ref = normalise_page_ref(source, value)
+        if ref and ref not in out:
+            out.append(ref)
+    return out
+
+
+def parent_search_from(date_from: date) -> str:
+    """Earliest date a parent post may have, for the comment layer."""
+    return (date_from - timedelta(days=PARENT_LOOKBACK_DAYS)).isoformat()
+
+
+def owned_comment_quota(target: int, share_pct: int) -> int:
+    """How many of a source's comments are reserved for the operator's pages.
+
+    The rest belongs to open search. This is a RESERVATION, not a ceiling: if
+    open search comes back with less than its half, the shortfall is taken here
+    rather than left as an empty bucket.
+    """
+    target = max(0, int(target or 0))
+    share = min(100, max(0, int(share_pct if share_pct is not None else 60)))
+    if target <= 0 or share <= 0:
+        return 0
+    return max(1, round(target * share / 100.0))
 
 
 def operator_parent_context(plan: dict) -> str:
@@ -280,6 +328,114 @@ def _comment_seed_refs(source: str, cleaned: list[dict], max_seeds: int = 40) ->
     return [], [], "no_addressable_parent_url"
 
 
+def _post_ref_from_row(source: str, row: dict) -> tuple[str, str]:
+    """(reference, text) for one post returned by a page-discovery Actor.
+
+    Each Actor names these fields differently, and the comment Actor needs the
+    reference in the shape ITS schema expects — a tweet id for X, a URL for the
+    rest.
+    """
+    if not isinstance(row, dict):
+        return "", ""
+    text = str(row.get("text") or row.get("caption") or row.get("message")
+               or row.get("title") or row.get("content") or "")[:220]
+    if source == "x":
+        ref = row.get("id") or row.get("tweetId") or row.get("tweet_id") or ""
+    else:
+        ref = (row.get("url") or row.get("postUrl") or row.get("webVideoUrl")
+               or row.get("link") or row.get("permalink") or "")
+    return str(ref or "").strip(), text
+
+
+def _probe_items(folder, plan, source, actor_id, actor_input, wanted, rate,
+                 audit, store, runner, cancel_check) -> list[dict]:
+    """Run an Actor for references only, without filing its rows as evidence.
+
+    Page discovery exists to find WHERE the conversation is. Its posts are not
+    the sample — the comments under them are — so they are never written into
+    the normalized set, only mined for parent references.
+    """
+    if cancel_check():
+        return []
+    status = store.read(folder / "status.json", {}) or {}
+    remaining = _remaining_budget(status, plan)
+    allowed = _max_affordable_items(remaining, rate, wanted)
+    if allowed <= 0:
+        audit["warnings"].append(f"{source}:page_discovery:budget_exhausted")
+        return []
+    cap = _charge_cap(remaining, rate, allowed)
+    if cap <= 0:
+        audit["warnings"].append(f"{source}:page_discovery:no_safe_charge_cap")
+        return []
+    try:
+        resilient = run_actor_resilient(
+            runner, actor_id, actor_input, max_items=allowed,
+            max_charge_usd=cap, rate_per_1000=rate, max_calls=2,
+        )
+    except Exception as exc:
+        audit["warnings"].append(f"{source}:page_discovery:orchestrator_failed:{exc}")
+        return []
+    _update_budget(folder, resilient.accounted_cost_usd)
+    audit["steps"].append({
+        "source": source, "kind": "page_discovery", "actor_id": actor_id,
+        "requested_items": allowed, "max_charge_usd": round(cap, 6),
+        "accounted_cost_usd": round(resilient.accounted_cost_usd, 6),
+        "returned_items": len(resilient.items), "resilience_status": resilient.status,
+    })
+    data_items, _ = split_diagnostic_rows(resilient.items)
+    return [r for r in data_items if isinstance(r, dict)]
+
+
+def _owned_parent_refs(source, plan, cfg, max_parents, *, date_from, date_to,
+                       run_page_actor, audit) -> tuple[list[str], list[dict]]:
+    """Parent posts the operator vouched for: their pages, plus any direct links.
+
+    The pages are turned into posts here — no comment Actor accepts a page — and
+    those posts are searched further back than the comment window, so a post
+    from three weeks ago that is still collecting comments is not lost.
+    """
+    refs: list[str] = []
+    meta: list[dict] = []
+
+    for url in operator_seed_urls(plan, source):
+        if url not in refs:
+            refs.append(url)
+            meta.append({"ref": url, "comments": 0, "url": url,
+                         "text": operator_parent_context(plan), "origin": "operator_link"})
+
+    pages = operator_page_refs(plan, source)
+    if pages and cfg.get("page_enabled", True):
+        actor_id = str(cfg.get("page_actor_id") or "")
+        if not actor_id:
+            audit["warnings"].append(f"{source}:page_discovery_actor_missing")
+            return refs[:max_parents], meta[:max_parents]
+        want_posts = max(1, min(200, int(cfg.get("page_max_posts") or 60)))
+        try:
+            inp = build_page_discovery_input(
+                source, pages, want_posts,
+                date_from=parent_search_from(date_from),
+                date_to=date_to.isoformat(),
+            )
+        except ValueError as exc:
+            audit["warnings"].append(f"{source}:page_discovery_input_unavailable:{exc}")
+            return refs[:max_parents], meta[:max_parents]
+        rows = run_page_actor(actor_id, inp, want_posts, cfg.get("page_price_per_1000_hint"))
+        audit.setdefault("page_discovery", {})[source] = {
+            "pages": pages, "posts_found": len(rows),
+        }
+        for row in rows:
+            ref, text = _post_ref_from_row(source, row)
+            if not ref or ref in refs:
+                continue
+            refs.append(ref)
+            meta.append({"ref": ref, "comments": int(row.get("commentsCount")
+                                                     or row.get("comments") or 0),
+                         "url": row.get("url"), "text": text or operator_parent_context(plan),
+                         "origin": "owned_page"})
+
+    return refs[:max_parents], meta[:max_parents]
+
+
 def _update_budget(folder: Path, charged: float) -> dict:
     store = RunStore()
     status = store.read(folder / "status.json", {}) or {}
@@ -386,6 +542,7 @@ def adaptive_expand_after_cleaning(
         mapping: dict | None = None,
         *,
         evidence_layer: str = "primary",
+        origin: str | None = None,
         seed_refs: list[str] | None = None,
         seed_context: dict[str, str] | None = None,
     ):
@@ -417,7 +574,8 @@ def adaptive_expand_after_cleaning(
             combined = [*resilient.items, *resilient.diagnostics]
             append = _append_source_items(
                 folder, source, combined, date_from, date_to, mapping=mapping,
-                evidence_layer=evidence_layer, seed_refs=seed_refs, seed_context=seed_context,
+                evidence_layer=evidence_layer, origin=origin,
+                seed_refs=seed_refs, seed_context=seed_context,
             )
             report = clean_run(folder, plan=plan, cancel_check=cancel_check)
             audit["steps"].append({
@@ -513,79 +671,110 @@ def adaptive_expand_after_cleaning(
             else:
                 max_parents = registry_parents
                 max_per_parent = registry_per_parent
-            operator_refs = operator_seed_urls(plan, source)
-            refs, seed_meta, selection_mode = _comment_seed_refs(source, cleaned, max_seeds=max_parents)
-            if operator_refs:
-                # Operator picks lead; ranked parents fill the rest of the budget.
-                ranked = [(r, m) for r, m in zip(refs, seed_meta) if r not in set(operator_refs)]
-                refs = [*operator_refs, *[r for r, _ in ranked]][:max_parents]
-                seed_meta = [
-                    *({"ref": u, "comments": 0, "url": u,
-                       "text": operator_parent_context(plan), "origin": "operator"}
-                      for u in operator_refs),
-                    *[m for _, m in ranked],
-                ][:max_parents]
-                selection_mode = "operator_urls" if selection_mode in {
-                    "no_relevant_parent_rows", "no_addressable_parent_url",
-                } else f"operator_urls+{selection_mode}"
-            if not refs:
-                audit["warnings"].append(f"{source}:{selection_mode}")
-                _comment_status_update(folder, source, status="skipped", reason=selection_mode)
-                continue
-            audit.setdefault("comment_selection", {})[source] = selection_mode
-            max_possible = len(refs) * max_per_parent
-            if source_comment_target > 0:
-                # The operator asked for a specific number of comments from this
-                # source: that number is what gets requested, capped only by how
-                # many parents actually exist.
-                wanted = min(max_possible, source_comment_target)
-            else:
-                # No explicit target (older plans): fall back to topping up the
-                # sample shortfall, with a floor so the layer is never symbolic.
-                wanted = min(max_possible, max(20, min(shortfall, max_possible)))
-            try:
-                inp = build_comment_deepening_input(
-                    source, refs, wanted,
-                    max_per_parent=max_per_parent,
-                    include_replies=bool(cfg.get("comment_include_replies", True)),
-                )
-            except ValueError as exc:
-                audit["warnings"].append(f"{source}:comment_input_unavailable:{exc}")
-                _comment_status_update(folder, source, status="skipped", reason=f"comment_input_unavailable:{exc}")
-                continue
-            audit.setdefault("comment_seeds", {})[source] = seed_meta
-            seed_context = {str(m.get("ref")): str(m.get("text") or "") for m in seed_meta if m.get("ref")}
+
             mapping = cfg.get("comment_output_mapping") or None
             rate = cfg.get("comment_price_per_1000_hint")
+            comment_path = folder / f"normalized-comments-{source}.json"
+
+            def collected_count() -> int:
+                return len(store.read(comment_path, []) or [])
+
+            def harvest(refs: list[str], seed_meta: list[dict], wanted: int, bucket: str) -> int:
+                """Buy `wanted` comments under `refs`. Returns how many arrived."""
+                if not refs or wanted <= 0:
+                    return 0
+                try:
+                    inp = build_comment_deepening_input(
+                        source, refs, wanted,
+                        max_per_parent=max_per_parent,
+                        include_replies=bool(cfg.get("comment_include_replies", True)),
+                    )
+                except ValueError as exc:
+                    audit["warnings"].append(f"{source}:{bucket}:comment_input_unavailable:{exc}")
+                    return 0
+                before = collected_count()
+                heartbeat(source)
+                _comment_status_update(
+                    folder, source, status="running", actor_id=actor_id,
+                    parents=len(refs), requested=wanted, bucket=bucket,
+                    current_message=(f"Collecting comments — {source} ({bucket}): "
+                                     f"up to {wanted} under {len(refs)} posts"),
+                )
+                ok = do_call(
+                    source, actor_id, f"comment_deepening_{bucket}", inp, wanted, rate,
+                    mapping=mapping, evidence_layer="comment", origin=bucket,
+                    seed_refs=refs,
+                    seed_context={str(m.get("ref")): str(m.get("text") or "")
+                                  for m in seed_meta if m.get("ref")},
+                )
+                if not ok:
+                    audit["warnings"].append(f"{source}:{bucket}:actor_call_failed_or_budget_exhausted")
+                return max(0, collected_count() - before)
+
+            # ---- A. The operator's own pages and links come first ----------------
+            owned_refs, owned_meta = _owned_parent_refs(
+                source, plan, cfg, max_parents,
+                date_from=date_from, date_to=date_to,
+                run_page_actor=lambda actor, inp, want, price: _probe_items(
+                    folder, plan, source, actor, inp, want, price, audit, store, runner, cancel_check,
+                ),
+                audit=audit,
+            )
+            owned_quota = owned_comment_quota(source_comment_target, plan.get("owned_share_pct"))
+            open_quota = max(0, source_comment_target - owned_quota)
+
             if deadline_check():
                 audit["warnings"].append(f"{source}:comment_deepening_deferred_worker_deadline")
                 audit["deadline_reached"] = True
                 _comment_status_update(folder, source, status="deferred", reason="worker_deadline_reached_resumes_automatically")
                 break
-            heartbeat(source)
-            _comment_status_update(
-                folder, source, status="running", actor_id=actor_id,
-                parents=len(refs), requested=wanted, collected=0, selection=selection_mode,
-                current_message=f"Collecting comments — {source}: up to {wanted} comments under {len(refs)} relevant posts",
-            )
-            ok = do_call(
-                source, actor_id, "comment_deepening", inp, wanted, rate, mapping=mapping,
-                evidence_layer="comment", seed_refs=refs, seed_context=seed_context,
-            )
-            collected_now = len(store.read(folder / f"normalized-comments-{source}.json", []) or [])
-            last_step = next(
-                (st for st in reversed(audit.get("steps") or [])
-                 if st.get("source") == source and st.get("kind") == "comment_deepening"),
-                {},
-            )
+
+            got_owned = harvest(owned_refs, owned_meta, min(owned_quota, len(owned_refs) * max_per_parent), "owned")
+
+            # ---- B. Then open conversation found by search -----------------------
+            ranked_refs, ranked_meta, selection_mode = _comment_seed_refs(source, cleaned, max_seeds=max_parents)
+            owned_set = set(owned_refs)
+            pairs = [(r, m) for r, m in zip(ranked_refs, ranked_meta) if r not in owned_set]
+            ranked_refs = [r for r, _ in pairs]
+            ranked_meta = [m for _, m in pairs]
+            if not owned_refs and not ranked_refs:
+                audit["warnings"].append(f"{source}:{selection_mode}")
+                _comment_status_update(folder, source, status="skipped", reason=selection_mode)
+                continue
+            audit.setdefault("comment_selection", {})[source] = selection_mode
+            audit.setdefault("comment_seeds", {})[source] = [*owned_meta, *ranked_meta]
+
+            if source_comment_target <= 0:
+                # Older plans with no explicit number: top up the sample shortfall.
+                open_quota = max(20, min(shortfall, len(ranked_refs) * max_per_parent))
+            got_open = harvest(ranked_refs, ranked_meta,
+                               min(open_quota, len(ranked_refs) * max_per_parent), "open")
+
+            # ---- C. Whatever open search could not deliver comes back here ------
+            # An empty bucket helps nobody: if the wider web returned little, the
+            # remainder is taken from the pages the operator trusts.
+            missing = max(0, source_comment_target - (got_owned + got_open))
+            got_backfill = 0
+            if missing > 0 and owned_refs and not deadline_check():
+                got_backfill = harvest(owned_refs, owned_meta,
+                                       min(missing, len(owned_refs) * max_per_parent), "owned_backfill")
+
+            collected_now = collected_count()
+            audit.setdefault("comment_buckets", {})[source] = {
+                "target": source_comment_target,
+                "owned_quota": owned_quota, "open_quota": open_quota,
+                "owned": got_owned, "open": got_open, "backfill": got_backfill,
+                "owned_parents": len(owned_refs), "open_parents": len(ranked_refs),
+            }
             _comment_status_update(
                 folder, source,
-                status="collected" if ok else "failed",
+                status="collected" if collected_now else "failed",
                 collected=collected_now,
-                returned_items=int(last_step.get("returned_items") or 0) or None,
-                cost_usd=float(last_step.get("accounted_cost_usd") or 0) or None,
-                reason=None if ok else "actor_call_failed_or_budget_exhausted",
-                current_message=f"Comments — {source}: {collected_now} collected",
+                owned=got_owned, open_web=got_open, backfill=got_backfill,
+                selection=selection_mode,
+                reason=None if collected_now else "no_comments_returned",
+                current_message=(f"Comments — {source}: {collected_now} "
+                                 f"({got_owned + got_backfill} own pages, {got_open} open search)"),
             )
             shortfall = int(report.get("trusted_sample_shortfall", 0) or 0)
 
