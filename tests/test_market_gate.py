@@ -69,8 +69,37 @@ def test_excluded_parents_never_become_comment_seeds():
          "metric_availability": {"comments_known": True},
          "cleaning": {"decision": "trusted", "reasons": []}},
     ]
-    refs, meta = _comment_seed_refs("instagram", cleaned, max_seeds=10)
+    refs, meta, mode = _comment_seed_refs("instagram", cleaned, max_seeds=10)
     assert refs == ["https://ig/gr"], refs
+    assert mode == "reported_comments", mode
+
+
+def test_all_zero_comment_counts_still_probe_instead_of_skipping():
+    """Discovery Actors routinely report commentsCount: 0 for every search hit.
+
+    Treating that as "no comments anywhere" silently skipped the whole comment
+    layer for every source. A reported zero is now only a ranking signal: when
+    no parent reports comments, the most engaged relevant parents are probed.
+    """
+    from app.services.relevance_expansion import _comment_seed_refs, UNRELIABLE_COUNT_PROBE_PARENTS
+    cleaned = [
+        {"platform": "facebook", "evidence_layer": "primary", "comments": 0, "likes": likes,
+         "url": f"https://fb/{i}", "text": "Stoiximan", "raw_data": {},
+         "metric_availability": {"comments_known": True},
+         "cleaning": {"decision": "trusted", "reasons": []}}
+        for i, likes in enumerate([5, 900, 40, 120, 7, 300, 60, 20], start=1)
+    ]
+    refs, meta, mode = _comment_seed_refs("facebook", cleaned, max_seeds=12)
+    assert mode == "probe_unreliable_counts", mode
+    # Bounded probe, most engaged parent first.
+    assert len(refs) == UNRELIABLE_COUNT_PROBE_PARENTS, refs
+    assert refs[0] == "https://fb/2", refs
+
+    # An excluded parent stays excluded even in the probe path.
+    for row in cleaned:
+        row["cleaning"] = {"decision": "excluded", "reasons": ["outside_target_market"]}
+    refs, _meta, mode = _comment_seed_refs("facebook", cleaned, max_seeds=12)
+    assert refs == [] and mode == "no_relevant_parent_rows", (refs, mode)
 
 
 def test_offtopic_greece_hashtag_content_is_excluded_as_subject_not_mentioned():
