@@ -1216,10 +1216,19 @@ def build_run_exports(run_id: str, force: bool = Query(default=False), media_han
 
 
 @app.get("/api/runs/{run_id}/exports")
-def get_run_exports(run_id: str):
+def get_run_exports(run_id: str, local_only: bool = Query(default=False)):
+    """Export summary/manifest of a run.
+
+    The exports screen asks this for every run it lists. With `local_only=true`
+    a run that is not on local disk answers 409 instead of pulling its entire
+    archive back from the mirror, which is what refilled the scratch disk right
+    after it was cleared.
+    """
     try:
-        folder = store.folder_for(run_id)
+        folder = store.folder_for(run_id, allow_restore=not local_only)
     except RunNotFound:
+        if local_only:
+            raise HTTPException(status_code=409, detail="not_local")
         raise HTTPException(status_code=404, detail="Run not found")
     summary = load_export_summary(folder)
     if summary is None:
