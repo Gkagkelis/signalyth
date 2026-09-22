@@ -109,6 +109,16 @@ def debug_cleanup():
     return ensure_free_space(settings.signalyth_data_dir, aggressive=True)
 
 
+@app.get("/api/debug/storage-test")
+def debug_storage_test():
+    """Does durable storage actually work? Writes, reads back, and reports.
+
+    Existed because a run finished, reported a successful analysis, and then
+    vanished — twice. "Configured" was never the same as "working".
+    """
+    return cloud_persistence.self_test()
+
+
 @app.get("/api/debug/last-error")
 def debug_last_error():
     """The most recent unhandled server error, readable without platform logs."""
