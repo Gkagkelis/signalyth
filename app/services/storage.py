@@ -70,11 +70,18 @@ class RunStore:
     _refresh_checked: dict[str, float] = {}
     _refresh_lock = threading.Lock()
 
-    def folder_for(self, run_id: str) -> Path:
+    def folder_for(self, run_id: str, allow_restore: bool = True) -> Path:
+        """Local workspace of a run, restored from the mirror when missing.
+
+        `allow_restore=False` is for read-only listing paths. Restoring pulls the
+        COMPLETE archive — exports, raw datasets, everything — so a screen that
+        touches every run would silently re-download every archive and refill the
+        scratch disk seconds after the operator cleared it.
+        """
         if not run_id or not _RUN_ID_RE.match(run_id):
             raise RunNotFound(run_id)
         folder = self.root / "runs" / run_id
-        if not folder.is_dir() and self.cloud.enabled:
+        if not folder.is_dir() and self.cloud.enabled and allow_restore:
             # Prefer the complete snapshot; a newly planned run may only have metadata.
             if not self.cloud.restore_run_archive(run_id, folder):
                 self.cloud.restore_run_metadata(run_id, folder)
