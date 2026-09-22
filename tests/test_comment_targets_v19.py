@@ -25,7 +25,7 @@ def _post(pid: str, *, comments=0, likes=0, relevance=0.8, content_class="organi
     return {
         "platform": platform,
         "evidence_layer": "primary",
-        "url": f"https://facebook.com/p/{pid}",
+        "url": f"https://facebook.com/page/posts/{pid}",
         "text": f"post {pid}",
         "comments": comments,
         "likes": likes,
@@ -135,12 +135,12 @@ class TestOperatorSeeds:
 
     def test_blank_and_duplicate_urls_are_dropped(self):
         plan = {"comment_seed_urls": [
-            "https://facebook.com/a", "  ", "https://facebook.com/a", "",
+            "https://facebook.com/a/posts/1", "  ", "https://facebook.com/a/posts/1", "",
         ]}
-        assert operator_seed_urls(plan, "facebook") == ["https://facebook.com/a"]
+        assert operator_seed_urls(plan, "facebook") == ["https://facebook.com/a/posts/1"]
 
     def test_no_urls_for_a_source_returns_nothing(self):
-        plan = {"comment_seed_urls": ["https://facebook.com/a"]}
+        plan = {"comment_seed_urls": ["https://facebook.com/a/posts/1"]}
         assert operator_seed_urls(plan, "tiktok") == []
 
 
@@ -159,7 +159,7 @@ class TestPositiveCommentsSurvive:
         return {
             "id": cid, "platform": "facebook", "evidence_layer": "comment",
             "parent_post": "p1", "parent_context": self.PARENT, "text": text,
-            "author": f"user{cid}", "url": f"https://fb.com/c/{cid}",
+            "author": f"user{cid}", "url": f"https://fb.com/page/posts/{cid}",
             "published_at": "2026-09-18T10:00:00Z", "likes": 5, "comments": 0,
             "raw_data": {}, "metric_availability": {"comments_known": True},
         }

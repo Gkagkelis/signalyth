@@ -61,16 +61,16 @@ def test_excluded_parents_never_become_comment_seeds():
     from app.services.relevance_expansion import _comment_seed_refs
     cleaned = [
         {"platform": "instagram", "evidence_layer": "primary", "comments": 50, "likes": 900,
-         "url": "https://ig/de", "text": "Gewinnzahlen Eurojackpot", "raw_data": {},
+         "url": "https://www.instagram.com/p/DE0001/", "text": "Gewinnzahlen Eurojackpot", "raw_data": {},
          "metric_availability": {"comments_known": True},
          "cleaning": {"decision": "excluded", "reasons": ["outside_target_market"]}},
         {"platform": "instagram", "evidence_layer": "primary", "comments": 3, "likes": 5,
-         "url": "https://ig/gr", "text": "Μεγάλο τζακποτ απόψε", "raw_data": {},
+         "url": "https://www.instagram.com/p/GR0001/", "text": "Μεγάλο τζακποτ απόψε", "raw_data": {},
          "metric_availability": {"comments_known": True},
          "cleaning": {"decision": "trusted", "reasons": []}},
     ]
     refs, meta, mode = _comment_seed_refs("instagram", cleaned, max_seeds=10)
-    assert refs == ["https://ig/gr"], refs
+    assert refs == ["https://www.instagram.com/p/GR0001/"], refs
     assert mode == "reported_comments", mode
 
 
@@ -84,7 +84,7 @@ def test_all_zero_comment_counts_still_probe_instead_of_skipping():
     from app.services.relevance_expansion import _comment_seed_refs, UNRELIABLE_COUNT_PROBE_PARENTS
     cleaned = [
         {"platform": "facebook", "evidence_layer": "primary", "comments": 0, "likes": likes,
-         "url": f"https://fb/{i}", "text": "Stoiximan", "raw_data": {},
+         "url": f"https://www.facebook.com/page/posts/{i}", "text": "Stoiximan", "raw_data": {},
          "metric_availability": {"comments_known": True},
          "cleaning": {"decision": "trusted", "reasons": []}}
         for i, likes in enumerate([5, 900, 40, 120, 7, 300, 60, 20], start=1)
@@ -93,7 +93,7 @@ def test_all_zero_comment_counts_still_probe_instead_of_skipping():
     assert mode == "probe_unreliable_counts", mode
     # Bounded probe, most engaged parent first.
     assert len(refs) == UNRELIABLE_COUNT_PROBE_PARENTS, refs
-    assert refs[0] == "https://fb/2", refs
+    assert refs[0] == "https://www.facebook.com/page/posts/2", refs
 
     # An excluded parent stays excluded even in the probe path.
     for row in cleaned:

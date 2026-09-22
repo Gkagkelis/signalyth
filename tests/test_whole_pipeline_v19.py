@@ -49,6 +49,23 @@ def _wait_terminal(store: RunStore, run_id: str, timeout=90.0) -> dict:
     raise AssertionError(f"run never finished: status={last.get('status')} phase={last.get('phase')}")
 
 
+def _real_post_url(source: str, author: str, i) -> str:
+    """A correctly shaped permalink for each platform.
+
+    The fakes used to return `https://facebook.example/...`, which no real URL
+    guard can accept. A suite built on impossible URLs cannot notice that the
+    code never checks them — which is how a page URL reached a comment Actor in
+    production while 717 tests stayed green.
+    """
+    if source == "facebook":
+        return f"https://www.facebook.com/{author}/posts/{i}"
+    if source == "instagram":
+        return f"https://www.instagram.com/p/POST{i}/"
+    if source == "tiktok":
+        return f"https://www.tiktok.com/@{author}/video/70000000000000000{i}"
+    return f"https://x.com/{author}/status/170000000000000000{i}"
+
+
 class FakeApify:
     """Serves the three questions the pipeline asks, like the real Actors do."""
 
@@ -63,7 +80,9 @@ class FakeApify:
             "id": f"{source}-post-{i}",
             "text": f"Eurojackpot: τζακ ποτ {100 + i} εκατ. ευρώ στην κλήρωση της Τρίτης.",
             "timestamp": "2026-09-10T12:00:00Z", "createdAt": "2026-09-10T12:00:00Z",
-            "url": f"https://{source}.example/{author}/posts/{i}",
+            "url": _real_post_url(source, author, i),
+            "postUrl": _real_post_url(source, author, i),
+            "webVideoUrl": _real_post_url(source, author, i),
             "authorUsername": author, "ownerUsername": author,
             "commentsCount": 25, "replyCount": 25, "likesCount": 40, "likeCount": 40,
             "viewCount": 900, "type": "post",
@@ -75,7 +94,7 @@ class FakeApify:
             "id": f"{source}-cmt-{i}",
             "text": COMMENT_TEXTS[i % len(COMMENT_TEXTS)],
             "timestamp": "2026-09-11T09:00:00Z", "createdAt": "2026-09-11T09:00:00Z",
-            "url": f"https://{source}.example/c/{i}",
+            "url": _real_post_url(source, "commenter", 900000 + i),
             "postUrl": parent, "profileName": f"user{i}", "authorUsername": f"user{i}",
             "likesCount": 2, "likeCount": 2,
         }
