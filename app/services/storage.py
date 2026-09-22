@@ -383,6 +383,69 @@ class RunStore:
             shutil.rmtree(folder, ignore_errors=True)
         self.cloud.delete_run(run_id)
 
+    @staticmethod
+    def _tree_bytes(path: Path) -> int:
+        total = 0
+        if not path.exists():
+            return 0
+        if path.is_file():
+            try:
+                return path.stat().st_size
+            except Exception:
+                return 0
+        for child in path.rglob("*"):
+            try:
+                if child.is_file():
+                    total += child.stat().st_size
+            except Exception:
+                continue
+        return total
+
+    def run_footprint(self, run_id: str) -> dict:
+        """Local disk used by a run, so the operator can decide what to clear."""
+        if not run_id or not _RUN_ID_RE.match(run_id):
+            raise RunNotFound(run_id)
+        folder = self.root / "runs" / run_id
+        exports = folder / "exports"
+        total = self._tree_bytes(folder)
+        exports_bytes = self._tree_bytes(exports)
+        return {
+            "run_id": run_id,
+            "present_locally": folder.is_dir(),
+            "total_mb": round(total / 1e6, 2),
+            "exports_mb": round(exports_bytes / 1e6, 2),
+            "evidence_mb": round(max(0, total - exports_bytes) / 1e6, 2),
+        }
+
+    def drop_run_exports(self, run_id: str) -> dict:
+        """Delete only the generated export files; evidence and status stay."""
+        if not run_id or not _RUN_ID_RE.match(run_id):
+            raise RunNotFound(run_id)
+        folder = self.root / "runs" / run_id
+        exports = folder / "exports"
+        freed = self._tree_bytes(exports)
+        if exports.is_dir():
+            shutil.rmtree(exports, ignore_errors=True)
+        return {"run_id": run_id, "exports_deleted": True, "freed_mb": round(freed / 1e6, 2)}
+
+    def drop_local_run_files(self, run_id: str) -> dict:
+        """Remove the local scratch copy of a run, keeping the durable mirror.
+
+        In cloud mode the mirror is the source of truth and the run is restored
+        from it on demand, so this frees disk without losing the analysis. On a
+        local install the filesystem IS the store, so nothing is removed.
+        """
+        if not run_id or not _RUN_ID_RE.match(run_id):
+            raise RunNotFound(run_id)
+        if not self.cloud.enabled:
+            return {"run_id": run_id, "freed_mb": 0.0, "kept_in_cloud": False,
+                    "note": "local install: the filesystem is the only copy"}
+        folder = self.root / "runs" / run_id
+        freed = self._tree_bytes(folder)
+        if folder.is_dir():
+            shutil.rmtree(folder, ignore_errors=True)
+        return {"run_id": run_id, "freed_mb": round(freed / 1e6, 2), "kept_in_cloud": True}
+
     def checkpoint_run(self, run_id: str) -> None:
         """Persist the complete run workspace after an expensive pipeline boundary."""
         if not self.cloud.enabled:
@@ -402,6 +465,14 @@ class RunStore:
             "date_to": plan.get("date_to"),
             "target_total": plan.get("target_total"),
             "max_budget_usd": plan.get("max_budget_usd"),
+            # The run screen shows the comment layer for the whole life of a
+            # run — including "off" and "waiting" — so the operator never has
+            # to guess whether comments are coming.
+            "comments_requested": bool(plan.get("comments_requested")),
+            "comment_sources": [
+                sp.get("source") for sp in (plan.get("sources") or [])
+                if sp.get("source") in {"x", "tiktok", "instagram", "facebook"}
+            ],
         }
 
     def list_runs(self):

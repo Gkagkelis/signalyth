@@ -101,12 +101,22 @@ def ensure_free_space(
             report["free_mb_after"] = report["free_mb_before"]
             return report
 
-        # Stage 1 — old run folders, oldest first.
+        # Stage 1 — old run folders, oldest first. A folder written to in the
+        # last 30 minutes belongs to a run that may still be executing in a
+        # sibling invocation (parallel runs, continuations): deleting it
+        # destroys live evidence mid-pipeline, so it is never touched here.
         report["stage"] = "runs"
+        active_window_s = 30 * 60
+        now_ts = time.time()
         runs_root = data_root / "runs"
         if runs_root.is_dir():
             for folder in _sorted_by_age(p for p in runs_root.iterdir() if p.is_dir()):
                 if keep_run_id and folder.name == keep_run_id:
+                    continue
+                try:
+                    if now_ts - folder.stat().st_mtime < active_window_s:
+                        continue
+                except Exception:
                     continue
                 _remove(folder)
                 report["removed"].append(f"runs/{folder.name}")
@@ -114,7 +124,9 @@ def ensure_free_space(
                     report["free_mb_after"] = round(free_mb(), 1)
                     return report
 
-        # Stage 2 — anything else inside the data directory.
+        # Stage 2 — anything else inside the data directory (never the run
+        # folders themselves: active ones are protected above, and stale ones
+        # were already handled in stage 1).
         report["stage"] = "data_dir"
         if data_root.is_dir():
             for entry in _sorted_by_age(data_root.iterdir()):

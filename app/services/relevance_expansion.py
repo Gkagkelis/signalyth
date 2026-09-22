@@ -116,37 +116,146 @@ def _append_source_items(
     }
 
 
-def _comment_seed_refs(source: str, cleaned: list[dict], max_seeds: int = 40) -> tuple[list[str], list[dict]]:
+#: Parents attempted when every discovery row reports zero comments. Search
+#: endpoints routinely return commentsCount: 0 for hits that do have comments,
+#: so a small bounded probe is worth far more than skipping the layer entirely.
+UNRELIABLE_COUNT_PROBE_PARENTS = 5
+
+#: Which platform an operator-supplied parent URL belongs to.
+_SEED_URL_HOSTS = {
+    "facebook": ("facebook.com", "fb.com", "fb.watch"),
+    "instagram": ("instagram.com",),
+    "tiktok": ("tiktok.com",),
+    "x": ("x.com", "twitter.com"),
+    "youtube": ("youtube.com", "youtu.be"),
+}
+
+
+def operator_seed_urls(plan: dict, source: str) -> list[str]:
+    """Parent posts the operator supplied for this source, in the order given.
+
+    These are deliberate choices by someone who knows the market, so they are
+    collected before anything discovery ranked.
+    """
+    hosts = _SEED_URL_HOSTS.get(source, ())
+    if not hosts:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in plan.get("comment_seed_urls") or []:
+        url = str(raw or "").strip()
+        if not url or url in seen:
+            continue
+        folded = url.casefold()
+        if any(h in folded for h in hosts):
+            seen.add(url)
+            out.append(url)
+    return out
+
+
+def parent_heat_score(row: dict) -> float:
+    """How much real conversation a parent post is likely to carry.
+
+    Ranking parents purely by engagement buys the comments of whatever is
+    loudest — which, for a brand that sponsors a league, is match coverage.
+    This blends three signals the pipeline already computes:
+
+      * conversation volume (comments, then likes as a weaker proxy)
+      * how much the post is about the SUBJECT rather than merely naming it
+        (cleaning relevance, and a penalty for announcement/promotional posts)
+      * whether it is organic audience speech rather than brand or media output
+    """
+    cleaning = row.get("cleaning") if isinstance(row.get("cleaning"), dict) else {}
+    comments = float(row.get("comments", 0) or 0)
+    likes = float(row.get("likes", 0) or 0)
+    # Diminishing returns: 500 comments is not 10x more useful than 50.
+    volume = math.log1p(comments) * 1.0 + math.log1p(likes) * 0.25
+
+    relevance = float(cleaning.get("relevance_score", 0) or 0)
+    content_class = str(cleaning.get("content_class") or "")
+    origin_class = str(cleaning.get("origin_class") or "")
+    decision = str(cleaning.get("decision") or "")
+
+    score = volume + relevance * 4.0
+    if decision == "trusted":
+        score += 1.5
+    if cleaning.get("organic_eligible"):
+        score += 1.0
+    # Score bulletins and promos carry the brand name but no opinion about it.
+    if content_class in {"announcement", "promotional", "news", "owned", "repost"}:
+        score -= 3.0
+    if origin_class in {"earned_media", "owned_media"}:
+        score -= 1.0
+    return score
+
+
+def _seed_ref(source: str, row: dict) -> str:
+    raw = row.get("raw_data") if isinstance(row.get("raw_data"), dict) else {}
+    if source == "x":
+        ref = raw.get("id") or raw.get("tweetId") or raw.get("tweet_id")
+    else:
+        ref = row.get("url") or raw.get("url") or raw.get("postUrl") or raw.get("webVideoUrl") or raw.get("link")
+    return str(ref or "").strip()
+
+
+def _collect_seeds(source: str, rows: list[dict], max_seeds: int, skip_reported_zero: bool) -> tuple[list[str], list[dict]]:
+    refs: list[str] = []
+    meta: list[dict] = []
+    seen: set[str] = set()
+    for row in rows:
+        comments_n = int(row.get("comments", 0) or 0)
+        availability = row.get("metric_availability") if isinstance(row.get("metric_availability"), dict) else {}
+        comments_known = bool(availability.get("comments_known"))
+        if skip_reported_zero and comments_known and comments_n <= 0:
+            continue
+        ref = _seed_ref(source, row)
+        if not ref or ref in seen:
+            continue
+        seen.add(ref)
+        refs.append(ref)
+        meta.append({
+            "ref": ref, "comments": comments_n, "url": row.get("url"),
+            "text": str(row.get("text") or "")[:220],
+            "heat": round(parent_heat_score(row), 3),
+            "origin": "ranked",
+        })
+        if len(refs) >= max_seeds:
+            break
+    return refs, meta
+
+
+def _comment_seed_refs(source: str, cleaned: list[dict], max_seeds: int = 40) -> tuple[list[str], list[dict], str]:
+    """Pick the relevant parent posts whose comments are worth buying.
+
+    Returns (refs, meta, selection_mode). Preference order:
+
+    1. Parents the discovery Actor reports as having comments (or whose count
+       it does not report at all).
+    2. If that yields nothing because every row reports exactly zero — the
+       common case for search endpoints, which frequently omit real engagement
+       counts — a small bounded probe of the most engaged parents, so the
+       comment layer is attempted instead of silently skipped.
+    """
     rows = [r for r in cleaned
             if str(r.get("platform") or "") == source
             and str(r.get("evidence_layer") or "primary") == "primary"
             # Location chain: never deepen a parent the cleaning excluded — an
             # outside-market or spam post must not buy its comments either.
             and str(((r.get("cleaning") or {}).get("decision")) or "") != "excluded"]
-    rows.sort(key=lambda r: (int(r.get("comments", 0) or 0), int(r.get("likes", 0) or 0)), reverse=True)
-    refs, meta, seen = [], [], set()
-    for row in rows:
-        comments_n = int(row.get("comments", 0) or 0)
-        availability = row.get("metric_availability") if isinstance(row.get("metric_availability"), dict) else {}
-        comments_known = bool(availability.get("comments_known"))
-        # Do not pay for a parent the discovery Actor explicitly says has zero comments.
-        # If the count is unavailable, a bounded attempt is still allowed.
-        if comments_known and comments_n <= 0:
-            continue
-        raw = row.get("raw_data") if isinstance(row.get("raw_data"), dict) else {}
-        if source == "x":
-            ref = raw.get("id") or raw.get("tweetId") or raw.get("tweet_id")
-        else:
-            ref = row.get("url") or raw.get("url") or raw.get("postUrl") or raw.get("webVideoUrl") or raw.get("link")
-        ref = str(ref or "").strip()
-        if not ref or ref in seen:
-            continue
-        seen.add(ref)
-        refs.append(ref)
-        meta.append({"ref": ref, "comments": int(row.get("comments", 0) or 0), "url": row.get("url"), "text": str(row.get("text") or "")})
-        if len(refs) >= max_seeds:
-            break
-    return refs, meta
+    rows.sort(key=parent_heat_score, reverse=True)
+    if not rows:
+        return [], [], "no_relevant_parent_rows"
+
+    refs, meta = _collect_seeds(source, rows, max_seeds, skip_reported_zero=True)
+    if refs:
+        return refs, meta, "reported_comments"
+
+    refs, meta = _collect_seeds(
+        source, rows, min(max_seeds, UNRELIABLE_COUNT_PROBE_PARENTS), skip_reported_zero=False,
+    )
+    if refs:
+        return refs, meta, "probe_unreliable_counts"
+    return [], [], "no_addressable_parent_url"
 
 
 def _update_budget(folder: Path, charged: float) -> dict:
@@ -364,17 +473,52 @@ def adaptive_expand_after_cleaning(
                 audit["warnings"].append(f"{source}:comment_deepening_missing_actor")
                 _comment_status_update(folder, source, status="skipped", reason="no_comment_actor_configured")
                 continue
-            max_parents = max(1, min(40, int(cfg.get("comment_max_parents") or 12)))
-            max_per_parent = max(1, min(1000, int(cfg.get("comment_max_per_parent") or 40)))
-            refs, seed_meta = _comment_seed_refs(source, cleaned, max_seeds=max_parents)
+            # The operator's per-source comment target governs the layer. The
+            # registry values are a safety ceiling for a single Actor call, not
+            # the size of the evidence: a run asking for 300 comments from a
+            # source must be allowed to buy 300, spread over as many parents as
+            # that needs.
+            source_comment_target = int((plan.get("per_source_comments") or {}).get(source, 0) or 0)
+            registry_per_parent = max(1, min(1000, int(cfg.get("comment_max_per_parent") or 40)))
+            registry_parents = max(1, min(100, int(cfg.get("comment_max_parents") or 12)))
+            if source_comment_target > 0:
+                max_per_parent = registry_per_parent
+                # Enough parents to actually reach the requested number.
+                max_parents = max(
+                    registry_parents,
+                    min(100, math.ceil(source_comment_target / max(1, max_per_parent))),
+                )
+            else:
+                max_parents = registry_parents
+                max_per_parent = registry_per_parent
+            operator_refs = operator_seed_urls(plan, source)
+            refs, seed_meta, selection_mode = _comment_seed_refs(source, cleaned, max_seeds=max_parents)
+            if operator_refs:
+                # Operator picks lead; ranked parents fill the rest of the budget.
+                ranked = [(r, m) for r, m in zip(refs, seed_meta) if r not in set(operator_refs)]
+                refs = [*operator_refs, *[r for r, _ in ranked]][:max_parents]
+                seed_meta = [
+                    *({"ref": u, "comments": 0, "url": u, "text": "", "origin": "operator"} for u in operator_refs),
+                    *[m for _, m in ranked],
+                ][:max_parents]
+                selection_mode = "operator_urls" if selection_mode in {
+                    "no_relevant_parent_rows", "no_addressable_parent_url",
+                } else f"operator_urls+{selection_mode}"
             if not refs:
-                audit["warnings"].append(f"{source}:no_relevant_parent_with_comments")
-                _comment_status_update(folder, source, status="skipped", reason="no_relevant_parent_with_comments")
+                audit["warnings"].append(f"{source}:{selection_mode}")
+                _comment_status_update(folder, source, status="skipped", reason=selection_mode)
                 continue
+            audit.setdefault("comment_selection", {})[source] = selection_mode
             max_possible = len(refs) * max_per_parent
-            # Second layer should add depth without allowing one viral thread to dominate.
-            baseline = max(20, int(math.ceil(int(sp.get("target_items", 0) or 0) * 0.35)))
-            wanted = min(max_possible, max(baseline, min(shortfall, max_possible)))
+            if source_comment_target > 0:
+                # The operator asked for a specific number of comments from this
+                # source: that number is what gets requested, capped only by how
+                # many parents actually exist.
+                wanted = min(max_possible, source_comment_target)
+            else:
+                # No explicit target (older plans): fall back to topping up the
+                # sample shortfall, with a floor so the layer is never symbolic.
+                wanted = min(max_possible, max(20, min(shortfall, max_possible)))
             try:
                 inp = build_comment_deepening_input(
                     source, refs, wanted,
@@ -397,7 +541,7 @@ def adaptive_expand_after_cleaning(
             heartbeat(source)
             _comment_status_update(
                 folder, source, status="running", actor_id=actor_id,
-                parents=len(refs), requested=wanted, collected=0,
+                parents=len(refs), requested=wanted, collected=0, selection=selection_mode,
                 current_message=f"Collecting comments — {source}: up to {wanted} comments under {len(refs)} relevant posts",
             )
             ok = do_call(
