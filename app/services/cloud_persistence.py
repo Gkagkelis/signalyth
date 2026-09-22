@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from uuid import uuid4
 import os
 import shutil
 import tempfile
@@ -112,9 +113,91 @@ class CloudPersistence:
                 last_exc = exc
                 if attempt < 2:
                     time.sleep(0.4 * (attempt + 1))
-        # All retries failed: degrade to local-only for this write. The next
-        # write_status/checkpoint re-mirrors the complete state.
-        _ = last_exc
+        # All retries failed. The write is dropped so the request does not die —
+        # but the failure is REMEMBERED. Silently losing every mirror write is
+        # how a whole run can finish, report success and then evaporate.
+        self._note_failure("put_json", f"{run_id}/{name}", last_exc)
+
+    #: Last durable-write failure seen in this process, for the self-test endpoint.
+    _last_failure: dict | None = None
+
+    @classmethod
+    def _note_failure(cls, operation: str, target: str, exc: Exception | None) -> None:
+        cls._last_failure = {
+            "operation": operation,
+            "target": target,
+            "error_type": type(exc).__name__ if exc else "unknown",
+            "error": str(exc)[:500] if exc else "",
+            "at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    def self_test(self) -> dict:
+        """Prove, right now, whether durable storage actually works.
+
+        `enabled` only says a connection is CONFIGURED. This writes a real
+        object, reads it back, confirms the contents and deletes it, and returns
+        the true exception when any of that fails — so nobody has to guess again
+        why a finished run disappeared.
+        """
+        out: dict = {
+            "configured": bool(self.enabled),
+            "requested": bool(self.requested),
+            "has_static_token": bool(os.getenv("BLOB_READ_WRITE_TOKEN")),
+            "has_oidc_store": bool(os.getenv("VERCEL") and os.getenv("BLOB_STORE_ID")),
+            "last_known_failure": self._last_failure,
+            "write": None, "read": None, "list": None, "delete": None,
+            "works": False,
+        }
+        if not self.enabled:
+            out["verdict"] = ("Durable storage is NOT configured: nothing this app "
+                              "produces will survive the server being replaced.")
+            return out
+
+        probe_id = "selftest"
+        name = f"selftest-{uuid4().hex[:10]}.json"
+        payload = {"stamp": datetime.now(timezone.utc).isoformat(), "probe": name}
+        body = (json.dumps(payload) + "\n").encode("utf-8")
+        path = self._run_path(probe_id, name)
+
+        try:
+            with self._client() as client:
+                client.put(path, body, access="private",
+                           content_type="application/json; charset=utf-8", overwrite=True)
+            out["write"] = "ok"
+        except Exception as exc:
+            self._note_failure("self_test_write", path, exc)
+            out["write"] = f"FAILED: {type(exc).__name__}: {exc}"[:500]
+            out["verdict"] = ("Durable storage is configured but WRITES FAIL. "
+                              "Runs cannot survive; fix the Blob connection.")
+            return out
+
+        try:
+            got = self.get_json(probe_id, name)
+            out["read"] = "ok" if (isinstance(got, dict) and got.get("probe") == name) else f"MISMATCH: {got}"
+        except Exception as exc:
+            out["read"] = f"FAILED: {type(exc).__name__}: {exc}"[:500]
+
+        try:
+            with self._client() as client:
+                found = any(name in str(getattr(i, "pathname", "") or "")
+                            for i in client.iter_objects(prefix=f"{self.RUN_PREFIX}/{probe_id}/", limit=100))
+            out["list"] = "ok" if found else "NOT LISTED"
+        except Exception as exc:
+            out["list"] = f"FAILED: {type(exc).__name__}: {exc}"[:500]
+
+        try:
+            with self._client() as client:
+                client.delete(path)
+            out["delete"] = "ok"
+        except Exception as exc:
+            out["delete"] = f"FAILED: {type(exc).__name__}: {exc}"[:500]
+
+        out["works"] = out["write"] == "ok" and out["read"] == "ok"
+        out["verdict"] = ("Durable storage works: a finished run will survive the "
+                          "server being replaced."
+                          if out["works"] else
+                          "Durable storage is NOT reliable — see the failing step above.")
+        return out
 
     def get_json(self, run_id: str, name: str) -> Any | None:
         if not self.enabled:
