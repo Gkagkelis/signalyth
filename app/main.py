@@ -646,9 +646,15 @@ def start_run(run_id: str):
 
 
 @app.delete("/api/runs/{run_id}")
-def delete_run(run_id: str):
-    """Permanently delete one run. Active runs must be cancelled first, unless the
-    worker is provably dead (no status write for the stale window)."""
+def delete_run(run_id: str, scope: str = Query(default="everywhere", pattern="^(local|everywhere)$")):
+    """Delete one run.
+
+    scope=local      → remove only the local scratch copy (frees disk, the
+                       analysis survives in the mirror and is restored on demand)
+    scope=everywhere → permanent removal, local and mirror
+
+    Active runs must be cancelled first, unless the worker is provably dead
+    (no status write for the stale window)."""
     try:
         status = store.read_status(run_id)
     except RunNotFound:
@@ -669,8 +675,31 @@ def delete_run(run_id: str):
                 age = None
         if age is None or age < stale_after:
             raise HTTPException(status_code=409, detail="This run is still active. Cancel it first, then delete it.")
+    if scope == "local":
+        # Free scratch space without losing the analysis: the durable copy in
+        # the mirror stays, and the run is re-hydrated on demand.
+        freed = store.drop_local_run_files(run_id)
+        return {"run_id": run_id, "deleted": False, "scope": "local", **freed}
     store.delete_run(run_id)
-    return {"run_id": run_id, "deleted": True}
+    return {"run_id": run_id, "deleted": True, "scope": "everywhere"}
+
+
+@app.get("/api/runs/{run_id}/footprint")
+def run_footprint(run_id: str):
+    """How much scratch space this run occupies, split by exports."""
+    try:
+        return store.run_footprint(run_id)
+    except RunNotFound:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+
+@app.delete("/api/runs/{run_id}/exports")
+def delete_run_exports(run_id: str):
+    """Delete only the generated export files of one run, keeping its evidence."""
+    try:
+        return store.drop_run_exports(run_id)
+    except RunNotFound:
+        raise HTTPException(status_code=404, detail="Run not found")
 
 
 @app.post("/api/runs/{run_id}/cancel")

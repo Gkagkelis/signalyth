@@ -20,6 +20,13 @@ class AnalysisDraft(BaseModel):
     sample_target: int = Field(default=1000, ge=1, le=100000)
     per_source: dict[str, int] = Field(default_factory=dict)
     comments: bool = False
+    # Comments are requested evidence with their own per-source target, exactly
+    # like posts. Before this, the comment layer silently received 35% of the
+    # post target, which made the real conversation a rounding error.
+    per_source_comments: dict[str, int] = Field(default_factory=dict)
+    # Operator-supplied parent posts whose comments must be collected first,
+    # ahead of anything discovery ranked.
+    comment_seed_urls: list[str] = Field(default_factory=list, max_length=100)
     max_budget_usd: float = Field(default=5.0, gt=0, le=10000)
     smart_search: bool = True
     report_language: Literal["English", "Ελληνικά"] = "English"
@@ -58,7 +65,12 @@ class AnalysisDraft(BaseModel):
             active = {s: int(self.per_source.get(s, 0) or 0) for s in self.sources}
             if any(v < 0 for v in active.values()):
                 raise ValueError("per-source targets cannot be negative")
-            if sum(active.values()) <= 0:
+            comment_active = {s: int(self.per_source_comments.get(s, 0) or 0) for s in self.sources}
+            if any(v < 0 for v in comment_active.values()):
+                raise ValueError("per-source comment targets cannot be negative")
+            # A run may legitimately be comment-only: the posts it needs are just
+            # the parents it must find in order to reach them.
+            if sum(active.values()) + sum(comment_active.values()) <= 0:
                 raise ValueError("per-source sample total must be greater than zero")
         return self
 
@@ -102,6 +114,12 @@ class CollectionPlan(BaseModel):
     estimated_cost_usd: float | None
     max_budget_usd: float
     comments_requested: bool = False
+    #: Per-source comment target the operator set, in comments. This is the
+    #: authoritative figure for the comment layer — no derived percentage.
+    per_source_comments: dict[str, int] = Field(default_factory=dict)
+    comment_target_total: int = 0
+    #: Parent posts the operator supplied; collected before ranked parents.
+    comment_seed_urls: list[str] = Field(default_factory=list, max_length=100)
     deepening_strategy: str = "important_content_only"
     budget_check: Literal["within_budget", "estimate_over_budget", "unknown"]
     rebalancing_enabled: bool = True
