@@ -646,6 +646,32 @@ def start_run(run_id: str):
         raise HTTPException(status_code=409, detail=str(exc))
 
 
+@app.get("/api/storage")
+def storage_overview():
+    """What is on the working disk, and what the operator can delete."""
+    return store.storage_overview()
+
+
+@app.delete("/api/runs")
+def delete_all_runs(confirm: str = Query(default="", description="must be 'DELETE-ALL'")):
+    """Delete every run, on disk and in the mirror.
+
+    Deliberately guarded by an explicit confirmation string: this is the one
+    action in SIGNALYTH that destroys finished analyses, and a stray request
+    must never be able to trigger it.
+    """
+    if confirm != "DELETE-ALL":
+        raise HTTPException(status_code=400, detail="Confirmation required: pass confirm=DELETE-ALL.")
+    active = []
+    for run in (store.list_runs() or []):
+        if str(run.get("status") or "") in {"queued", "running", "cancelling"}:
+            active.append(str(run.get("run_id") or ""))
+    result = store.delete_all_runs(keep=set(active))
+    result["skipped_active"] = sorted(x for x in active if x)
+    result["disk"] = (store.storage_overview() or {}).get("disk", {})
+    return result
+
+
 @app.delete("/api/runs/{run_id}")
 def delete_run(run_id: str, scope: str = Query(default="everywhere", pattern="^(local|everywhere)$")):
     """Delete one run.
