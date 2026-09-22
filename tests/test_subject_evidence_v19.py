@@ -88,7 +88,7 @@ class TestSeedMetaWiring:
 
         from app.services import relevance_expansion
 
-        src = inspect.getsource(relevance_expansion.adaptive_expand_after_cleaning)
+        src = inspect.getsource(relevance_expansion._owned_parent_refs)
         assert "operator_parent_context(plan)" in src, "operator seeds must carry the subject"
         assert '"text": ""' not in src, "an operator seed must never ship empty parent text"
 
