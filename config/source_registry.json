@@ -32,7 +32,13 @@
     "comment_max_parents": 12,
     "comment_include_replies": true,
     "comment_rollout_version": "comments-production-ready-v1",
-    "comment_last_live_success_at": null
+    "comment_last_live_success_at": null,
+    "page_actor_id": "xquik/x-tweet-scraper",
+    "page_input_field": "twitterHandles",
+    "page_price_per_1000_hint": 0.15,
+    "page_kind": "username",
+    "page_enabled": true,
+    "page_max_posts": 60
   },
   "tiktok": {
     "label": "TikTok",
@@ -67,7 +73,13 @@
     "comment_max_parents": 12,
     "comment_include_replies": true,
     "comment_rollout_version": "comments-production-ready-v1",
-    "comment_last_live_success_at": null
+    "comment_last_live_success_at": null,
+    "page_actor_id": "clockworks/tiktok-scraper",
+    "page_input_field": "profiles",
+    "page_price_per_1000_hint": 1.7,
+    "page_kind": "username",
+    "page_enabled": true,
+    "page_max_posts": 60
   },
   "instagram": {
     "label": "Instagram",
@@ -102,7 +114,13 @@
     "comment_max_parents": 12,
     "comment_include_replies": true,
     "comment_rollout_version": "comments-production-ready-v1",
-    "comment_last_live_success_at": null
+    "comment_last_live_success_at": null,
+    "page_actor_id": "apify/instagram-scraper",
+    "page_input_field": "directUrls",
+    "page_price_per_1000_hint": 2.7,
+    "page_kind": "profile_url",
+    "page_enabled": true,
+    "page_max_posts": 60
   },
   "facebook": {
     "label": "Facebook",
@@ -137,7 +155,13 @@
     "comment_max_parents": 12,
     "comment_include_replies": true,
     "comment_rollout_version": "comments-production-ready-v1",
-    "comment_last_live_success_at": null
+    "comment_last_live_success_at": null,
+    "page_actor_id": "apify/facebook-posts-scraper",
+    "page_input_field": "startUrls",
+    "page_price_per_1000_hint": 2.0,
+    "page_kind": "page_url",
+    "page_enabled": true,
+    "page_max_posts": 60
   },
   "youtube": {
     "label": "YouTube",
