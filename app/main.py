@@ -27,7 +27,8 @@ from app.services import trends as trends_service
 from app.services import comparison as comparison_service
 from app.services.run_manager import RunManager, RunStateError
 from app.services.cleaning import clean_run, apply_review_decision, load_cleaning_summary, load_review_queue
-from app.services.ai_analysis import analyze_run, apply_ai_review_decision, load_analysis_summary, load_analysis_review_queue
+from app.services.ai_analysis import analyze_run, apply_ai_review_decision, load_analysis_summary, load_analysis_review_queue, auto_adjudicate_review_queue
+from app.services.review_triage import triage_review_queue
 from app.services.intelligence import build_intelligence, load_intelligence_summary
 from app.services.investigations import build_investigations, load_investigation_summary, load_evidence_pack
 from app.services.visualizations import build_visualizations, load_visualization_summary, load_dashboard, load_chart_specs, load_presentation_visual_pack
@@ -878,6 +879,60 @@ def get_analysis(run_id: str):
     if report is None:
         raise HTTPException(status_code=404, detail="AI Analysis results are not available for this run")
     return report
+
+
+@app.get("/api/runs/{run_id}/review-triage")
+def review_triage(run_id: str, priority_size: int = Query(default=20, ge=1, le=200)):
+    """What is still pending, and how much of it can actually move the score."""
+    try:
+        folder = store.folder_for(run_id)
+    except RunNotFound:
+        raise HTTPException(status_code=404, detail="Run not found")
+    analyzed = store.read(folder / "analysis" / "analyzed.json", []) or []
+    if not isinstance(analyzed, list):
+        return {"total_pending": 0, "material_count": 0, "volume_count": 0, "priority": []}
+    pending = [r for r in analyzed if str((r.get("ai_analysis") or {}).get("decision")) == "review"]
+    ready = [r for r in analyzed if str((r.get("ai_analysis") or {}).get("decision")) == "ready"]
+    result = triage_review_queue(pending, ready, priority_size=priority_size)
+    # Trim each proposed record to what the review card shows.
+    result["priority"] = [
+        {
+            "id": item["record"].get("id"),
+            "platform": item["record"].get("platform"),
+            "author": item["record"].get("author"),
+            "text": str(item["record"].get("text") or "")[:400],
+            "url": item["record"].get("url"),
+            "movement": item["movement"],
+            "ai": {
+                k: (item["record"].get("ai_analysis") or {}).get(k)
+                for k in ("sentiment_label", "primary_emotion", "semantic_relevance",
+                          "overall_confidence", "decision_reasons")
+            },
+        }
+        for item in result.get("priority", [])
+    ]
+    return result
+
+
+@app.post("/api/runs/{run_id}/review-triage/auto")
+def review_triage_auto(run_id: str):
+    """Second-pass AI adjudication of the pending queue (paid model request)."""
+    if not settings.signalyth_ai_enabled or not settings.openai_api_key:
+        raise HTTPException(status_code=409, detail="AI analysis is not configured.")
+    try:
+        folder = store.folder_for(run_id)
+    except RunNotFound:
+        raise HTTPException(status_code=404, detail="Run not found")
+    try:
+        outcome = auto_adjudicate_review_queue(folder)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Auto adjudication failed safely: {exc}")
+    if outcome.get("resolved"):
+        status = store.read_status(run_id)
+        status["exports"] = {**(status.get("exports") or {}), "stale": True}
+        store.write_status(run_id, status)
+    outcome.pop("report", None)
+    return outcome
 
 
 @app.get("/api/runs/{run_id}/analysis/review")
