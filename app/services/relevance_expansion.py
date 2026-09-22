@@ -621,6 +621,24 @@ def adaptive_expand_after_cleaning(
     if comments_requested:
         cleaned = store.read(folder / "cleaning" / "cleaned.json", []) or []
         selected = [sp for sp in (plan.get("sources") or []) if sp.get("source")]
+
+        def _never_attempted(sp: dict) -> int:
+            """Sources nobody has reached yet go first on a continuation.
+
+            The loop stops at the worker's time limit. Keeping the original
+            order meant the source that ran out of time was retried first every
+            time, and the ones behind it were never reached at all — in a real
+            run two of three sources collected nothing for exactly this reason.
+            """
+            source = str(sp.get("source") or "")
+            already = store.read(folder / f"normalized-comments-{source}.json", []) or []
+            if already:
+                return 2          # finished: cheap to skip, keep last
+            attempted = ((store.read(folder / "status.json", {}) or {})
+                         .get("comment_deepening") or {}).get(source)
+            return 1 if attempted else 0
+
+        selected.sort(key=_never_attempted)
         forecast_rows = {r.get("source"): r for r in ((plan.get("preflight_forecast") or {}).get("sources") or [])}
         for sp in selected:
             if cancel_check():

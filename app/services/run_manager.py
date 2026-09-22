@@ -328,6 +328,8 @@ class RunManager:
             prior_status = self.store.read_status(run_id)
             resumable = prior_status.get("status") not in self.store.TERMINAL_STATUSES
             if cleaning_done and resumable:
+                if not self._evidence_guard(run_id):
+                    return
                 terminal = prior_status.get("collection_status") or "succeeded"
                 if settings.signalyth_ai_enabled and settings.openai_api_key:
                     self._run_ai_analysis(run_id, folder, plan, terminal)
@@ -734,11 +736,39 @@ class RunManager:
         except Exception as exc:
             self._rollback_reprocess(run_id, "failed", str(exc))
 
+    def _evidence_guard(self, run_id: str) -> bool:
+        """Stop the run rather than let it quietly shrink. True = safe to go on.
+
+        A replacement worker that cannot restore the archive gets plan + status
+        and nothing else. Continuing there produces a report built on whatever
+        happened to survive, with no sign that anything is missing — which is
+        far worse than stopping.
+        """
+        ok, reason = self.store.evidence_intact(run_id)
+        if ok:
+            return True
+        status = self.store.read_status(run_id)
+        status.update({
+            "status": "failed",
+            "phase": "evidence_unavailable",
+            "completed_at": _utcnow(),
+            "fatal_error": f"Stopped to avoid a report built on missing evidence: {reason}.",
+            "current": {"source": None, "code": "evidence_unavailable",
+                        "message": ("Τα συλλεγμένα στοιχεία δεν είναι διαθέσιμα σε αυτόν τον "
+                                    "server. Το run σταμάτησε αντί να βγάλει αναφορά από "
+                                    "λιγότερα δεδομένα.")},
+        })
+        status.setdefault("progress", {})["percent"] = 100
+        self.store.write_status(run_id, status)
+        return False
+
     def _run_cleaning(self, run_id: str, folder: Path, plan: dict):
         if not self._lease_ok(run_id):
             return  # a newer invocation owns this run
         if self.store.cancel_requested_folder(folder):
             self._mark_cancelled_after_collection(run_id)
+            return
+        if not self._evidence_guard(run_id):
             return
         status = self.store.read_status(run_id)
         status.update({

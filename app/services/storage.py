@@ -85,6 +85,16 @@ class RunStore:
             # Prefer the complete snapshot; a newly planned run may only have metadata.
             if not self.cloud.restore_run_archive(run_id, folder):
                 self.cloud.restore_run_metadata(run_id, folder)
+                # Metadata is plan + status: NO evidence. For a run that has
+                # already collected, continuing from here means analysing an
+                # empty workspace and publishing a report built on nothing.
+                # Leave a mark so the pipeline can refuse instead.
+                try:
+                    if folder.is_dir():
+                        (folder / ".signalyth-metadata-only").write_text(
+                            _utcnow(), encoding="utf-8")
+                except Exception:
+                    pass
         elif folder.is_dir() and self.cloud.enabled:
             # A warm serverless instance may hold a mid-run copy restored earlier.
             # When the durable archive has since moved forward, replace the local
@@ -93,6 +103,39 @@ class RunStore:
         if not folder.is_dir():
             raise RunNotFound(run_id)
         return folder
+
+    def evidence_intact(self, run_id: str) -> tuple[bool, str]:
+        """Does the workspace still hold the evidence the run says it collected?
+
+        A serverless worker can be replaced at any moment. When the replacement
+        cannot restore the run archive it falls back to plan + status only — and
+        the pipeline used to carry on, analyse the handful of rows that happened
+        to be there and call it a finished report. 135 collected records became
+        4 analysed ones, with nothing anywhere saying so.
+
+        Returns (ok, reason). A failing check must stop the run, not shrink it.
+        """
+        try:
+            # Go through the normal restore path: this is exactly what the
+            # replacement worker would get, including the metadata-only fallback.
+            folder = self.folder_for(run_id)
+        except Exception:
+            return False, "the run workspace could not be restored on this machine"
+        try:
+            status = self.read(folder / "status.json", {}) or {}
+        except Exception:
+            status = {}
+        claimed = int(status.get("normalized_total") or 0)
+        if claimed <= 0:
+            return True, "nothing collected yet"
+        present = len(self.read(folder / "normalized-all.json", []) or [])
+        if (folder / ".signalyth-metadata-only").exists() and present <= 0:
+            return False, (f"the run collected {claimed} records but only its settings could be "
+                           "restored here — the evidence itself is not reachable")
+        if present < claimed:
+            return False, (f"the run collected {claimed} records but only {present} are in this "
+                           "workspace; the rest did not survive the worker being replaced")
+        return True, "ok"
 
     def _refresh_if_outdated(self, run_id: str, folder: Path) -> None:
         import time as _time
