@@ -27,6 +27,15 @@ class AnalysisDraft(BaseModel):
     # Operator-supplied parent posts whose comments must be collected first,
     # ahead of anything discovery ranked.
     comment_seed_urls: list[str] = Field(default_factory=list, max_length=100)
+    # Pages/accounts the operator names per source. The conversation about a
+    # brand very often lives under the brand's OWN posts, and no comment Actor
+    # accepts a page — so the page is turned into its posts first, and those
+    # posts feed the comment layer.
+    source_pages: dict[str, list[str]] = Field(default_factory=dict)
+    #: Share of each source's comment target reserved for those pages. The rest
+    #: goes to open search; whatever open search cannot fill comes back here, so
+    #: the layer is never left half empty.
+    owned_share_pct: int = Field(default=60, ge=0, le=100)
     max_budget_usd: float = Field(default=5.0, gt=0, le=10000)
     smart_search: bool = True
     report_language: Literal["English", "Ελληνικά"] = "English"
@@ -120,6 +129,9 @@ class CollectionPlan(BaseModel):
     comment_target_total: int = 0
     #: Parent posts the operator supplied; collected before ranked parents.
     comment_seed_urls: list[str] = Field(default_factory=list, max_length=100)
+    #: Operator-named pages per source, and how much of the comment target they own.
+    source_pages: dict[str, list[str]] = Field(default_factory=dict)
+    owned_share_pct: int = Field(default=60, ge=0, le=100)
     deepening_strategy: str = "important_content_only"
     budget_check: Literal["within_budget", "estimate_over_budget", "unknown"]
     rebalancing_enabled: bool = True
