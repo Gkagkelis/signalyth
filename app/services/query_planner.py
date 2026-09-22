@@ -191,7 +191,11 @@ def build_terms(draft: AnalysisDraft):
 
     topic_glish = greeklish(topic)
     topic_aliases = uniq([*aliases, *([topic_glish] if topic_glish else [])])
-    return [topic], context, topic_aliases
+    # An alias is another NAME for the same subject ("ευρωτζάκποτ" is
+    # Eurojackpot), which is what the field promises. Left out of core_terms it
+    # scored as mere context: a post using only the alias failed the subject
+    # gate and was demoted to review instead of counting.
+    return uniq([topic, *topic_aliases]), context, topic_aliases
 
 def base_queries(core: list[str], context: list[str], glish: list[str]) -> list[str]:
     if not core: return []

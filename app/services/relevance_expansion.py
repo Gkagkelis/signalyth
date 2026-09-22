@@ -131,6 +131,28 @@ _SEED_URL_HOSTS = {
 }
 
 
+def operator_parent_context(plan: dict) -> str:
+    """Parent text to attach to comments harvested under an operator-pasted URL.
+
+    A ranked seed carries the post's own text, and that is what lets the cleaner
+    keep a reply like "πάλι τίποτα" — the subject is in the parent, so
+    `contextual_parent_match` fires. An operator URL has no post text (we never
+    scraped that post), so without this every such comment fails the subject gate
+    and is thrown away as `subject_not_mentioned` — silently deleting exactly the
+    threads the operator hand-picked.
+
+    Pasting the URL IS the assertion that the post is about the subject, so the
+    subject is recorded as the parent context. It buys the same treatment a
+    ranked seed gets — review, not trusted — never more.
+    """
+    terms = [str(x).strip() for x in (plan.get("core_terms") or []) if str(x).strip()]
+    for key in ("topic", "client"):
+        value = str(plan.get(key) or "").strip()
+        if value and value not in terms:
+            terms.append(value)
+    return " · ".join(dict.fromkeys(terms))
+
+
 def operator_seed_urls(plan: dict, source: str) -> list[str]:
     """Parent posts the operator supplied for this source, in the order given.
 
@@ -498,7 +520,9 @@ def adaptive_expand_after_cleaning(
                 ranked = [(r, m) for r, m in zip(refs, seed_meta) if r not in set(operator_refs)]
                 refs = [*operator_refs, *[r for r, _ in ranked]][:max_parents]
                 seed_meta = [
-                    *({"ref": u, "comments": 0, "url": u, "text": "", "origin": "operator"} for u in operator_refs),
+                    *({"ref": u, "comments": 0, "url": u,
+                       "text": operator_parent_context(plan), "origin": "operator"}
+                      for u in operator_refs),
                     *[m for _, m in ranked],
                 ][:max_parents]
                 selection_mode = "operator_urls" if selection_mode in {

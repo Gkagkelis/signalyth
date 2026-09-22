@@ -263,6 +263,38 @@ def _normalise_ws(value: str) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
 
 
+def _parent_text(row: dict) -> str:
+    """The TEXT of the post a comment sits under — never its link.
+
+    A comment record carries two different parent fields (see
+    comment_deepening.py): `parent_post` is the post's URL, `parent_context` is
+    the post's text. The model was handed `parent_post`, so where it expected
+    the post it received "https://www.facebook.com/…/posts/123".
+
+    That is why comments drowned the review queue. Under a Eurojackpot post
+    somebody writes "πάλι τίποτα" — an opinion about the draw, obvious to any
+    human reading the thread. The model could not read the thread: it saw a URL,
+    could not tell what the comment was about, answered `uncertain`, and the
+    record was parked instead of counted.
+    """
+    context = row.get("parent_context")
+    if isinstance(context, dict):
+        context = context.get("text") or context.get("caption") or context.get("content")
+    text = _normalise_ws(str(context or ""))
+    if text:
+        return text
+    parent = row.get("parent_post")
+    if isinstance(parent, dict):
+        return _normalise_ws(
+            parent.get("text") or parent.get("caption") or parent.get("content") or ""
+        )
+    raw = _normalise_ws(str(parent or ""))
+    # A bare link carries no meaning for the model; sending it only burns input.
+    if raw.lower().startswith(("http://", "https://", "www.")):
+        return ""
+    return raw
+
+
 def _content_fingerprint(row: dict, context: dict, model: str, tier: str) -> str:
     cleaning = row.get("cleaning") or {}
     material = {
@@ -279,6 +311,7 @@ def _content_fingerprint(row: dict, context: dict, model: str, tier: str) -> str
             "id": row.get("id"),
             "text": row.get("text"),
             "parent_post": row.get("parent_post"),
+            "parent_context": _parent_text(row),
             "platform": row.get("platform"),
             "author": row.get("author"),
             "cleaning_relevance": cleaning.get("relevance_score"),
@@ -296,6 +329,7 @@ def _trusted_input_hash(rows: list[dict]) -> str:
             "id": str(r.get("id")),
             "text": r.get("text"),
             "parent_post": r.get("parent_post"),
+            "parent_context": _parent_text(r),
             "cleaning": {
                 "decision": (r.get("cleaning") or {}).get("decision"),
                 "relevance_score": (r.get("cleaning") or {}).get("relevance_score"),
@@ -325,12 +359,7 @@ def _context_from_plan(plan: dict) -> dict:
 
 def _record_for_model(row: dict) -> tuple[dict, bool]:
     text = _normalise_ws(row.get("text") or "")
-    parent = row.get("parent_post")
-    parent_text = ""
-    if isinstance(parent, dict):
-        parent_text = _normalise_ws(parent.get("text") or parent.get("caption") or parent.get("content") or "")
-    elif parent:
-        parent_text = _normalise_ws(str(parent))
+    parent_text = _parent_text(row)
 
     max_chars = max(800, int(settings.signalyth_ai_max_text_chars))
     combined_len = len(text) + len(parent_text)
@@ -415,8 +444,7 @@ def _postprocess_annotation(row: dict, raw_annotation: dict, tier: str, model: s
     annotation = AnnotationModel.model_validate(raw_annotation).model_dump()
     flags = _annotation_conflict_flags(annotation)
     text = str(row.get("text") or "")
-    parent = row.get("parent_post")
-    parent_text = json.dumps(parent, ensure_ascii=False) if isinstance(parent, dict) else str(parent or "")
+    parent_text = _parent_text(row)
     grounded = []
     for quote in annotation.get("evidence_quotes", []):
         quote = _normalise_ws(quote)[:180]
