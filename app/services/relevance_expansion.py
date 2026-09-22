@@ -20,6 +20,7 @@ from app.services.smart_collection import (
 from app.services.storage import RunStore
 from app.services.source_capabilities import (
     build_comment_deepening_input,
+    is_comment_parent_ref,
     build_page_discovery_input,
     comments_forecast,
     normalise_page_ref,
@@ -250,7 +251,10 @@ def operator_seed_urls(plan: dict, source: str) -> list[str]:
         if not url or url in seen:
             continue
         folded = url.casefold()
-        if any(h in folded for h in hosts):
+        if any(h in folded for h in hosts) and is_comment_parent_ref(source, url):
+            # Someone pasting their page here means "look at my page", which is
+            # what the page field is for. Sending it to a comment Actor buys
+            # nothing.
             seen.add(url)
             out.append(url)
     return out
@@ -297,8 +301,64 @@ def _seed_ref(source: str, row: dict) -> str:
     if source == "x":
         ref = raw.get("id") or raw.get("tweetId") or raw.get("tweet_id")
     else:
-        ref = row.get("url") or raw.get("url") or raw.get("postUrl") or raw.get("webVideoUrl") or raw.get("link")
+        for candidate in (raw.get("postUrl"), raw.get("permalink"), raw.get("webVideoUrl"),
+                          raw.get("link"), row.get("url"), raw.get("url")):
+            value = str(candidate or "").strip()
+            if value and is_comment_parent_ref(source, value):
+                return value
+        return ""
     return str(ref or "").strip()
+
+
+def _comment_parent_candidate_allowed(source: str, row: dict) -> bool:
+    """Hard gate for conversation parents, separate from final evidence status.
+
+    A discovery post can be a useful doorway to audience discussion even when
+    the post itself is not final analyzable evidence. We therefore do NOT reject
+    it merely because cleaning.decision == "excluded".
+
+    We still reject conditions that should never trigger another paid scrape:
+    explicit exclusions, duplicate parents, high spam/manipulation risk, and
+    clearly outside-market content. `subject_not_mentioned` is deliberately not
+    a hard block here: discovery itself can provide weak topic context when an
+    Actor's post text/metadata is incomplete, while parent_heat_score still
+    pushes stronger topical candidates to the top.
+    """
+    if str(row.get("platform") or "") != source:
+        return False
+    if str(row.get("evidence_layer") or "primary") != "primary":
+        return False
+    if not _seed_ref(source, row):
+        return False
+
+    cleaning = row.get("cleaning") if isinstance(row.get("cleaning"), dict) else {}
+    flags = {str(x) for x in (cleaning.get("flags") or [])}
+    reasons = {str(x) for x in (cleaning.get("reasons") or [])}
+
+    if flags & {
+        "exact_duplicate",
+        "near_duplicate_same_author",
+        "syndicated_duplicate_content",
+        "explicit_exclusion_context",
+        "likely_automated",
+    }:
+        return False
+    if reasons & {
+        "duplicate_not_independent_evidence",
+        "explicit_exclusion_context",
+        "high_spam_risk",
+        "high_automation_or_manipulation_risk",
+        "outside_target_market",
+    }:
+        return False
+    try:
+        if float(cleaning.get("spam_score", 0) or 0) >= 0.82:
+            return False
+    except Exception:
+        pass
+    if str(cleaning.get("authenticity_status") or "") == "likely_automated":
+        return False
+    return True
 
 
 def _collect_seeds(source: str, rows: list[dict], max_seeds: int, skip_reported_zero: bool) -> tuple[list[str], list[dict]]:
@@ -339,12 +399,13 @@ def _comment_seed_refs(source: str, cleaned: list[dict], max_seeds: int = 40) ->
        counts — a small bounded probe of the most engaged parents, so the
        comment layer is attempted instead of silently skipped.
     """
-    rows = [r for r in cleaned
-            if str(r.get("platform") or "") == source
-            and str(r.get("evidence_layer") or "primary") == "primary"
-            # Location chain: never deepen a parent the cleaning excluded — an
-            # outside-market or spam post must not buy its comments either.
-            and str(((r.get("cleaning") or {}).get("decision")) or "") != "excluded"]
+    # A post can be a doorway to the audience without being usable evidence
+    # itself: a page's own announcement often says nothing about the brand in
+    # its text, yet the argument is all in its comments. Blanket-excluding every
+    # row cleaning rejected therefore threw away the best parents. What stays
+    # blocked is what should never buy a second scrape — duplicates, spam,
+    # manipulation, explicit exclusions and clearly outside-market rows.
+    rows = [r for r in cleaned if _comment_parent_candidate_allowed(source, r)]
     rows.sort(key=parent_heat_score, reverse=True)
     if not rows:
         return [], [], "no_relevant_parent_rows"
@@ -374,10 +435,19 @@ def _post_ref_from_row(source: str, row: dict) -> tuple[str, str]:
                or row.get("title") or row.get("content") or "")[:220]
     if source == "x":
         ref = row.get("id") or row.get("tweetId") or row.get("tweet_id") or ""
-    else:
-        ref = (row.get("url") or row.get("postUrl") or row.get("webVideoUrl")
-               or row.get("link") or row.get("permalink") or "")
-    return str(ref or "").strip(), text
+        return str(ref or "").strip(), text
+
+    # A page-discovery Actor may put the PAGE in `url` and the post permalink in
+    # another field. Taking `url` first is how a page reference reached a comment
+    # Actor. Every candidate is tried and the first real post wins.
+    candidates = [row.get("postUrl"), row.get("permalink"), row.get("permalink_url"),
+                  row.get("webVideoUrl"), row.get("link"), row.get("url"),
+                  row.get("postLink"), row.get("videoUrl")]
+    for candidate in candidates:
+        value = str(candidate or "").strip()
+        if value and is_comment_parent_ref(source, value):
+            return value, text
+    return "", text
 
 
 def _probe_items(folder, plan, source, actor_id, actor_input, wanted, rate,

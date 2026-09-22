@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 import math
 import re
+from urllib.parse import parse_qs, urlparse
 
 # Public-schema capability knowledge. This is NOT a live verification record.
 # Companion Actors remain OFF until explicitly paid-smoke-tested and committed.
@@ -152,6 +153,112 @@ def _x_id(value: str) -> str:
     return match.group(1) if match else text
 
 
+
+# ---------------------------------------------------------------------------
+# The last line before a paid comment Actor is called.
+#
+# A page or profile URL is a DISCOVERY input: it answers "which posts exist".
+# A comment Actor answers "which comments sit under THIS post", and handing it
+# a page instead of a post is not an error it reports — it churns and returns
+# nothing, which reads from the outside like a slow or broken provider.
+# That is exactly what happened in production: the Facebook comment Actor was
+# called with facebook.com/<page> and came back empty.
+# ---------------------------------------------------------------------------
+
+def _normalised_url(value: str):
+    """Parse a social URL without accepting a bare profile/handle as a post."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if not re.match(r"^[a-z][a-z0-9+.-]*://", text, flags=re.I):
+        text = "https://" + text.lstrip("/")
+    try:
+        return urlparse(text)
+    except Exception:
+        return None
+
+
+def is_comment_parent_ref(source: str, value: str) -> bool:
+    """Return True only for a concrete post/video/tweet reference.
+
+    Page/profile URLs are discovery inputs, never comment inputs. This function
+    is the last-line guard before paid comment/reply Actors are called.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return False
+
+    source = str(source or "").casefold()
+    if source == "x":
+        if text.isdigit():
+            return True
+        parsed = _normalised_url(text)
+        if not parsed:
+            return False
+        host = parsed.netloc.casefold().split(":", 1)[0]
+        if host.startswith("www."):
+            host = host[4:]
+        if host not in {"x.com", "twitter.com", "mobile.twitter.com"}:
+            return False
+        return re.search(r"/status/\d+(?:/|$)", parsed.path, flags=re.I) is not None
+
+    parsed = _normalised_url(text)
+    if not parsed:
+        return False
+    host = parsed.netloc.casefold().split(":", 1)[0]
+    path = parsed.path or "/"
+    low_path = path.casefold()
+    query = parse_qs(parsed.query or "")
+
+    if source == "facebook":
+        clean_host = host
+        for prefix in ("www.", "m.", "web."):
+            if clean_host.startswith(prefix):
+                clean_host = clean_host[len(prefix):]
+        if clean_host == "fb.watch":
+            return low_path not in {"", "/"}
+        if clean_host not in {"facebook.com", "fb.com"}:
+            return False
+        if re.search(r"/(?:posts|videos|reel|reels|photos)/[^/]+", low_path):
+            return True
+        if re.search(r"/share/(?:p|v|r)/[^/]+", low_path):
+            return True
+        if low_path.rstrip("/") in {"/permalink.php", "/story.php", "/photo.php", "/watch"}:
+            return bool(query)
+        if {"story_fbid", "fbid", "v"} & set(query):
+            return True
+        return False
+
+    if source == "instagram":
+        clean_host = host[4:] if host.startswith("www.") else host
+        if clean_host != "instagram.com":
+            return False
+        return re.search(r"/(?:p|reel|reels|tv)/[^/]+", low_path) is not None
+
+    if source == "tiktok":
+        clean_host = host[4:] if host.startswith("www.") else host
+        if clean_host in {"vm.tiktok.com", "vt.tiktok.com"}:
+            return low_path not in {"", "/"}
+        if clean_host != "tiktok.com":
+            return False
+        return (
+            re.search(r"/@[^/]+/(?:video|photo)/\d+", low_path) is not None
+            or re.search(r"/t/[^/]+", low_path) is not None
+        )
+
+    # Not enabled by this patch; retained for the existing future-facing helper.
+    if source == "youtube":
+        clean_host = host[4:] if host.startswith("www.") else host
+        if clean_host == "youtu.be":
+            return low_path not in {"", "/"}
+        if clean_host not in {"youtube.com", "m.youtube.com"}:
+            return False
+        if low_path.startswith(("/shorts/", "/live/")):
+            return len(low_path.strip("/").split("/")) >= 2
+        return low_path == "/watch" and bool(query.get("v"))
+
+    return False
+
 def build_comment_deepening_input(
     source: str,
     seed_refs: list[str],
@@ -168,6 +275,15 @@ def build_comment_deepening_input(
     refs = list(dict.fromkeys(refs))[:40]
     if not refs:
         raise ValueError("At least one seed reference is required.")
+    # Anything that is not a concrete post/video/tweet is dropped here rather
+    # than paid for. Refusing outright when nothing survives is deliberate: a
+    # call with only a page reference can never return comments.
+    refs = [r for r in refs if is_comment_parent_ref(source, r)]
+    if not refs:
+        raise ValueError(
+            f"No concrete {source} post reference to collect comments under; "
+            "page or profile references are discovery inputs, not comment inputs."
+        )
     max_items = max(1, int(max_items))
     per_parent = max(1, int(max_per_parent or math.ceil(max_items / max(1, len(refs)))))
 
