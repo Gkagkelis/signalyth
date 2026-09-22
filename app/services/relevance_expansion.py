@@ -149,6 +149,39 @@ _SEED_URL_HOSTS = {
 PARENT_LOOKBACK_DAYS = 30
 
 
+#: A source's comments are harvested in three passes. All three have to have
+#: run before the source can be called finished.
+COMMENT_BUCKETS = ("owned", "open", "backfill")
+
+#: Sources with a comment Actor. Nothing waits on the others.
+COMMENT_CAPABLE_SOURCES = {"x", "tiktok", "instagram", "facebook"}
+
+#: States that mean the source is still owed work.
+_UNFINISHED_COMMENT_STATES = {"running", "queued", "pending", "deferred", "retrying"}
+
+
+def comment_source_is_complete(row: dict | None) -> bool:
+    """Has this source's comment layer really finished?
+
+    A non-empty ``normalized-comments-{source}.json`` used to answer this, and
+    that is the same mistake as reading a cleaning file as a finished cleaning:
+    the file appears after the FIRST of three passes. A worker cut off after the
+    operator's own pages left a file behind, and the next worker wrote the
+    source down as collected and never ran open search or the backfill.
+
+    Completion is therefore recorded per pass, by the worker that finished it.
+    """
+    if not isinstance(row, dict) or not row:
+        return False
+    status = str(row.get("status") or "")
+    if status == "skipped":
+        # No Actor, no seeds, not operational: there is nothing further to do.
+        return True
+    if status in _UNFINISHED_COMMENT_STATES:
+        return False
+    return set(COMMENT_BUCKETS) <= {str(b) for b in (row.get("buckets_done") or [])}
+
+
 def operator_page_refs(plan: dict, source: str) -> list[str]:
     """Pages/accounts the operator named for this source, ready for its Actor."""
     raw = (plan.get("source_pages") or {}).get(source) or []
@@ -348,7 +381,8 @@ def _post_ref_from_row(source: str, row: dict) -> tuple[str, str]:
 
 
 def _probe_items(folder, plan, source, actor_id, actor_input, wanted, rate,
-                 audit, store, runner, cancel_check) -> list[dict]:
+                 audit, store, runner, cancel_check,
+                 deadline_check=None, time_left=None, heartbeat=None) -> list[dict]:
     """Run an Actor for references only, without filing its rows as evidence.
 
     Page discovery exists to find WHERE the conversation is. Its posts are not
@@ -371,23 +405,37 @@ def _probe_items(folder, plan, source, actor_id, actor_input, wanted, rate,
         resilient = run_actor_resilient(
             runner, actor_id, actor_input, max_items=allowed,
             max_charge_usd=cap, rate_per_1000=rate, max_calls=2,
+            deadline_check=deadline_check, time_left=time_left, heartbeat=heartbeat,
         )
     except Exception as exc:
         audit["warnings"].append(f"{source}:page_discovery:orchestrator_failed:{exc}")
         return []
     _update_budget(folder, resilient.accounted_cost_usd)
+    data_items, _ = split_diagnostic_rows(resilient.items)
+    deadline_hit = "worker_deadline_reached" in (resilient.failure_kinds or [])
+    if deadline_hit:
+        audit["deadline_reached"] = True
+        audit["warnings"].append(f"{source}:page_discovery_deferred_worker_deadline")
+
+    page_outcome = (
+        "deadline_with_rows" if deadline_hit and data_items
+        else "deadline" if deadline_hit
+        else "complete" if (data_items or resilient.status in {"succeeded", "empty"})
+        else "failed"
+    )
+    audit.setdefault("page_discovery_outcome", {})[source] = page_outcome
     audit["steps"].append({
         "source": source, "kind": "page_discovery", "actor_id": actor_id,
         "requested_items": allowed, "max_charge_usd": round(cap, 6),
         "accounted_cost_usd": round(resilient.accounted_cost_usd, 6),
         "returned_items": len(resilient.items), "resilience_status": resilient.status,
+        "page_discovery_outcome": page_outcome,
     })
-    data_items, _ = split_diagnostic_rows(resilient.items)
     return [r for r in data_items if isinstance(r, dict)]
 
 
 def _owned_parent_refs(source, plan, cfg, max_parents, *, date_from, date_to,
-                       run_page_actor, audit) -> tuple[list[str], list[dict]]:
+                       run_page_actor, audit, cache_path=None) -> tuple[list[str], list[dict]]:
     """Parent posts the operator vouched for: their pages, plus any direct links.
 
     The pages are turned into posts here — no comment Actor accepts a page — and
@@ -410,6 +458,23 @@ def _owned_parent_refs(source, plan, cfg, max_parents, *, date_from, date_to,
             audit["warnings"].append(f"{source}:page_discovery_actor_missing")
             return refs[:max_parents], meta[:max_parents]
         want_posts = max(1, min(200, int(cfg.get("page_max_posts") or 60)))
+
+        # Turning a page into its posts is a PAID call, and its answer does not
+        # change between two invocations of the same run. A worker replaced
+        # mid-comment-layer used to buy the same posts all over again.
+        cached = RunStore().read(cache_path, None) if cache_path else None
+        if (isinstance(cached, dict) and cached.get("pages") == pages
+                and cached.get("complete") is True and "parents" in cached):
+            for row in cached["parents"]:
+                ref = str(row.get("ref") or "")
+                if ref and ref not in refs:
+                    refs.append(ref)
+                    meta.append(row)
+            audit.setdefault("page_discovery", {})[source] = {
+                "pages": pages, "posts_found": len(cached["parents"]), "reused": True,
+            }
+            return refs[:max_parents], meta[:max_parents]
+
         try:
             inp = build_page_discovery_input(
                 source, pages, want_posts,
@@ -420,18 +485,35 @@ def _owned_parent_refs(source, plan, cfg, max_parents, *, date_from, date_to,
             audit["warnings"].append(f"{source}:page_discovery_input_unavailable:{exc}")
             return refs[:max_parents], meta[:max_parents]
         rows = run_page_actor(actor_id, inp, want_posts, cfg.get("page_price_per_1000_hint"))
+        page_outcome = str((audit.get("page_discovery_outcome") or {}).get(source) or "failed")
         audit.setdefault("page_discovery", {})[source] = {
-            "pages": pages, "posts_found": len(rows),
+            "pages": pages, "posts_found": len(rows), "outcome": page_outcome,
         }
+        discovered: list[dict] = []
         for row in rows:
             ref, text = _post_ref_from_row(source, row)
             if not ref or ref in refs:
                 continue
+            found = {"ref": ref, "comments": int(row.get("commentsCount")
+                                                 or row.get("comments") or 0),
+                     "url": row.get("url"), "text": text or operator_parent_context(plan),
+                     "origin": "owned_page"}
             refs.append(ref)
-            meta.append({"ref": ref, "comments": int(row.get("commentsCount")
-                                                     or row.get("comments") or 0),
-                         "url": row.get("url"), "text": text or operator_parent_context(plan),
-                         "origin": "owned_page"})
+            meta.append(found)
+            discovered.append(found)
+        # Successful zero-yield is also a result and must not be re-paid on
+        # every continuation. If the clock stopped after useful rows arrived,
+        # accept that bounded parent set and let the next worker harvest comments.
+        cache_complete = page_outcome == "complete" or (
+            page_outcome == "deadline_with_rows" and bool(discovered)
+        )
+        if cache_path and cache_complete:
+            RunStore().write(cache_path, {
+                "pages": pages,
+                "parents": discovered,
+                "complete": True,
+                "outcome": page_outcome,
+            })
 
     return refs[:max_parents], meta[:max_parents]
 
@@ -484,6 +566,7 @@ def adaptive_expand_after_cleaning(
     cancel_check: Callable[[], bool] | None = None,
     runner=None,
     deadline_check: Callable[[], bool] | None = None,
+    time_left: Callable[[], float] | None = None,
     heartbeat: Callable[[str], None] | None = None,
 ) -> dict:
     """Bounded adaptive discovery plus configured comment/reply deepening.
@@ -496,6 +579,7 @@ def adaptive_expand_after_cleaning(
     # minutes. Without a deadline it overruns the serverless wall; without a
     # heartbeat the run looks dead and gets resumed in parallel.
     deadline_check = deadline_check or (lambda: False)
+    time_left = time_left or (lambda: float("inf"))
     heartbeat = heartbeat or (lambda _msg: None)
     cancel_check = cancel_check or (lambda: False)
     store = RunStore()
@@ -532,6 +616,12 @@ def adaptive_expand_after_cleaning(
     audit["status"] = "attempted"
     registry = load_registry()
 
+    #: Set when the last Actor acquisition stopped because the worker ran out of
+    #: time rather than because it finished. Without this, a call that returned
+    #: some rows before stopping looked like an ordinary partial success, and
+    #: the caller wrote the source down as collected.
+    last_call_hit_deadline = False
+
     def do_call(
         source: str,
         actor_id: str,
@@ -546,7 +636,8 @@ def adaptive_expand_after_cleaning(
         seed_refs: list[str] | None = None,
         seed_context: dict[str, str] | None = None,
     ):
-        nonlocal report
+        nonlocal report, last_call_hit_deadline
+        last_call_hit_deadline = False
         if cancel_check():
             audit["warnings"].append(f"{source}:{kind}:cancelled_before_call")
             return False
@@ -568,9 +659,13 @@ def adaptive_expand_after_cleaning(
             resilient = run_actor_resilient(
                 runner, actor_id, actor_input, max_items=allowed,
                 max_charge_usd=cap, rate_per_1000=rate, max_calls=4,
+                deadline_check=deadline_check, time_left=time_left,
+                # Pulse on every attempt, keeping the source name the UI shows.
+                heartbeat=lambda _note, _s=source: heartbeat(_s),
             )
             charged = resilient.accounted_cost_usd
             _update_budget(folder, charged)
+            last_call_hit_deadline = "worker_deadline_reached" in (resilient.failure_kinds or [])
             combined = [*resilient.items, *resilient.diagnostics]
             append = _append_source_items(
                 folder, source, combined, date_from, date_to, mapping=mapping,
@@ -659,13 +754,27 @@ def adaptive_expand_after_cleaning(
                 audit["warnings"].append(f"{source}:comment_deepening_not_operational")
                 _comment_status_update(folder, source, status="skipped", reason="comment_deepening_not_operational")
                 continue
-            # Durable idempotence: a resumed run must not pay for the same layer twice.
+            # Durable idempotence, per PASS rather than per source. A file on
+            # disk only proves the first pass ran; skipping on that alone is how
+            # a resumed run silently dropped open search and the backfill.
+            prior_row = (((store.read(folder / "status.json", {}) or {})
+                          .get("comment_deepening") or {}).get(source) or {})
+            done_buckets = {str(b) for b in (prior_row.get("buckets_done") or [])}
             existing_comments = store.read(folder / f"normalized-comments-{source}.json", []) or []
-            if existing_comments:
+            if comment_source_is_complete(prior_row):
                 audit["warnings"].append(f"{source}:comment_deepening_already_collected")
-                _comment_status_update(folder, source, status="collected", collected=len(existing_comments),
+                _comment_status_update(folder, source, status="collected",
+                                       collected=len(existing_comments),
                                        reason="already_collected_in_previous_invocation")
                 continue
+            if done_buckets:
+                audit["warnings"].append(
+                    f"{source}:comment_deepening_resuming_after:{','.join(sorted(done_buckets))}")
+
+            def bucket_finished(bucket: str) -> None:
+                """Record a pass as done, durably, the moment it completes."""
+                done_buckets.add("backfill" if bucket == "owned_backfill" else bucket)
+                _comment_status_update(folder, source, buckets_done=sorted(done_buckets))
             actor_id = str(cfg.get("comment_actor_id") or comment_info.get("candidate_actor_id") or "")
             if not actor_id:
                 audit["warnings"].append(f"{source}:comment_deepening_missing_actor")
@@ -727,6 +836,10 @@ def adaptive_expand_after_cleaning(
                 )
                 if not ok:
                     audit["warnings"].append(f"{source}:{bucket}:actor_call_failed_or_budget_exhausted")
+                if not last_call_hit_deadline:
+                    # The pass ran to its end — success, empty or failure alike.
+                    # Only the clock running out leaves it owed.
+                    bucket_finished(bucket)
                 return max(0, collected_count() - before)
 
             # ---- A. The operator's own pages and links come first ----------------
@@ -735,9 +848,23 @@ def adaptive_expand_after_cleaning(
                 date_from=date_from, date_to=date_to,
                 run_page_actor=lambda actor, inp, want, price: _probe_items(
                     folder, plan, source, actor, inp, want, price, audit, store, runner, cancel_check,
+                    # Page discovery runs BEFORE the first harvest heartbeat, so
+                    # without these it was the longest silent stretch of the run.
+                    deadline_check=deadline_check, time_left=time_left,
+                    heartbeat=lambda _note, _s=source: heartbeat(_s),
                 ),
                 audit=audit,
+                cache_path=folder / f"page-parents-{source}.json",
             )
+            if audit.get("deadline_reached"):
+                # `time_left` may refuse page discovery while the coarser boolean
+                # deadline is still false. Do not translate that into "no pages".
+                _comment_status_update(
+                    folder, source, status="deferred",
+                    reason="page_discovery_worker_deadline_resumes_automatically",
+                )
+                break
+
             owned_quota = owned_comment_quota(source_comment_target, plan.get("owned_share_pct"))
             open_quota = max(0, source_comment_target - owned_quota)
 
@@ -747,7 +874,21 @@ def adaptive_expand_after_cleaning(
                 _comment_status_update(folder, source, status="deferred", reason="worker_deadline_reached_resumes_automatically")
                 break
 
-            got_owned = harvest(owned_refs, owned_meta, min(owned_quota, len(owned_refs) * max_per_parent), "owned")
+            if not owned_refs:
+                # Nothing was ever pasted for this source: both passes that read
+                # the operator's pages are done by definition, not owed.
+                bucket_finished("owned")
+                bucket_finished("backfill")
+            owned_wanted = min(owned_quota, len(owned_refs) * max_per_parent)
+            if "owned" in done_buckets:
+                got_owned = 0
+            elif owned_wanted <= 0:
+                # A 0% owned share is a completed zero-work pass, not a debt that
+                # should requeue forever.
+                bucket_finished("owned")
+                got_owned = 0
+            else:
+                got_owned = harvest(owned_refs, owned_meta, owned_wanted, "owned")
 
             # ---- B. Then open conversation found by search -----------------------
             ranked_refs, ranked_meta, selection_mode = _comment_seed_refs(source, cleaned, max_seeds=max_parents)
@@ -765,15 +906,27 @@ def adaptive_expand_after_cleaning(
             if source_comment_target <= 0:
                 # Older plans with no explicit number: top up the sample shortfall.
                 open_quota = max(20, min(shortfall, len(ranked_refs) * max_per_parent))
-            got_open = harvest(ranked_refs, ranked_meta,
-                               min(open_quota, len(ranked_refs) * max_per_parent), "open")
+            open_wanted = min(open_quota, len(ranked_refs) * max_per_parent)
+            if not ranked_refs or open_wanted <= 0:
+                # Includes the valid 100% owned-share configuration.
+                bucket_finished("open")
+            got_open = 0 if "open" in done_buckets else harvest(
+                ranked_refs, ranked_meta, open_wanted, "open")
 
             # ---- C. Whatever open search could not deliver comes back here ------
             # An empty bucket helps nobody: if the wider web returned little, the
             # remainder is taken from the pages the operator trusts.
-            missing = max(0, source_comment_target - (got_owned + got_open))
+            # Use evidence durable across ALL invocations. Completed buckets
+            # intentionally return 0 on resume; local counters would therefore
+            # buy backfill for comments a previous worker already collected.
+            missing = max(0, source_comment_target - collected_count())
             got_backfill = 0
-            if missing > 0 and owned_refs and not deadline_check():
+            if "backfill" in done_buckets:
+                pass
+            elif missing <= 0:
+                # Nothing is missing, so there is nothing to backfill: done.
+                bucket_finished("backfill")
+            elif missing > 0 and owned_refs and not deadline_check():
                 got_backfill = harvest(owned_refs, owned_meta,
                                        min(missing, len(owned_refs) * max_per_parent), "owned_backfill")
 
@@ -784,9 +937,15 @@ def adaptive_expand_after_cleaning(
                 "owned": got_owned, "open": got_open, "backfill": got_backfill,
                 "owned_parents": len(owned_refs), "open_parents": len(ranked_refs),
             }
+            every_pass_ran = set(COMMENT_BUCKETS) <= done_buckets
+            if not every_pass_ran:
+                # Cut short by the clock. Saying "collected" here is what made
+                # the next worker skip the rest of this source for good.
+                audit["deadline_reached"] = True
             _comment_status_update(
                 folder, source,
-                status="collected" if collected_now else "failed",
+                status=("collected" if collected_now else "failed") if every_pass_ran else "deferred",
+                buckets_done=sorted(done_buckets),
                 collected=collected_now,
                 owned=got_owned, open_web=got_open, backfill=got_backfill,
                 selection=selection_mode,

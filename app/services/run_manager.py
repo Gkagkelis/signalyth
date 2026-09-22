@@ -12,7 +12,11 @@ from app.config import settings
 from app.services.apify_service import CollectionNotConfigured
 from app.services.collector import CollectionTimeBudgetExceeded, execute_plan
 from app.services.cleaning import CleaningCancelled, clean_run
-from app.services.relevance_expansion import adaptive_expand_after_cleaning
+from app.services.relevance_expansion import (
+    COMMENT_CAPABLE_SOURCES,
+    adaptive_expand_after_cleaning,
+    comment_source_is_complete,
+)
 from app.services.ai_analysis import AIAnalysisCancelled, AIAnalysisProviderOutage, AIAnalysisTimeBudgetExceeded, analyze_run
 from app.services.intelligence import build_intelligence
 from app.services.investigations import InvestigationCancelled, build_investigations
@@ -28,6 +32,62 @@ def _utcnow() -> str:
 
 class RunStateError(RuntimeError):
     pass
+
+
+#: Step states that mean "there is still work coming", so a fresh worker must
+#: not treat the run as collected. "deferred" is included on purpose: it is what
+#: the comment layer writes when it stops at the worker deadline and expects to
+#: be resumed, not skipped.
+UNFINISHED_STEP_STATES = {"running", "queued", "deferred", "pending", "retrying"}
+
+
+def resume_at_analysis(prior_status: dict, folder: Path, plan: dict | None = None) -> bool:
+    """May a fresh worker skip collection and go straight to the AI analysis?
+
+    Only when every collecting step has REPORTED that it finished. The presence
+    of a cleaning output file is not evidence of that: `clean_run()` runs again
+    after every comment Actor call, so `cleaning/semantic-candidates.json`
+    exists from the first call onwards, while the comment layer is still adding
+    evidence. Reading that file as a completion marker is what made a second
+    worker analyse 4 records and report a finished run.
+
+    The file check stays, but only as a second condition: the status says the
+    work is done AND the output it produced is actually on this machine.
+    """
+    status = prior_status or {}
+
+    if str((status.get("cleaning") or {}).get("status") or "") != "succeeded":
+        return False
+
+    adaptive = str((status.get("adaptive_collection") or {}).get("status") or "")
+    if adaptive in UNFINISHED_STEP_STATES:
+        return False
+
+    deepening = status.get("comment_deepening") or {}
+    if not isinstance(deepening, dict):
+        deepening = {}
+
+    # Which sources OWE a comment layer is a property of the plan, not of what
+    # happens to be written in the status. Checking only the rows that exist
+    # means a source that died before writing its first row objects to nothing,
+    # which is how two of three sources could vanish from a "finished" run.
+    # CollectionPlan serializes this field as `comments_requested`. Using the
+    # AnalysisDraft name (`comments`) here silently disables the expected-source
+    # barrier for real production plans while hand-written tests can still pass.
+    if plan is not None and plan.get("comments_requested"):
+        expected = {str(sp.get("source") or "") for sp in (plan.get("sources") or [])}
+        expected &= COMMENT_CAPABLE_SOURCES
+        for source in sorted(expected):
+            if not comment_source_is_complete(deepening.get(source)):
+                return False
+    else:
+        for value in deepening.values():
+            row = value if isinstance(value, dict) else {"status": value}
+            if not comment_source_is_complete(row):
+                return False
+
+    return ((folder / "cleaning" / "semantic-candidates.json").exists()
+            or (folder / "cleaning" / "trusted.json").exists())
 
 
 class RunManager:
@@ -55,6 +115,16 @@ class RunManager:
         else:
             self._deadline_monotonic = None
 
+    def _seconds_left(self, margin_seconds: float = 0.0) -> float:
+        """Seconds of this invocation still usable, after keeping a margin.
+
+        A yes/no deadline cannot stop a worker from starting a three-minute
+        Actor call with one minute to live. This can.
+        """
+        if self._deadline_monotonic is None:
+            return float("inf")
+        return (self._deadline_monotonic - max(0.0, margin_seconds)) - time.monotonic()
+
     def _deadline_reached(self, margin_seconds: float = 0.0) -> bool:
         if self._deadline_monotonic is None:
             return False
@@ -81,6 +151,27 @@ class RunManager:
             return max(0.0, (datetime.now(timezone.utc) - updated).total_seconds())
         except Exception:
             return None
+
+    def _checkpoint_milestone(self, run_id: str) -> bool:
+        """Commit a semantic stage boundary and prove this worker still owns it.
+
+        Generation is part of the handoff safety contract, not optional
+        bookkeeping. A worker that cannot advance the generation, persist the
+        workspace, or confirm ownership afterwards must not publish the next
+        stage status.
+        """
+        if not self._lease_ok(run_id):
+            return False
+
+        generation = self.store.bump_workspace_generation(self.store.folder_for(run_id))
+        if generation <= 0:
+            raise RunStateError("Could not advance workspace generation before checkpoint")
+
+        self.store.checkpoint_run(run_id)
+
+        # Ownership may have changed while the archive was being built/uploaded.
+        # Do not let the displaced worker publish a newer phase afterwards.
+        return self._lease_ok(run_id)
 
     def _lease_ok(self, run_id: str) -> bool:
         return self._owns_lease(run_id, self._lease_tokens.get(run_id, ""))
@@ -285,21 +376,45 @@ class RunManager:
         token = uuid.uuid4().hex
         try:
             status = self.store.read_status(run_id)
-            status["worker_lease"] = {"token": token, "claimed_at": _utcnow()}
+            previous = dict(status.get("worker_lease") or {})
+            status["worker_lease"] = {
+                "token": token,
+                "claimed_at": _utcnow(),
+                # Who this invocation took the run from, and how many times the
+                # run has changed hands. Without this there is no way to tell,
+                # after the fact, that two workers were driving the same run.
+                "displaced_token": str(previous.get("token") or "") or None,
+                "displaced_at": previous.get("claimed_at"),
+                "generation": int(previous.get("generation") or 0) + 1,
+            }
             self.store.write_status(run_id, status)
         except Exception:
-            pass
+            # The claim was never recorded, so this invocation does not own the
+            # run. Returning a token anyway let a worker act on an ownership it
+            # had never actually taken.
+            return ""
         return token
 
     def _owns_lease(self, run_id: str, token: str) -> bool:
+        """Does this invocation still own the run?
+
+        Fail CLOSED. This is a lock, and a worker that cannot confirm it still
+        holds the lock must stop rather than keep writing: the cost of a false
+        stand-down is a requeue, the cost of a false ownership is two workers
+        writing the same evidence and a report built on half of it.
+        """
         if not token:
             return True
         try:
             lease = (self.store.read_status(run_id) or {}).get("worker_lease") or {}
         except Exception:
-            return True  # unreadable status: do not strand the pipeline
+            return False
         current = str(lease.get("token") or "")
-        return not current or current == token
+        if not current:
+            # This worker holds a token but the run records none: its claim was
+            # lost or wiped. That is not ownership.
+            return False
+        return current == token
 
     def _worker(self, run_id: str):
         try:
@@ -309,6 +424,22 @@ class RunManager:
             folder = self.store.folder_for(run_id)
             lease_token = self._claim_lease(run_id)
             self._lease_tokens[run_id] = lease_token
+            if not lease_token:
+                # The ownership write did not succeed. Acting anyway turns a
+                # transient Blob failure into an unleased paid worker.
+                return
+
+            # Before ANY resume path — collection as much as analysis — refuse to
+            # build on a workspace whose saved copy is behind its own status.
+            consistent, why = self.store.durable_state_consistent(folder)
+            if not consistent:
+                self._mark_failed(
+                    run_id,
+                    "Stopped before resuming a run whose saved copy is behind its "
+                    f"progress: {why}. Nothing was re-collected and nothing was paid twice.",
+                )
+                return
+
             if self.store.cancel_requested_folder(folder):
                 self._mark_cancelled_before_start(run_id)
                 return
@@ -322,10 +453,9 @@ class RunManager:
             # Durable resume: if an earlier invocation already finished collection and
             # cleaning, do NOT re-run paid collection. Jump straight to the analysis
             # chain, which itself resumes cheaply via the per-batch OpenAI cache.
-            cleaning_done = (folder / "cleaning" / "semantic-candidates.json").exists() or (
-                folder / "cleaning" / "trusted.json"
-            ).exists()
             prior_status = self.store.read_status(run_id)
+            # "The file exists" is NOT "the step finished" — see resume_at_analysis.
+            cleaning_done = resume_at_analysis(prior_status, folder, plan=plan)
             resumable = prior_status.get("status") not in self.store.TERMINAL_STATUSES
             if cleaning_done and resumable:
                 if not self._evidence_guard(run_id):
@@ -380,7 +510,8 @@ class RunManager:
                     }
                     self.store.write_status(run_id, status)
                 return
-            self.store.checkpoint_run(run_id)
+            if not self._checkpoint_milestone(run_id):  # collection finished
+                return
             if collection_status.get("status") in {"cancelled", "failed"}:
                 return
             self._run_cleaning(run_id, folder, plan)
@@ -391,11 +522,16 @@ class RunManager:
         except Exception as exc:
             self._mark_failed(run_id, f"Unexpected collection failure: {exc}")
         finally:
+            # Finalization is also a write boundary. A failed claimant or a worker
+            # displaced during a slow external call must not overwrite the current
+            # owner's archive merely because Python is unwinding this invocation.
             try:
-                self.store.checkpoint_run(run_id)
+                token = self._lease_tokens.get(run_id, "")
+                if token and self._owns_lease(run_id, token):
+                    self.store.checkpoint_run(run_id)
             except Exception:
-                # Status/metadata writes are persisted independently; do not hide the
-                # original pipeline outcome if only the final archive snapshot fails.
+                # Preserve the original pipeline outcome; durability checks will
+                # surface a failed save on the next safe resume.
                 pass
             with self._lock:
                 self._jobs.pop(run_id, None)
@@ -830,6 +966,9 @@ class RunManager:
                     deadline_check=lambda: self._deadline_reached(
                         margin_seconds=float(settings.signalyth_collection_deadline_margin_seconds)
                     ),
+                    time_left=lambda: self._seconds_left(
+                        margin_seconds=float(settings.signalyth_collection_deadline_margin_seconds)
+                    ),
                     heartbeat=_adaptive_heartbeat,
                 )
                 report = expanded.get("report") or report
@@ -870,7 +1009,8 @@ class RunManager:
             self._mark_cancelled_after_collection(run_id)
             return
 
-        self.store.checkpoint_run(run_id)
+        if not self._checkpoint_milestone(run_id):      # cleaning + comment layer finished
+            return
         status = self.store.read_status(run_id)
         terminal = status.get("collection_status") or "succeeded"
         status.update({
@@ -1049,7 +1189,8 @@ class RunManager:
                 status_refill["semantic_refill"] = {"status":"failed_safe","error":str(exc),"completed_at":_utcnow()}
                 self.store.write_status(run_id, status_refill)
 
-        self.store.checkpoint_run(run_id)
+        if not self._checkpoint_milestone(run_id):      # AI analysis finished
+            return
         status = self.store.read_status(run_id)
         status.update({
             "status": "running",
@@ -1100,7 +1241,8 @@ class RunManager:
             self.store.write_status(run_id, status)
             return
 
-        self.store.checkpoint_run(run_id)
+        if not self._checkpoint_milestone(run_id):      # intelligence finished
+            return
         if self.store.cancel_requested_folder(folder):
             self._mark_cancelled_after_collection(run_id)
             return

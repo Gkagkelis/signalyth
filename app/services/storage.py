@@ -570,6 +570,61 @@ class RunStore:
         return {"deleted": deleted, "deleted_count": len(deleted),
                 "failed": failed, "kept": sorted(keep)}
 
+    def bump_workspace_generation(self, folder: Path) -> int:
+        """Mark that this run's workspace has moved on to a new milestone.
+
+        `status.json` is written constantly; `archive.zip` only at checkpoints.
+        Counting the milestones on one side and recording, on the other, which
+        milestone the archive actually contains is what lets a fresh worker tell
+        "my saved copy is current" from "my saved copy is a stage behind".
+        """
+        try:
+            status = self.read(folder / "status.json", {}) or {}
+            if not isinstance(status, dict):
+                return 0
+            nxt = int(status.get("workspace_generation") or 0) + 1
+            status["workspace_generation"] = nxt
+            self.write_status_folder(folder, status)
+            return nxt
+        except Exception:
+            return 0
+
+    def durable_state_consistent(self, folder: Path) -> tuple[bool, str]:
+        """Does the saved copy actually contain the stage the status describes?
+
+        A checkpoint that fails is swallowed at most call sites so a mirror
+        hiccup cannot kill a healthy pipeline. The cost of that silence is a
+        later worker restoring a stage-old archive, reading a status that
+        describes a newer stage, and failing at aggregation looking for files
+        that were never in the archive it holds.
+        """
+        try:
+            status = self.read(folder / "status.json", {}) or {}
+        except Exception as exc:
+            return False, f"status is unreadable ({exc})"
+        if not isinstance(status, dict):
+            return False, "status is not a valid object"
+
+        durability = status.get("durability")
+        if not isinstance(durability, dict) or not durability:
+            # Nothing has been checkpointed yet: a first invocation is not a
+            # divergence, and there is nothing to be behind.
+            return True, "no checkpoint has been taken yet"
+
+        if not durability.get("saved", True):
+            error = str(durability.get("error") or "the last checkpoint failed")
+            return False, f"the last save of this run's workspace did not succeed ({error})"
+
+        workspace = int(status.get("workspace_generation") or 0)
+        saved = int(durability.get("generation") or 0)
+        if workspace and saved < workspace:
+            return False, (
+                f"the saved copy is at generation {saved} while the run has "
+                f"progressed to generation {workspace}, so files this status "
+                "describes are not in the archive"
+            )
+        return True, "the saved copy matches the run's progress"
+
     def _record_durability(self, run_id: str, **fields) -> None:
         """Write down whether this run's evidence is actually saved.
 
@@ -600,12 +655,19 @@ class RunStore:
         if not self.cloud.enabled:
             return
         folder = self.folder_for(run_id)
+        # Which milestone this archive is about to contain. Recorded with the
+        # outcome either way, so a later worker can compare it against how far
+        # the status says the run has progressed.
+        try:
+            generation = int((self.read(folder / "status.json", {}) or {}).get("workspace_generation") or 0)
+        except Exception:
+            generation = 0
         try:
             stamp = self.cloud.persist_run_archive(run_id, folder)
         except Exception as exc:
-            self._record_durability(run_id, saved=False, error=str(exc)[:400])
+            self._record_durability(run_id, saved=False, generation=generation, error=str(exc)[:400])
             raise
-        self._record_durability(run_id, saved=True, checkpointed_at=stamp)
+        self._record_durability(run_id, saved=True, generation=generation, checkpointed_at=stamp)
 
     def evidence_is_durable(self, run_id: str) -> tuple[bool, str]:
         """Is this run's evidence really saved? Returns (ok, reason)."""

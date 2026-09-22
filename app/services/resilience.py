@@ -12,6 +12,12 @@ from typing import Callable, Iterable
 from app.config import settings
 
 
+#: How long a single Actor run is allowed to take before Apify terminates it.
+#: The worker uses this to refuse a call it cannot sit through; ApifyRunner uses
+#: it as the actual limit. One constant, so the two can never drift apart and
+#: leave the worker starting calls it has no time for.
+ACTOR_RUN_TIMEOUT_SECONDS = 180.0
+
 TRANSIENT_MARKERS = (
     "504", "503", "502", "429", "timeout", "timed out", "rate limit", "rate-limit",
     "temporarily unavailable", "temporary failure", "upstream", "retryable", "retry-exhausted",
@@ -258,25 +264,67 @@ def run_actor_resilient(
     rate_per_1000: float | None = None,
     max_calls: int = 6,
     sleep_fn: Callable[[float], None] | None = None,
+    deadline_check: Callable[[], bool] | None = None,
+    time_left: Callable[[], float] | None = None,
+    expected_call_seconds: float = ACTOR_RUN_TIMEOUT_SECONDS,
+    heartbeat: Callable[[str], None] | None = None,
 ) -> ResilientCallResult:
     """Run one logical Actor acquisition inside a hard cost envelope.
 
     Transient failures are isolated. Multi-target inputs are split before retrying.
     Partial successful rows are preserved and deduplicated. No retry can spend above
     max_charge_usd. Unknown-cost exceptions are charged conservatively at the attempt cap.
+
+    Two things bound it in TIME as well as in money, because this function is
+    the only place in the pipeline that can:
+
+    ``time_left`` reports the seconds the worker has left, and no Actor call is
+    started unless a whole call fits in them. A yes/no deadline is not enough
+    here: a worker with 110 seconds of margin was still allowed to start a call
+    whose own timeout is 180 seconds, and then a retry of another 180 — the
+    caller cannot intervene, because it does not get control back until the
+    whole acquisition is over. ``deadline_check`` remains as a coarser signal
+    for callers that only know "stop now".
+
+    ``heartbeat`` fires on every attempt. Staleness is judged from the run's
+    last status write, and a worker sitting inside a slow Actor writes nothing;
+    that silence is what made the recovery path declare a live worker dead and
+    start a second one on the same run.
     """
     max_items = max(1, int(max_items))
     envelope = max(0.0, float(max_charge_usd))
     sleep_fn = sleep_fn or (lambda seconds: None if settings.signalyth_dry_run else time.sleep(seconds))
+    deadline_check = deadline_check or (lambda: False)
+    heartbeat = heartbeat or (lambda _note: None)
 
     result = ResilientCallResult(status="failed")
     queue: list[dict] = [{"input": deepcopy(run_input), "target": max_items, "depth": 0, "retry_no": 0}]
     calls = 0
 
     while queue and calls < max(1, int(max_calls)) and result.accounted_cost_usd < envelope - 1e-9:
+        # Never START another paid Actor call the worker cannot afford to wait
+        # for. Whatever was already collected is kept and returned.
+        try:
+            out_of_time = bool(deadline_check())
+        except Exception:
+            out_of_time = False
+        if not out_of_time and time_left is not None:
+            try:
+                out_of_time = float(time_left()) < float(expected_call_seconds)
+            except Exception:
+                out_of_time = False
+        if out_of_time:
+            result.failure_kinds.append("worker_deadline_reached")
+            result.adaptive_actions.append("stopped_before_next_call_worker_deadline")
+            break
+
         task = queue.pop(0)
         target = max(1, int(task["target"]))
         calls += 1
+        try:
+            heartbeat(f"{actor_id}:call{calls}")
+        except Exception:
+            pass
         remaining = max(0.0, envelope - result.accounted_cost_usd)
         attempt_cap = _attempt_cap(remaining, rate_per_1000, target, max_calls - calls + 1)
         if attempt_cap <= 0:
@@ -399,6 +447,9 @@ def run_actor_resilient(
 
     result.provider_reported_cost_usd = round(result.provider_reported_cost_usd, 6)
     has_transient = "transient" in result.failure_kinds
+    # Stopping at the worker deadline is not success: there was more to fetch.
+    # It reads as "partial" so the caller keeps what was paid for and requeues.
+    has_transient = has_transient or "worker_deadline_reached" in result.failure_kinds
     has_permanent = any(k in {"permanent", "unknown", "cost_cap_violation"} for k in result.failure_kinds)
     if result.items:
         result.status = "partial" if (has_transient or has_permanent) else "succeeded"
