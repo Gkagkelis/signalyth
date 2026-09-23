@@ -86,6 +86,39 @@ def _fold_alias(x: str) -> str:
     return re.sub(r"\s+", " ", str(x or "").strip().casefold())
 
 
+def drop_bare_topic_route(queries: list[str], topic: str, market: str) -> list[str]:
+    """Remove the query that is nothing but the subject's name.
+
+    A bare global name is the one route with no market signal at all, and for a
+    subject that exists in several countries it is where the foreign-language
+    noise comes from: a run for Greece was spending ~43% of its sample on Polish
+    and Spanish Eurojackpot posts, all correctly thrown away afterwards.
+
+    Every OTHER route is kept, including the Greek-language ones. The Greek
+    words themselves ("κλήρωση") are the market signal; demanding the literal
+    word "Greece" on top of them would throw away the very posts we want, since
+    people do not write their own country's name when talking about it.
+
+    With no market set there is nothing to narrow to, so nothing is dropped.
+    """
+    if not str(market or "").strip():
+        return queries
+    subject = re.sub(r"\s+", " ", str(topic or "")).strip().casefold()
+    if not subject:
+        return queries
+    kept = []
+    for q in queries:
+        stripped = re.sub(r"\s+", " ", str(q or "")).strip()
+        bare = stripped.casefold()
+        # X carries an operator suffix that is not a market signal either.
+        bare = bare.replace("-filter:nativeretweets", "").strip()
+        if bare == subject:
+            continue
+        kept.append(q)
+    # Never return nothing: if the bare route was the only one, keep it.
+    return kept or queries
+
+
 def suggest_public_names(draft: AnalysisDraft) -> list[str]:
     """ADVISORY ONLY. Ask the model under which names the public in this market
     may talk about the subject (native script, greeklish, nicknames, a local
@@ -469,6 +502,9 @@ def make_source_plan(source: str, target: int, draft: AnalysisDraft, queries: li
 
     primary = primary or [routes["topic"]]
     topups = uniq(topups)
+    # The bare global name is the only route with no market signal at all.
+    primary = drop_bare_topic_route(primary, routes["topic"], draft.market)
+    topups = drop_bare_topic_route(topups, routes["topic"], draft.market)
     safe = max(1, int(get_safe_batch_size(source, actor)))
     source_budget = max(0.0, float(source_budget))
     has_topups = bool(topups) or source == "x"

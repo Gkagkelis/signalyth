@@ -99,9 +99,12 @@ def _utcnow() -> str:
 
 
 def _fold(value: str | None) -> str:
-    value = str(value or "").strip().casefold()
-    decomposed = unicodedata.normalize("NFKD", value)
-    value = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+    # Normalize compatibility glyphs BEFORE casefolding. Stylized Unicode such
+    # as "𝗘𝘂𝗿𝗼𝗷𝗮𝗰𝗸𝗽𝗼𝘁" decomposes to ordinary Latin CAPITALS; casefolding first
+    # left the capital behind and the subject came out as "urojackpot", so a
+    # perfectly relevant post read as never mentioning the brand.
+    decomposed = unicodedata.normalize("NFKD", str(value or "").strip())
+    value = "".join(ch for ch in decomposed if not unicodedata.combining(ch)).casefold()
     value = URL_RE.sub(" ", value)
     value = re.sub(r"[^a-z0-9α-ω\s#@]+", " ", value)
     value = re.sub(r"\s+", " ", value).strip()
@@ -208,6 +211,63 @@ def _content_class(row: dict, account_type: str, view: TextView) -> tuple[str, f
     return "unknown", 0.4, reasons
 
 
+#: Greek function words as Greek speakers type them in Latin script. Chosen to
+#: be words a Greek uses constantly and that rarely co-occur in other Latin
+#: languages: "den" alone is Dutch, "kai" alone is Finnish, "me" alone is
+#: English — so a single hit proves nothing and two distinct hits are required.
+#: Verb endings in -w (thelw, exw, kanw) render the Greek -ω and are close to
+#: unique to Greeklish.
+GREEKLISH_MARKERS = frozenset({
+    "den", "kai", "gia", "einai", "eimai", "eisai", "mou", "sou", "tou", "tis",
+    "ton", "tin", "sto", "stin", "ston", "stous", "apo", "pou", "pws", "opws",
+    "auto", "afto", "ayto", "ola", "oli", "oti", "kati", "tipota", "tipote",
+    "poly", "polu", "kala", "kalo", "kalha", "thelw", "thelo", "exw", "exei",
+    "eixa", "eixe", "kanw", "kanei", "kaneis", "ginetai", "prepei", "mporei",
+    "mporw", "pali", "akoma", "akomi", "xwris", "meta", "prin", "twra", "tora",
+    "simera", "aurio", "xthes", "lefta", "aksizei", "aksizoun", "axizei",
+    "axizoun", "kainourgia", "kainourgio", "kainourgies", "paidia", "malista",
+    "episis", "etsi", "giati", "ligo", "megalo", "mikro", "kalhmera",
+    "kalimera", "kalispera", "efxaristw", "efharisto", "parakalw", "sygnwmh",
+})
+
+#: Words that look Greeklish but are ordinary in another language. Seeing these
+#: pulls the confidence back down rather than up.
+GREEKLISH_FALSE_FRIENDS = frozenset({
+    "the", "and", "you", "for", "with", "this", "that", "have", "not", "was",
+    "der", "die", "und", "ist", "nicht", "ein", "una", "que", "por", "para",
+    "nie", "jest", "sie", "tylko", "jedna", "che", "non", "sono", "della",
+})
+
+
+def greeklish_prose_score(text: str) -> tuple[float, list[str]]:
+    """How strongly does Latin-script text read as a Greek speaker writing?
+
+    A Greek writing "Ta kainourgia Nike den aksizoun ta lefta" is exactly the
+    audience a Greek brief is about, yet it carries no Greek letters, no country
+    name and no language tag. Until this existed the market gate scored it 0.00
+    and threw it away — while the planner was PAYING for Greeklish search routes
+    ("Eurojackpot klirosi") whose results were then guaranteed to be discarded.
+
+    Returns (score, reasons). Two distinct markers are required, because every
+    single marker on its own is an ordinary word in some other language.
+    """
+    body = str(text or "")
+    if any("\u0370" <= ch <= "\u03ff" or "\u1f00" <= ch <= "\u1fff" for ch in body):
+        return 0.0, []          # Real Greek script is scored by its own rule.
+    tokens = set(re.findall(r"[a-z]+", _fold(body)))
+    if not tokens:
+        return 0.0, []
+    hits = sorted(tokens & GREEKLISH_MARKERS)
+    if len(hits) < 2:
+        return 0.0, []
+    foreign = tokens & GREEKLISH_FALSE_FRIENDS
+    if len(foreign) >= len(hits):
+        # More ordinary foreign words than Greek ones: not a Greek writing.
+        return 0.0, []
+    score = 0.30 + 0.10 * min(3, len(hits) - 2)
+    return round(score, 2), [f"greeklish:{x}" for x in hits[:3]]
+
+
 def _market_score(row: dict, plan: dict, view: TextView) -> tuple[float, list[str]]:
     if str(plan.get("market", "")).casefold() != "greece":
         market = _fold(plan.get("market"))
@@ -225,6 +285,11 @@ def _market_score(row: dict, plan: dict, view: TextView) -> tuple[float, list[st
     elif greek_ratio > 0:
         score += 0.35
         reasons.append("some_greek_script")
+    else:
+        greeklish, greeklish_reasons = greeklish_prose_score(text)
+        if greeklish > 0:
+            score += greeklish
+            reasons.extend(greeklish_reasons)
 
     ambiguous_own_terms = {_fold(plan.get("topic")), _fold(plan.get("client"))}
     # Market terms must appear in prose. A domain like greece-powerball.co.za or
