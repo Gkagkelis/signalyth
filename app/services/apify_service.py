@@ -2,7 +2,7 @@ from __future__ import annotations
 from datetime import timedelta
 from decimal import Decimal
 from app.config import settings
-from app.services.resilience import ACTOR_RUN_TIMEOUT_SECONDS
+from app.services.resilience import actor_run_timeout_seconds
 
 class CollectionNotConfigured(RuntimeError):
     pass
@@ -46,7 +46,7 @@ class ApifyRunner:
             # A single slow provider must not hold the whole SIGNALYTH pipeline forever.
             # Apify terminates the Actor run itself at this limit; resilience logic can
             # then isolate the failure and continue with later batches/sources.
-            run_timeout=timedelta(seconds=ACTOR_RUN_TIMEOUT_SECONDS),
+            run_timeout=timedelta(seconds=actor_run_timeout_seconds(actor_id)),
         )
         if not run:
             raise RuntimeError(f"Actor {actor_id} returned no run object")

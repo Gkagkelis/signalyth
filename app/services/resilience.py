@@ -12,11 +12,18 @@ from typing import Callable, Iterable
 from app.config import settings
 
 
-#: How long a single Actor run is allowed to take before Apify terminates it.
-#: The worker uses this to refuse a call it cannot sit through; ApifyRunner uses
-#: it as the actual limit. One constant, so the two can never drift apart and
-#: leave the worker starting calls it has no time for.
+#: Default Actor wall time. A small number of known slow production routes
+#: receive an explicit override, and both the worker deadline guard and
+#: ApifyRunner read the SAME helper so they cannot drift apart.
 ACTOR_RUN_TIMEOUT_SECONDS = 180.0
+FACEBOOK_COMMENT_RUN_TIMEOUT_SECONDS = 420.0
+
+
+def actor_run_timeout_seconds(actor_id: str) -> float:
+    actor = str(actor_id or "").strip().casefold()
+    if actor == "scraper_one/facebook-comments-scraper":
+        return FACEBOOK_COMMENT_RUN_TIMEOUT_SECONDS
+    return ACTOR_RUN_TIMEOUT_SECONDS
 
 TRANSIENT_MARKERS = (
     "504", "503", "502", "429", "timeout", "timed out", "rate limit", "rate-limit",
@@ -209,16 +216,26 @@ def target_count(inp: dict) -> int:
     return 1
 
 
-def _attempt_cap(remaining_envelope: float, rate_per_1000: float | None, target: int, attempts_left: int) -> float:
+def _attempt_cap(
+    remaining_envelope: float,
+    rate_per_1000: float | None,
+    target: int,
+    attempts_left: int,
+    *,
+    minimum_attempt_charge_usd: float = 0.0,
+) -> float:
     remaining_envelope = max(0.0, float(remaining_envelope))
     if remaining_envelope <= 0:
         return 0.0
     attempts_left = max(1, int(attempts_left))
+    floor = max(0.0, float(minimum_attempt_charge_usd or 0.0))
     if rate_per_1000 not in (None, 0):
         expected = max(0.001, float(rate_per_1000) * max(1, int(target)) / 1000)
-        # Enough headroom for ordinary pay-per-result calls, while retaining retry budget.
-        return min(remaining_envelope, max(0.001, expected * 1.6))
-    return min(remaining_envelope, max(0.001, remaining_envelope / attempts_left))
+        # Some PPE Actors also charge query events. Their caller supplies a
+        # minimum attempt floor so a perfectly valid request is not rejected
+        # before scraping starts merely because dataset-item pricing is cheaper.
+        return min(remaining_envelope, max(0.001, expected * 1.6, floor))
+    return min(remaining_envelope, max(0.001, remaining_envelope / attempts_left, floor))
 
 
 def _dedupe_raw(items: Iterable[dict]) -> list[dict]:
@@ -266,7 +283,8 @@ def run_actor_resilient(
     sleep_fn: Callable[[float], None] | None = None,
     deadline_check: Callable[[], bool] | None = None,
     time_left: Callable[[], float] | None = None,
-    expected_call_seconds: float = ACTOR_RUN_TIMEOUT_SECONDS,
+    expected_call_seconds: float | None = None,
+    minimum_attempt_charge_usd: float = 0.0,
     heartbeat: Callable[[str], None] | None = None,
 ) -> ResilientCallResult:
     """Run one logical Actor acquisition inside a hard cost envelope.
@@ -296,6 +314,9 @@ def run_actor_resilient(
     sleep_fn = sleep_fn or (lambda seconds: None if settings.signalyth_dry_run else time.sleep(seconds))
     deadline_check = deadline_check or (lambda: False)
     heartbeat = heartbeat or (lambda _note: None)
+    if expected_call_seconds is None:
+        expected_call_seconds = actor_run_timeout_seconds(actor_id)
+    minimum_attempt_charge_usd = max(0.0, float(minimum_attempt_charge_usd or 0.0))
 
     result = ResilientCallResult(status="failed")
     queue: list[dict] = [{"input": deepcopy(run_input), "target": max_items, "depth": 0, "retry_no": 0}]
@@ -326,7 +347,10 @@ def run_actor_resilient(
         except Exception:
             pass
         remaining = max(0.0, envelope - result.accounted_cost_usd)
-        attempt_cap = _attempt_cap(remaining, rate_per_1000, target, max_calls - calls + 1)
+        attempt_cap = _attempt_cap(
+            remaining, rate_per_1000, target, max_calls - calls + 1,
+            minimum_attempt_charge_usd=minimum_attempt_charge_usd,
+        )
         if attempt_cap <= 0:
             result.failure_kinds.append("budget_envelope_exhausted")
             break

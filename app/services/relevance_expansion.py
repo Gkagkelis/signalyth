@@ -59,13 +59,83 @@ def _max_affordable_items(remaining: float, rate_per_1000: float | None, wanted:
     return max(0, min(wanted, affordable))
 
 
-def _charge_cap(remaining: float, rate_per_1000: float | None, items: int) -> float:
+def _charge_cap(
+    remaining: float,
+    rate_per_1000: float | None,
+    items: int,
+    *,
+    minimum_usd: float = 0.0,
+) -> float:
     if remaining <= 0 or items <= 0:
         return 0.0
+    minimum_usd = max(0.0, float(minimum_usd or 0.0))
     if rate_per_1000 in (None, 0):
-        return min(remaining, 0.25)
-    expected = float(rate_per_1000) * int(items) / 1000
-    return min(remaining, max(0.001, expected * 1.25))
+        calculated = 0.25
+    else:
+        expected = float(rate_per_1000) * int(items) / 1000
+        calculated = max(0.001, expected * 1.25)
+    return min(remaining, max(calculated, minimum_usd))
+
+
+# epctex/tiktok-comment-scraper uses event pricing in addition to dataset items.
+# Public pricing verified 2026-09-23: $0.003/video comment query, $0.003/reply
+# query, plus $0.0003 per dataset item beyond the included rows. The generic
+# per-1,000 cap only covered dataset items, which produced a $0.015 cap for a
+# 40-comment / 12-video call even though the 12 video queries alone cost $0.036.
+TIKTOK_COMMENT_QUERY_USD = 0.003
+TIKTOK_REPLY_QUERY_USD = 0.003
+
+
+def _comment_minimum_attempt_charge_usd(
+    source: str,
+    actor_input: dict,
+    wanted: int,
+    rate_per_1000: float | None,
+) -> float:
+    """Minimum safe Apify event cap for one comment Actor attempt.
+
+    Only TikTok currently needs a non-result event floor. The reply allowance is
+    deliberately conservative: at most one reply-query event per requested
+    output item. This is a CAP, not a charge; Apify still bills only used events.
+    """
+    if source != "tiktok":
+        return 0.0
+    refs = actor_input.get("startUrls") if isinstance(actor_input, dict) else None
+    parent_count = len(refs) if isinstance(refs, list) else 0
+    if parent_count <= 0:
+        return 0.0
+    wanted = max(1, int(wanted or 0))
+    item_cost = 0.0
+    if rate_per_1000 not in (None, 0):
+        item_cost = float(rate_per_1000) * wanted / 1000.0
+    query_cost = TIKTOK_COMMENT_QUERY_USD * parent_count
+    reply_cost = TIKTOK_REPLY_QUERY_USD * wanted if actor_input.get("includeReplies") else 0.0
+    # Small headroom prevents floating-point/event-rounding edge cases.
+    return round((query_cost + reply_cost + item_cost) * 1.10, 6)
+
+
+def _instagram_shortcode_parent_ref(row: dict) -> str:
+    """Recover a concrete Instagram media URL when discovery exposes only a shortcode."""
+    if not isinstance(row, dict):
+        return ""
+    raw = row.get("raw_data") if isinstance(row.get("raw_data"), dict) else row
+    shortcode = str(raw.get("shortCode") or raw.get("shortcode") or "").strip()
+    if not shortcode or not all(ch.isalnum() or ch in "_-" for ch in shortcode):
+        return ""
+    # /p/<shortcode>/ is a stable concrete media URL and the configured comment
+    # Actor accepts post/reel media URLs. This avoids treating a hashtag/profile
+    # inputUrl as the parent merely because a direct `url` field was absent.
+    return f"https://www.instagram.com/p/{shortcode}/"
+
+
+def _effective_open_comment_quota(target: int, configured_open: int, collected: int) -> int:
+    """Open search absorbs any comment target the owned/page pass did not fill."""
+    target = max(0, int(target or 0))
+    configured_open = max(0, int(configured_open or 0))
+    collected = max(0, int(collected or 0))
+    if target <= 0:
+        return configured_open
+    return max(configured_open, max(0, target - collected))
 
 
 def _append_source_items(
@@ -299,15 +369,22 @@ def parent_heat_score(row: dict) -> float:
 def _seed_ref(source: str, row: dict) -> str:
     raw = row.get("raw_data") if isinstance(row.get("raw_data"), dict) else {}
     if source == "x":
-        ref = raw.get("id") or raw.get("tweetId") or raw.get("tweet_id")
+        candidates = (raw.get("id"), raw.get("tweetId"), raw.get("tweet_id"),
+                      row.get("url"), raw.get("url"))
     else:
-        for candidate in (raw.get("postUrl"), raw.get("permalink"), raw.get("webVideoUrl"),
-                          raw.get("link"), row.get("url"), raw.get("url")):
-            value = str(candidate or "").strip()
-            if value and is_comment_parent_ref(source, value):
-                return value
-        return ""
-    return str(ref or "").strip()
+        candidates = (
+            raw.get("postUrl"), raw.get("permalink"), raw.get("permalink_url"),
+            raw.get("reelUrl"), raw.get("webVideoUrl"), raw.get("link"),
+            row.get("url"), raw.get("url"), raw.get("sourceUrl"),
+            raw.get("inputUrl"), raw.get("postLink"), raw.get("videoUrl"),
+        )
+    for candidate in candidates:
+        value = str(candidate or "").strip()
+        if value and is_comment_parent_ref(source, value):
+            return value
+    if source == "instagram":
+        return _instagram_shortcode_parent_ref(row)
+    return ""
 
 
 def _comment_parent_candidate_allowed(source: str, row: dict) -> bool:
@@ -447,6 +524,10 @@ def _post_ref_from_row(source: str, row: dict) -> tuple[str, str]:
         value = str(candidate or "").strip()
         if value and is_comment_parent_ref(source, value):
             return value, text
+    if source == "instagram":
+        derived = _instagram_shortcode_parent_ref(row)
+        if derived:
+            return derived, text
     return "", text
 
 
@@ -705,6 +786,7 @@ def adaptive_expand_after_cleaning(
         origin: str | None = None,
         seed_refs: list[str] | None = None,
         seed_context: dict[str, str] | None = None,
+        minimum_attempt_charge_usd: float = 0.0,
     ):
         nonlocal report, last_call_hit_deadline
         last_call_hit_deadline = False
@@ -713,6 +795,13 @@ def adaptive_expand_after_cleaning(
             return False
         status = store.read(folder / "status.json", {}) or {}
         remaining = _remaining_budget(status, plan)
+        minimum_attempt_charge_usd = max(0.0, float(minimum_attempt_charge_usd or 0.0))
+        if minimum_attempt_charge_usd > remaining + 1e-9:
+            audit["warnings"].append(
+                f"{source}:{kind}:minimum_actor_charge_exceeds_remaining_budget:"
+                f"{minimum_attempt_charge_usd:.6f}>{remaining:.6f}"
+            )
+            return False
         allowed = _max_affordable_items(remaining, rate, wanted)
         if allowed <= 0:
             audit["warnings"].append(f"{source}:{kind}:budget_exhausted")
@@ -721,7 +810,9 @@ def adaptive_expand_after_cleaning(
         # Only Actors whose public schema actually contains maxItems receive it.
         if "maxItems" in actor_input:
             actor_input["maxItems"] = min(int(actor_input.get("maxItems") or allowed), allowed)
-        cap = _charge_cap(remaining, rate, allowed)
+        cap = _charge_cap(
+            remaining, rate, allowed, minimum_usd=minimum_attempt_charge_usd,
+        )
         if cap <= 0:
             audit["warnings"].append(f"{source}:{kind}:no_safe_charge_cap")
             return False
@@ -729,6 +820,7 @@ def adaptive_expand_after_cleaning(
             resilient = run_actor_resilient(
                 runner, actor_id, actor_input, max_items=allowed,
                 max_charge_usd=cap, rate_per_1000=rate, max_calls=4,
+                minimum_attempt_charge_usd=minimum_attempt_charge_usd,
                 deadline_check=deadline_check, time_left=time_left,
                 # Pulse on every attempt, keeping the source name the UI shows.
                 heartbeat=lambda _note, _s=source: heartbeat(_s),
@@ -889,6 +981,9 @@ def adaptive_expand_after_cleaning(
                 except ValueError as exc:
                     audit["warnings"].append(f"{source}:{bucket}:comment_input_unavailable:{exc}")
                     return 0
+                minimum_attempt_charge_usd = _comment_minimum_attempt_charge_usd(
+                    source, inp, wanted, rate,
+                )
                 before = collected_count()
                 heartbeat(source)
                 _comment_status_update(
@@ -903,6 +998,7 @@ def adaptive_expand_after_cleaning(
                     seed_refs=refs,
                     seed_context={str(m.get("ref")): str(m.get("text") or "")
                                   for m in seed_meta if m.get("ref")},
+                    minimum_attempt_charge_usd=minimum_attempt_charge_usd,
                 )
                 if not ok:
                     audit["warnings"].append(f"{source}:{bucket}:actor_call_failed_or_budget_exhausted")
@@ -976,6 +1072,14 @@ def adaptive_expand_after_cleaning(
             if source_comment_target <= 0:
                 # Older plans with no explicit number: top up the sample shortfall.
                 open_quota = max(20, min(shortfall, len(ranked_refs) * max_per_parent))
+            else:
+                # The configured owned/open split is a reservation, not a reason
+                # to leave the requested layer short. If owned-page collection
+                # returned fewer comments (including zero), open search absorbs
+                # the remaining target before the owned backfill pass.
+                open_quota = _effective_open_comment_quota(
+                    source_comment_target, open_quota, collected_count(),
+                )
             open_wanted = min(open_quota, len(ranked_refs) * max_per_parent)
             if not ranked_refs or open_wanted <= 0:
                 # Includes the valid 100% owned-share configuration.
