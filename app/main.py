@@ -807,6 +807,171 @@ def get_cleaning(run_id: str):
     return report
 
 
+
+
+@app.get("/api/runs/{run_id}/cleaning/exclusions")
+def get_cleaning_exclusion_diagnostics(
+    run_id: str,
+    examples_per_reason: int = Query(default=5, ge=0, le=20),
+):
+    """Read-only diagnosis of Step 3 exclusions. Does not rerun or mutate anything."""
+    try:
+        folder = store.folder_for(run_id)
+    except RunNotFound:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    excluded = store.read(folder / "cleaning" / "excluded.json", None)
+    if excluded is None:
+        cleaned = store.read(folder / "cleaning" / "cleaned.json", None)
+        if not isinstance(cleaned, list):
+            raise HTTPException(status_code=404, detail="Cleaning exclusion data is not available")
+        excluded = [
+            r for r in cleaned
+            if str(((r.get("cleaning") or {}).get("decision")) or "") == "excluded"
+        ]
+    if not isinstance(excluded, list):
+        raise HTTPException(status_code=500, detail="cleaning/excluded.json is not a valid list")
+
+    hard = {
+        "duplicate_not_independent_evidence",
+        "explicit_exclusion_context",
+        "high_spam_risk",
+        "high_automation_or_manipulation_risk",
+        "subject_not_mentioned",
+        "outside_target_market",
+    }
+
+    def inc(d, k):
+        d[k] = int(d.get(k, 0) or 0) + 1
+
+    def layer_of(row):
+        return "comments_replies" if str(row.get("evidence_layer") or "primary").casefold() in {"comment", "reply"} else "primary_posts"
+
+    def sample(row, matched):
+        c = row.get("cleaning") if isinstance(row.get("cleaning"), dict) else {}
+        pc = str(row.get("parent_context") or "")
+        return {
+            "id": row.get("id"),
+            "platform": row.get("platform"),
+            "evidence_layer": row.get("evidence_layer") or "primary",
+            "evidence_origin": row.get("evidence_origin"),
+            "author": row.get("author"),
+            "url": row.get("url"),
+            "text": str(row.get("text") or "")[:700],
+            "parent_context": pc[:700],
+            "parent_context_present": bool(pc.strip()),
+            "hard_exclusion_reasons": matched,
+            "all_reasons": list(c.get("reasons") or []),
+            "flags": list(c.get("flags") or []),
+            "scores": {
+                "relevance": c.get("relevance_score"),
+                "market": c.get("market_score"),
+                "spam": c.get("spam_score"),
+                "bot_risk": c.get("bot_risk_score"),
+                "confidence": c.get("confidence"),
+            },
+            "classification": {
+                "account_type": c.get("account_type"),
+                "content_class": c.get("content_class"),
+                "origin_class": c.get("origin_class"),
+                "authenticity_status": c.get("authenticity_status"),
+            },
+        }
+
+    by_hard, by_all, by_flag = {}, {}, {}
+    by_layer = {
+        "primary_posts": {"total_excluded": 0, "by_hard_reason": {}, "by_platform": {}},
+        "comments_replies": {"total_excluded": 0, "by_hard_reason": {}, "by_platform": {}},
+    }
+    by_platform = {}
+    examples = {r: [] for r in sorted(hard)}
+    examples["unclassified_hard_exclusion"] = []
+    ctx = {
+        "excluded_comments_replies": 0,
+        "with_parent_context": 0,
+        "without_parent_context": 0,
+        "with_parent_context_by_hard_reason": {},
+        "without_parent_context_by_hard_reason": {},
+    }
+
+    for row in excluded:
+        if not isinstance(row, dict):
+            continue
+        c = row.get("cleaning") if isinstance(row.get("cleaning"), dict) else {}
+        reasons = [str(x) for x in (c.get("reasons") or [])]
+        flags = [str(x) for x in (c.get("flags") or [])]
+        matched = sorted(set(reasons) & hard)
+        layer = layer_of(row)
+        platform = str(row.get("platform") or "unknown")
+
+        by_layer[layer]["total_excluded"] += 1
+        inc(by_layer[layer]["by_platform"], platform)
+
+        prow = by_platform.setdefault(
+            platform,
+            {"total_excluded": 0, "primary_posts": 0, "comments_replies": 0, "by_hard_reason": {}},
+        )
+        prow["total_excluded"] += 1
+        prow[layer] += 1
+
+        for x in reasons:
+            inc(by_all, x)
+        for x in flags:
+            inc(by_flag, x)
+
+        matched_or_unknown = matched or ["unclassified_hard_exclusion"]
+        for reason in matched_or_unknown:
+            inc(by_hard, reason)
+            inc(by_layer[layer]["by_hard_reason"], reason)
+            inc(prow["by_hard_reason"], reason)
+            if examples_per_reason and len(examples[reason]) < examples_per_reason:
+                examples[reason].append(sample(row, matched))
+
+        if layer == "comments_replies":
+            ctx["excluded_comments_replies"] += 1
+            present = bool(str(row.get("parent_context") or "").strip())
+            ctx["with_parent_context" if present else "without_parent_context"] += 1
+            bucket = "with_parent_context_by_hard_reason" if present else "without_parent_context_by_hard_reason"
+            for reason in matched_or_unknown:
+                inc(ctx[bucket], reason)
+
+    def sorted_counts(d):
+        return dict(sorted(d.items(), key=lambda kv: (-int(kv[1]), kv[0])))
+
+    for item in by_layer.values():
+        item["by_hard_reason"] = sorted_counts(item["by_hard_reason"])
+        item["by_platform"] = sorted_counts(item["by_platform"])
+
+    for item in by_platform.values():
+        item["by_hard_reason"] = sorted_counts(item["by_hard_reason"])
+
+    ctx["with_parent_context_by_hard_reason"] = sorted_counts(ctx["with_parent_context_by_hard_reason"])
+    ctx["without_parent_context_by_hard_reason"] = sorted_counts(ctx["without_parent_context_by_hard_reason"])
+
+    report = store.read(folder / "cleaning" / "report.json", {}) or {}
+    return {
+        "run_id": run_id,
+        "read_only": True,
+        "cleaning_ruleset_version": report.get("ruleset_version"),
+        "total_records": report.get("total_records"),
+        "trusted_records": report.get("trusted_records"),
+        "review_records": report.get("review_records"),
+        "total_excluded": len(excluded),
+        "hard_exclusion_reason_counts": sorted_counts(by_hard),
+        "all_reason_counts": sorted_counts(by_all),
+        "flag_counts": sorted_counts(by_flag),
+        "by_layer": by_layer,
+        "by_platform": dict(sorted(by_platform.items())),
+        "comment_parent_context_diagnostics": ctx,
+        "examples_per_reason": examples_per_reason,
+        "examples": examples,
+        "interpretation_note": (
+            "hard_exclusion_reason_counts are the final hard gates. all_reason_counts "
+            "also contains supporting/context reasons and is not mutually exclusive."
+        ),
+    }
+
+
 @app.get("/api/runs/{run_id}/review")
 def get_review_queue(run_id: str):
     try:
