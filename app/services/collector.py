@@ -301,6 +301,16 @@ def execute_plan(
     except Exception:
         status = {}
 
+    # Adaptive discovery/comments are charged after primary collection and are
+    # not stored in a source's primary cost_usd. A continuation used to reset
+    # the displayed/global budget to the sum of primary source costs, which is
+    # why one live run visibly fell from $0.19 to $0.07 after auto-resume.
+    prior_budget = dict(status.get("budget") or {})
+    try:
+        prior_total_spent = max(0.0, float(prior_budget.get("spent_usd", 0) or 0))
+    except Exception:
+        prior_total_spent = 0.0
+
     status.update({
         "run_id": run_id,
         "status": "running",
@@ -345,6 +355,15 @@ def execute_plan(
             guard.spent += prior_cost
             prior["resumed"] = True
             status["sources"][source] = prior
+
+    # Keep whichever durable total is larger: summed primary costs or the
+    # previously persisted run total that also includes adaptive/comment calls.
+    guard.spent = min(guard.max_budget, max(guard.spent, prior_total_spent))
+    status["budget"] = {
+        "max_usd": round(guard.max_budget, 6),
+        "spent_usd": round(guard.spent, 6),
+        "remaining_usd": round(max(0.0, guard.max_budget - guard.spent), 6),
+    }
 
     for sp in execution_sources:
         source = sp["source"]
