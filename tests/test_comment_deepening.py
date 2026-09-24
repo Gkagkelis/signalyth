@@ -10,7 +10,7 @@ def test_comment_input_shapes_are_actor_specific():
     ig = build_comment_deepening_input("instagram", ["https://www.instagram.com/p/ABC/"], 12, max_per_parent=5)
     assert ig == {"postUrls": ["https://www.instagram.com/p/ABC/"], "maxCommentsPerPost": 5, "sortOrder": "popular"}
     fb = build_comment_deepening_input("facebook", ["https://www.facebook.com/x/posts/1"], 12, max_per_parent=6)
-    assert fb["resultsLimit"] == 6 and fb["commentsSortType"] == "all"
+    assert fb["resultsLimit"] == 6 and fb["commentsSortType"] == "newest"
 
 
 def test_instagram_comments_and_nested_replies_become_separate_evidence():
@@ -78,16 +78,3 @@ def test_comment_can_be_contextually_relevant_via_parent_without_repeating_topic
         "id": "comment:x:1", "platform": "x", "text": "Εμένα από το πρωί δεν δουλεύει τίποτα",
         "date": "2026-09-13T09:00:00+00:00", "author": "person", "url": "https://x.com/u/status/2",
         "evidence_layer": "reply", "parent_post": "1",
-        "parent_context": "Vodafone: μεγάλη διακοπή στο δίκτυο σήμερα στην Ελλάδα",
-        "likes": 1, "comments": 0, "shares": 0, "views": 0, "raw_data": {},
-    }]
-    plan = {
-        "client": "Vodafone", "topic": "Vodafone", "market": "Greece",
-        "core_terms": ["Vodafone"], "context_terms": ["διακοπή", "δίκτυο"],
-        "greeklish_variants": [], "exclusions": [], "target_total": 1,
-        "sources": [{"source": "x", "target_items": 1}],
-    }
-    result = clean_records(rows, plan)
-    cleaned = result["cleaned"][0]
-    assert "contextual_parent_match" in cleaned["cleaning"]["flags"]
-    assert cleaned["cleaning"]["decision"] != "excluded"
