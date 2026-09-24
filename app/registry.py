@@ -17,12 +17,12 @@ HISTORY_PATH = RUNTIME_CONFIG_DIR / "source_registry_history.json"
 BASE_REGISTRY_PATH = BASE_DIR / "config" / "source_registry.json"
 BASE_HISTORY_PATH = BASE_DIR / "config" / "source_registry_history.json"
 
-COMMENT_ROLLOUT_VERSION = "comments-production-ready-v2"
+COMMENT_ROLLOUT_VERSION = "comments-production-ready-v3"
 COMMENT_PRODUCTION_ROLLOUT = {
-    "x": {"actor_id": "xquik/x-tweet-scraper", "route": "thread", "input_field": "threadTweetIds", "price": 0.15},
-    "tiktok": {"actor_id": "epctex/tiktok-comment-scraper", "route": "comments", "input_field": "startUrls", "price": 0.30},
-    "instagram": {"actor_id": "scrapesmith/instagram-comments-scraper", "route": "comments", "input_field": "postUrls", "price": 0.50},
-    "facebook": {"actor_id": "apify/facebook-comments-scraper", "route": "comments", "input_field": "startUrls", "price": 2.50},
+    "x": {"actor_id": "xquik/x-tweet-scraper", "route": "thread", "input_field": "threadTweetIds", "price": 0.15, "include_replies": True},
+    "tiktok": {"actor_id": "epctex/tiktok-comment-scraper", "route": "comments", "input_field": "startUrls", "price": 0.30, "include_replies": True},
+    "instagram": {"actor_id": "scrapesmith/instagram-comments-scraper", "route": "comments", "input_field": "postUrls", "price": 0.50, "include_replies": True},
+    "facebook": {"actor_id": "scraper_one/facebook-comments-scraper", "route": "comments", "input_field": "postUrls", "price": 0.40, "include_replies": False},
 }
 
 
@@ -100,14 +100,21 @@ def load_registry() -> dict:
         cfg.setdefault("comment_rollout_version", None)
 
         rollout = COMMENT_PRODUCTION_ROLLOUT.get(source)
-        legacy_rollout_actor = (
+        previous_rollout_actor = (
             source == "facebook"
-            and cfg.get("comment_actor_id") == "scraper_one/facebook-comments-scraper"
-            and cfg.get("comment_rollout_version") != COMMENT_ROLLOUT_VERSION
+            and cfg.get("comment_actor_id") in {
+                "scraper_one/facebook-comments-scraper",
+                "apify/facebook-comments-scraper",
+            }
+            and cfg.get("comment_rollout_version") in {
+                None,
+                "comments-production-ready-v1",
+                "comments-production-ready-v2",
+            }
         )
         if rollout and (
             cfg.get("comment_actor_id") in (None, "", rollout["actor_id"])
-            or legacy_rollout_actor
+            or previous_rollout_actor
         ):
             desired_status = "verified" if cfg.get("comment_deepening_status") == "verified" else "configured"
             desired = {
@@ -116,6 +123,7 @@ def load_registry() -> dict:
                 "comment_route": rollout["route"],
                 "comment_input_field": rollout["input_field"],
                 "comment_price_per_1000_hint": rollout["price"],
+                "comment_include_replies": bool(rollout.get("include_replies", True)),
             }
             for key, value in desired.items():
                 if cfg.get(key) != value:
