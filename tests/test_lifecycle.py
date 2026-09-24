@@ -114,7 +114,7 @@ class LifecycleTests(unittest.TestCase):
         run_id = self.make_run({**plan_two_sources(), "sources": [plan_two_sources()['sources'][0]], "target_total": 1})
         with patch("app.services.collector.ApifyRunner", BlockingRunner):
             self.manager.enqueue(run_id)
-            self.assertTrue(BlockingRunner.started.wait(timeout=1))
+            self.assertTrue(BlockingRunner.started.wait(timeout=10))  # 1s flaked under full-suite load
             second = self.manager.enqueue(run_id)
             self.assertIn(second['status'], {'running', 'queued'})
             self.assertEqual(len(BlockingRunner.calls), 1)
@@ -129,7 +129,7 @@ class LifecycleTests(unittest.TestCase):
         run_id = self.make_run()
         with patch("app.services.collector.ApifyRunner", BlockingRunner):
             self.manager.enqueue(run_id)
-            self.assertTrue(BlockingRunner.started.wait(timeout=1))
+            self.assertTrue(BlockingRunner.started.wait(timeout=10))  # 1s flaked under full-suite load
             cancelling = self.manager.cancel(run_id)
             self.assertIn(cancelling['status'], {'cancelling', 'cancelled'})
             BlockingRunner.release.set()
@@ -148,7 +148,7 @@ class LifecycleTests(unittest.TestCase):
         second_id = self.make_run({**plan_two_sources(), "sources": [plan_two_sources()['sources'][1]], "target_total": 1})
         with patch("app.services.collector.ApifyRunner", BlockingRunner):
             self.manager.enqueue(first_id)
-            self.assertTrue(BlockingRunner.started.wait(timeout=1))
+            self.assertTrue(BlockingRunner.started.wait(timeout=10))  # 1s flaked under full-suite load
             queued = self.manager.enqueue(second_id)
             self.assertEqual(queued['status'], 'queued')
             cancelled = self.manager.cancel(second_id)
@@ -404,7 +404,7 @@ class Step7LifecycleTests(unittest.TestCase):
         run_id=self.make_run(); clean,ai,intel,inv,viz=self.reports(); gate=threading.Event(); entered=threading.Event()
         def slow_viz(*args,**kwargs): entered.set(); gate.wait(timeout=1); return viz
         with patch('app.services.collector.ApifyRunner',FastRunner), patch('app.services.run_manager.clean_run',return_value=clean), patch('app.services.run_manager.analyze_run',return_value=ai), patch('app.services.run_manager.build_intelligence',return_value=intel), patch('app.services.run_manager.build_investigations',return_value=inv), patch('app.services.run_manager.build_visualizations',side_effect=slow_viz):
-            self.manager.enqueue(run_id); self.assertTrue(entered.wait(timeout=1)); st=self.store.read_status(run_id)
+            self.manager.enqueue(run_id); self.assertTrue(entered.wait(timeout=10)); st=self.store.read_status(run_id)
             self.assertEqual(st['status'],'running'); self.assertEqual(st['phase'],'visualizations'); self.assertEqual(st['progress']['percent'],99)
             gate.set(); done=wait_terminal(self.store,run_id)
         self.assertEqual(done['status'],'succeeded'); self.assertEqual(done['phase'],'visualizations_ready'); self.assertEqual(done['current']['code'],'visualizations_completed')

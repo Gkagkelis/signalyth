@@ -43,7 +43,15 @@ def test_x_v2_uses_balanced_intents_and_current_actor_fields():
         assert len(inp["searchTerms"]) <= 2
         queries.extend(inp["searchTerms"])
     assert len(queries) >= 5
-    assert sum("lang:el" in q for q in queries) == 1
+    # v29: lang:el is the one-anchor-per-route guard. It now sits on the bare
+    # Latin subject route AND on every Greek-script route (X tags those as
+    # Greek), so "exactly one" no longer holds. What must hold instead: it is
+    # never stacked on top of an explicit market word — that would be two
+    # anchors on one route and would drop mixed-language Greeks.
+    assert any("lang:el" in q for q in queries)
+    for q in queries:
+        if "lang:el" in q:
+            assert not any(m in q for m in ("Greece", "Ellada", "Hellas", "Ελλάδα")), q
     assert all("-filter:nativeretweets" in q for q in queries)
     assert plan.search_strategy_version == "master30-search-v1"
     assert plan.target_semantics == "requested_final_analyzable_unique_in_range"
