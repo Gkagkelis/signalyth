@@ -75,7 +75,7 @@ def test_native_market_post_actors_keep_their_market_controls(monkeypatch):
     news = build_collection_plan(_topic_only_draft("news")).model_dump(mode="json")["sources"][0]
 
     assert all(sr["input"].get("location") == "GR" for sr in tiktok["subruns"])
-    assert all(sr["input"].get("gl") == "gr" and sr["input"].get("hl") == "el" for sr in youtube["subruns"])
+    assert all(sr["input"].get("gl") == "GR" and sr["input"].get("hl") == "el" for sr in youtube["subruns"])
     assert all(sr["input"].get("country") == "GR" and sr["input"].get("language") == "el" for sr in news["subruns"])
 
 
@@ -102,7 +102,8 @@ def test_comment_contracts_are_explicit_for_every_production_social():
     assert comment_actor_contract("x")["reply_depth"] == "thread"
     assert comment_actor_contract("tiktok")["parent_batch_limit"] == 1
     assert comment_actor_contract("instagram")["sort"] == "recent"
-    assert comment_actor_contract("facebook")["sort"] == "newest"
+    assert comment_actor_contract("facebook")["sort"] == "recent_activity"
+    assert comment_actor_contract("facebook")["reply_depth"] == "nested_up_to_3"
 
 
 def test_x_comment_contract_is_threaded_per_target_and_exact_dated():
@@ -177,3 +178,18 @@ def test_open_comment_harvest_advances_through_all_untried_cached_parents():
     assert 'if str(durable_bucket).startswith("open")' in source
     assert 'while (\n                source_comment_target > 0' in source
     assert 'exclude_refs=used_open_refs' in source
+
+
+def test_facebook_comment_input_enables_nested_replies_and_date_floor():
+    ref = "https://www.facebook.com/example/posts/123"
+    inp = build_comment_deepening_input(
+        "facebook", [ref], 20, max_per_parent=20,
+        include_replies=True,
+        date_from=date(2026, 9, 14),
+        date_to=date(2026, 9, 23),
+    )
+    assert inp["startUrls"] == [{"url": ref}]
+    assert inp["resultsLimit"] == 20
+    assert inp["includeNestedComments"] is True
+    assert inp["viewOption"] == "RECENT_ACTIVITY"
+    assert inp["onlyCommentsNewerThan"] == "2026-09-14"
