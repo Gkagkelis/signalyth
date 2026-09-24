@@ -452,7 +452,7 @@ def build_page_discovery_input(
         return out
     if source == "instagram":
         out = {"directUrls": refs, "resultsType": "posts", "resultsLimit": limit,
-               "addParentData": True}
+               "skipPinnedPosts": True, "addParentData": True}
         if date_from:
             out["onlyPostsNewerThan"] = date_from
         return out
