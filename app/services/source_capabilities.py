@@ -7,6 +7,87 @@ import re
 from urllib.parse import parse_qs, urlparse
 
 # Public-schema capability knowledge. This is NOT a live verification record.
+# Central acquisition contracts. These encode provider-specific semantics that
+# materially affect recall, batching, date/market guarantees and cost. They are
+# intentionally descriptive rather than pretending every provider has the same
+# knobs.
+DISCOVERY_ACTOR_CONTRACTS = {
+    "x": {
+        "actor_id": "xquik/x-tweet-scraper",
+        "target_field": "searchTerms",
+        "safe_target_batch": 2,
+        "limit_field": "maxItems",
+        "limit_scope": "global",
+        "per_target_limit_field": "maxItemsPerTarget",
+        "sort_field": "queryType",
+        "date_support": "native_exact_inclusive_from_exclusive_until",
+        "market_support": "query_language_geo",
+        "broad_recall": "subject_plus_lang_el_or_explicit_market; Greeklish must not be forced through lang:el",
+    },
+    "tiktok": {
+        "actor_id": "epctex/tiktok-search-scraper",
+        "target_field": "search",
+        "safe_target_batch": 1,
+        "limit_field": "maxItems",
+        "limit_scope": "global",
+        "sort_field": "sortType",
+        "date_support": "native_coarse_then_exact_post_filter",
+        "market_support": "location_iso_country",
+        "broad_recall": "bare subject allowed because native location=GR qualifies the market route",
+    },
+    "instagram": {
+        "actor_id": "apify/instagram-scraper",
+        "target_field": "directUrls",
+        "safe_target_batch": 1,
+        "limit_field": "resultsLimit",
+        "limit_scope": "per_source",
+        "sort_field": None,
+        "date_support": "native_lower_bound_then_exact_post_filter",
+        "market_support": "no_country_wide_filter",
+        "broad_recall": "bare subject hashtag only as bounded post-cleaning semantic probe on market runs",
+    },
+    "facebook": {
+        "actor_id": "scraper_one/facebook-posts-search",
+        "target_field": "query",
+        "safe_target_batch": 1,
+        "limit_field": "resultsCount",
+        "limit_scope": "per_query",
+        "query_max_length": 100,
+        "sort_field": "searchType",
+        "date_support": "native_exact",
+        "market_support": "query_context; location is pinned-place only, not country-wide Greece",
+        "broad_recall": "bare subject only as bounded post-cleaning semantic probe on market runs",
+    },
+    "youtube": {
+        "actor_id": "apidojo/youtube-scraper",
+        "target_field": "keywords",
+        "safe_target_batch": 1,
+        "limit_field": "maxItems",
+        "limit_scope": "global",
+        "sort_field": "sort",
+        "date_support": "native_coarse_then_exact_post_filter",
+        "market_support": "gl_country_plus_hl_language",
+        "broad_recall": "bare subject allowed because gl=GR/hl=el qualify the market route",
+    },
+    "news": {
+        "actor_id": "logiover/google-news-scraper",
+        "target_field": "queries",
+        "safe_target_batch": 2,
+        "limit_field": "maxArticles",
+        "limit_scope": "per_query_feed",
+        "limit_max": 500,
+        "sort_field": None,
+        "date_support": "native_exact",
+        "market_support": "country_plus_language",
+        "broad_recall": "bare subject allowed because country=GR/language=el qualify the market route",
+    },
+}
+
+
+def discovery_actor_contract(source: str) -> dict:
+    return deepcopy(DISCOVERY_ACTOR_CONTRACTS.get(str(source or "").casefold(), {}))
+
+
 # Acquisition contracts live here so provider semantics are not scattered across
 # orchestration code. These are deliberately conservative research defaults:
 # coverage and resumability matter more than minimizing Actor call count.
@@ -36,13 +117,14 @@ COMMENT_ACTOR_CONTRACTS = {
         "reply_depth": "nested",
         "sort": "recent",
     },
-    # Official Apify actor supports nested replies. Five parents per call is a
-    # conservative serverless/runtime batch, not a claimed provider hard limit.
+    # Scraper One uses a per-post resultsLimit and newest-first ordering. Keep
+    # the five-parent cap from the production hotfix; do not leak that limit to
+    # other actors. This actor does not expose a nested-reply control.
     "facebook": {
         "parent_batch_limit": 5,
-        "limit_scope": "global",
-        "reply_depth": "nested_up_to_3",
-        "sort": "recent_activity",
+        "limit_scope": "per_parent",
+        "reply_depth": "top_level",
+        "sort": "newest",
     },
 }
 
@@ -93,13 +175,13 @@ SOURCE_CAPABILITIES = {
         "discovery": "primary_actor",
         "comment_deepening": {
             "mode": "companion_actor",
-            "candidate_actor_id": "apify/facebook-comments-scraper",
+            "candidate_actor_id": "scraper_one/facebook-comments-scraper",
             "input_route": "comments",
-            "input_field": "startUrls",
+            "input_field": "postUrls",
             "public_schema_known": True,
             "live_verified": False,
             "enabled": False,
-            "note": "Official Apify Actor supports Facebook post URLs, up to three nested reply levels, recent-activity ordering and a lower date bound.",
+            "note": "Scraper One accepts concrete Facebook post URLs, a per-post result limit, and newest/relevant/all sorting. Exact date bounds are enforced after normalization.",
         },
     },
     "tiktok": {
@@ -366,20 +448,15 @@ def build_comment_deepening_input(
         # ScrapeSmith's schema uses a per-parent limit rather than maxItems.
         return {"postUrls": refs, "maxCommentsPerPost": per_parent, "sortOrder": "recent"}
     if source == "facebook":
-        # The official Apify Actor is used because the research contract includes
-        # replies-to-comments, not only top-level comments. It returns nested
-        # replies as separate dataset rows (up to three levels). Recent activity
-        # plus the native lower bound protects a bounded research window; the
-        # exact date_to remains enforced by SIGNALYTH after normalization.
-        inp = {
-            "startUrls": [{"url": r} for r in refs],
-            "resultsLimit": max_items,
-            "includeNestedComments": bool(include_replies),
-            "viewOption": "RECENT_ACTIVITY",
+        # scraper_one/facebook-comments-scraper: resultsLimit is PER POST and
+        # newest-first is essential for bounded windows. The actor has no native
+        # date input, so SIGNALYTH enforces date_from/date_to after normalization.
+        # Five-parent batching is enforced by comment_parent_batch_limit().
+        return {
+            "postUrls": refs,
+            "resultsLimit": per_parent,
+            "commentsSortType": "newest",
         }
-        if date_from:
-            inp["onlyCommentsNewerThan"] = str(date_from)
-        return inp
     if source == "youtube":
         return {"startUrls": refs, "maxItems": max_items}
     field = cap.get("input_field")
