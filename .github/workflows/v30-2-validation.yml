@@ -11,6 +11,7 @@ on:
       - 'app/services/collector.py'
       - 'app/templates/index.html'
       - 'tests/test_v30_2_comment_conversation.py'
+      - 'tests/test_comment_deepening.py'
       - 'tests/test_v30_conversation_acquisition.py'
       - '.github/workflows/v30-2-validation.yml'
 
