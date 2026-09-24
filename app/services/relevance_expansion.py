@@ -507,7 +507,11 @@ def _comment_parent_candidate_tier(source: str, row: dict) -> str | None:
     if reasons & {"duplicate_not_independent_evidence","explicit_exclusion_context","high_spam_risk","high_automation_or_manipulation_risk","outside_target_market"}:
         return None
     try:
-        if float(cleaning.get("market_score", 0) or 0) < max(0.45, float(RULESET_CONFIG["market_review_below"])):
+        # Provenance parents still need positive Greek-market evidence, but
+        # 0.45 was too high for legitimate Greeklish prose: two independent
+        # Greeklish markers score 0.30 by design. Keep a stronger-than-review
+        # floor without silently deleting that audience.
+        if float(cleaning.get("market_score", 0) or 0) < max(0.30, float(RULESET_CONFIG["market_review_below"])):
             return None
         if float(cleaning.get("spam_score", 0) or 0) >= float(RULESET_CONFIG["spam_exclude_at"]):
             return None
