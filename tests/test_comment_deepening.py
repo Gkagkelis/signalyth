@@ -78,3 +78,16 @@ def test_comment_can_be_contextually_relevant_via_parent_without_repeating_topic
         "id": "comment:x:1", "platform": "x", "text": "Εμένα από το πρωί δεν δουλεύει τίποτα",
         "date": "2026-09-13T09:00:00+00:00", "author": "person", "url": "https://x.com/u/status/2",
         "evidence_layer": "reply", "parent_post": "1",
+        "parent_context": "Vodafone: μεγάλη διακοπή στο δίκτυο σήμερα στην Ελλάδα",
+        "likes": 1, "comments": 0, "shares": 0, "views": 0, "raw_data": {},
+    }]
+    plan = {
+        "client": "Vodafone", "topic": "Vodafone", "market": "Greece",
+        "core_terms": ["Vodafone"], "context_terms": ["διακοπή", "δίκτυο"],
+        "greeklish_variants": [], "exclusions": [], "target_total": 1,
+        "sources": [{"source": "x", "target_items": 1}],
+    }
+    result = clean_records(rows, plan)
+    cleaned = result["cleaned"][0]
+    assert "contextual_parent_match" in cleaned["cleaning"]["flags"]
+    assert cleaned["cleaning"]["decision"] != "excluded"
