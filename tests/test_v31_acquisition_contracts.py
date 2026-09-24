@@ -15,6 +15,7 @@ from app.services.resilience import DEFAULT_SAFE_BATCH_SIZE, MULTI_TARGET_FIELDS
 from app.services.source_capabilities import (
     build_comment_deepening_input,
     comment_actor_contract,
+    discovery_actor_contract,
 )
 
 
@@ -44,22 +45,30 @@ def _topic_only_draft(source: str) -> AnalysisDraft:
 
 
 @pytest.mark.parametrize("source", ALL_SOURCES)
-def test_topic_only_greece_brief_always_has_a_real_primary_route(monkeypatch, source):
+def test_topic_only_greece_brief_always_has_a_bounded_acquisition_route(monkeypatch, source):
     monkeypatch.setattr("app.services.query_planner.suggest_public_names", lambda _draft: [])
     plan = build_collection_plan(_topic_only_draft(source)).model_dump(mode="json")
     sp = plan["sources"][0]
-    assert sp["subruns"], f"{source} planned zero primary routes with empty keywords"
+    assert sp["subruns"] or sp["semantic_topup_subruns"], (
+        f"{source} planned no acquisition route with empty keywords"
+    )
 
 
-def test_instagram_topic_only_falls_back_to_real_subject_hashtag(monkeypatch):
+def test_instagram_topic_only_uses_bare_subject_only_as_semantic_probe(monkeypatch):
     monkeypatch.setattr("app.services.query_planner.suggest_public_names", lambda _draft: [])
     sp = build_collection_plan(_topic_only_draft("instagram")).model_dump(mode="json")["sources"][0]
-    urls = [
+    primary_urls = [
         u
         for sr in sp["subruns"]
         for u in (sr.get("input", {}).get("directUrls") or [])
     ]
-    assert any("/explore/tags/nike/" in u.casefold() for u in urls)
+    semantic = [
+        sr for sr in sp["semantic_topup_subruns"]
+        if sr.get("purpose") == "semantic_broad_probe"
+    ]
+    assert not any("/explore/tags/nike/" in u.casefold() for u in primary_urls)
+    assert semantic
+    assert "/explore/tags/nike/" in semantic[0]["input"]["directUrls"][0].casefold()
 
 
 def test_broad_probe_can_measure_low_market_yield_without_becoming_unbounded():
@@ -102,8 +111,8 @@ def test_comment_contracts_are_explicit_for_every_production_social():
     assert comment_actor_contract("x")["reply_depth"] == "thread"
     assert comment_actor_contract("tiktok")["parent_batch_limit"] == 1
     assert comment_actor_contract("instagram")["sort"] == "recent"
-    assert comment_actor_contract("facebook")["sort"] == "recent_activity"
-    assert comment_actor_contract("facebook")["reply_depth"] == "nested_up_to_3"
+    assert comment_actor_contract("facebook")["sort"] == "newest"
+    assert comment_actor_contract("facebook")["reply_depth"] == "top_level"
 
 
 def test_x_comment_contract_is_threaded_per_target_and_exact_dated():
@@ -180,7 +189,7 @@ def test_open_comment_harvest_advances_through_all_untried_cached_parents():
     assert 'exclude_refs=used_open_refs' in source
 
 
-def test_facebook_comment_input_enables_nested_replies_and_date_floor():
+def test_facebook_comment_input_preserves_hotfix_contract_and_post_filters_dates():
     ref = "https://www.facebook.com/example/posts/123"
     inp = build_comment_deepening_input(
         "facebook", [ref], 20, max_per_parent=20,
@@ -188,8 +197,30 @@ def test_facebook_comment_input_enables_nested_replies_and_date_floor():
         date_from=date(2026, 9, 14),
         date_to=date(2026, 9, 23),
     )
-    assert inp["startUrls"] == [{"url": ref}]
+    assert inp["postUrls"] == [ref]
     assert inp["resultsLimit"] == 20
-    assert inp["includeNestedComments"] is True
-    assert inp["viewOption"] == "RECENT_ACTIVITY"
-    assert inp["onlyCommentsNewerThan"] == "2026-09-14"
+    assert inp["commentsSortType"] == "newest"
+    assert "startUrls" not in inp
+    assert "onlyCommentsNewerThan" not in inp
+
+
+def test_discovery_contract_matrix_matches_production_actors_and_limit_scopes():
+    expected = {
+        "x": ("xquik/x-tweet-scraper", "global"),
+        "tiktok": ("epctex/tiktok-search-scraper", "global"),
+        "instagram": ("apify/instagram-scraper", "per_source"),
+        "facebook": ("scraper_one/facebook-posts-search", "per_query"),
+        "youtube": ("apidojo/youtube-scraper", "global"),
+        "news": ("logiover/google-news-scraper", "per_query_feed"),
+    }
+    for source, (actor_id, scope) in expected.items():
+        contract = discovery_actor_contract(source)
+        assert contract["actor_id"] == actor_id
+        assert contract["limit_scope"] == scope
+
+
+def test_facebook_discovery_contract_never_claims_pinned_location_is_country_filter():
+    contract = discovery_actor_contract("facebook")
+    assert contract["safe_target_batch"] == 1
+    assert contract["query_max_length"] == 100
+    assert "not country-wide Greece" in contract["market_support"]
