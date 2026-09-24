@@ -32,13 +32,12 @@ from tests.test_whole_pipeline_v19 import FakeApify, FakeModel, _wait_terminal
 
 THREE = ["facebook", "instagram", "tiktok"]
 
-#: Where to cut worker A off. Under v30's diversified first wave a full
-#: three-source run makes 29 Actor calls and the comment layer starts at
-#: call 20 (searches 1-13, semantic probes 14-18, page discovery 19), so
-#: cutting after 21 leaves the run exactly where the live one died: Facebook
-#: comments half-collected, Instagram and TikTok comments not started, a
-#: cleaning file already on disk.
-CUT_AFTER_CALL = 21
+#: Cut after the first completed COMMENT Actor call, not after an absolute
+#: number of Actor calls. Primary-search batching is a source contract and may
+#: legitimately change (v31 changed TikTok global-cap batches from 2 targets to
+#: 1). A fixed total-call index then cuts inside primary collection and tests
+#: the wrong failure.
+CUT_AFTER_CALL = 1
 
 
 def cut_worker_after_call(manager, limit: int):
@@ -51,8 +50,19 @@ def cut_worker_after_call(manager, limit: int):
     original = (manager._deadline_reached, manager._seconds_left,
                 manager._requeue_continuation)
 
+    def is_comment_call(call) -> bool:
+        actor_id, inp = call
+        actor = str(actor_id or "").casefold()
+        return (
+            "comment" in actor
+            or bool(inp.get("postUrls"))
+            or bool(inp.get("replyTweetIds"))
+            or bool(inp.get("threadTweetIds"))
+            or inp.get("mode") in {"replies", "thread"}
+        )
+
     def out_of_time() -> bool:
-        return len(FakeApify.calls) >= limit
+        return sum(1 for call in FakeApify.calls if is_comment_call(call)) >= limit
 
     manager._deadline_reached = lambda margin_seconds=0.0: out_of_time()
     manager._seconds_left = lambda margin_seconds=0.0: (-1.0 if out_of_time() else float("inf"))
@@ -165,8 +175,16 @@ class WorkerHandoffTest(unittest.TestCase):
 
             # The cut has to land where it is supposed to, or this test proves
             # nothing: worker A must have REACHED the comment layer.
-            self.assertGreaterEqual(calls_a, 20,
-                                    f"worker A stopped before the comment layer ({calls_a} calls)")
+            self.assertTrue(
+                any(
+                    "comment" in str(actor_id).casefold()
+                    or inp.get("postUrls")
+                    or inp.get("threadTweetIds")
+                    or inp.get("mode") in {"replies", "thread"}
+                    for actor_id, inp in FakeApify.calls
+                ),
+                f"worker A stopped before the comment layer ({calls_a} calls)",
+            )
             self.assertTrue(
                 (self.store.folder_for(run_id) / "cleaning" / "semantic-candidates.json").exists(),
                 "the cleaning file that used to mislead the next worker is not even there",
@@ -209,7 +227,10 @@ class WorkerHandoffTest(unittest.TestCase):
             new_worker = cut_worker_after_call(self.manager, CUT_AFTER_CALL)
             self.manager._worker(run_id)
             after_a = [c for c in FakeApify.calls]
-            self.assertGreaterEqual(len(after_a), 20, "worker A never got far enough to matter")
+            self.assertTrue(
+                any("comment" in str(actor_id).casefold() for actor_id, _ in after_a),
+                "worker A never reached the comment layer",
+            )
 
             new_worker()
             self.manager._worker(run_id)
@@ -220,8 +241,10 @@ class WorkerHandoffTest(unittest.TestCase):
         def _search_sources(calls):
             out = []
             for actor_id, inp in calls:
-                if not (inp.get("postUrls") or inp.get("replyTweetIds")
-                        or inp.get("mode") == "replies"
+                if not ("comment" in str(actor_id).casefold()
+                        or inp.get("postUrls") or inp.get("replyTweetIds")
+                        or inp.get("threadTweetIds")
+                        or inp.get("mode") in {"replies", "thread"}
                         or inp.get("directUrls") or inp.get("profiles")
                         or inp.get("twitterHandles")):
                     out.append(actor_id)
