@@ -27,6 +27,9 @@ on:
       - 'tests/test_smart_collection_v2.py'
       - 'tests/test_v184_hardening.py'
       - 'tests/test_worker_handoff_v20.py'
+      - 'tests/test_cold_handoff_v21.py'
+      - 'config/source_registry.json'
+      - 'app/registry.py'
       - '.github/workflows/v30-2-validation.yml'
 
 permissions:
