@@ -6,19 +6,59 @@ import re
 from urllib.parse import parse_qs, urlparse
 
 # Public-schema capability knowledge. This is NOT a live verification record.
-# Companion Actors remain OFF until explicitly paid-smoke-tested and committed.
-# Provider input caps that must be respected by the orchestration layer.
-# scraper_one/facebook-comments-scraper currently accepts at most 5 postUrls
-# per Actor run. Sending a larger list is outside the published Actor schema and
-# can produce empty/invalid harvests even when the parent posts have comments.
-COMMENT_PARENT_BATCH_LIMITS = {
-    "facebook": 5,
+# Acquisition contracts live here so provider semantics are not scattered across
+# orchestration code. These are deliberately conservative research defaults:
+# coverage and resumability matter more than minimizing Actor call count.
+COMMENT_ACTOR_CONTRACTS = {
+    # Xquik's maxItems is global across a run; maxItemsPerTarget prevents one
+    # thread from consuming the whole quota. mode=thread is used so nested
+    # conversation replies are not silently lost (mode=replies is direct-only).
+    "x": {
+        "parent_batch_limit": 2,
+        "limit_scope": "global",
+        "reply_depth": "thread",
+        "sort": "actor_thread",
+    },
+    # epctex maxItems is a run-level cap across startUrls. One parent per call
+    # guarantees every selected video receives an attempt.
+    "tiktok": {
+        "parent_batch_limit": 1,
+        "limit_scope": "global",
+        "reply_depth": "nested_when_includeReplies",
+        "sort": "actor_default",
+    },
+    # ScrapeSmith exposes a per-post cap. Small batches bound worker wall time;
+    # recent ordering protects exact-date-window research from old popular rows.
+    "instagram": {
+        "parent_batch_limit": 5,
+        "limit_scope": "per_parent",
+        "reply_depth": "nested",
+        "sort": "recent",
+    },
+    # Scraper One exposes a per-post cap. Five URLs is compatible with the
+    # documented free-plan ceiling and keeps paid/serverless calls bounded too.
+    "facebook": {
+        "parent_batch_limit": 5,
+        "limit_scope": "per_parent",
+        "reply_depth": "actor_available",
+        "sort": "newest",
+    },
 }
 
 
+def comment_actor_contract(source: str) -> dict:
+    """Curated orchestration semantics for one comment/reply Actor."""
+    return deepcopy(COMMENT_ACTOR_CONTRACTS.get(str(source or "").casefold(), {
+        "parent_batch_limit": 1,
+        "limit_scope": "global",
+        "reply_depth": "unknown",
+        "sort": "actor_default",
+    }))
+
+
 def comment_parent_batch_limit(source: str) -> int:
-    """Maximum concrete parent refs safe in one comment Actor call."""
-    return max(1, int(COMMENT_PARENT_BATCH_LIMITS.get(str(source or "").casefold(), 40)))
+    """Maximum concrete parent refs sent in one comment Actor call."""
+    return max(1, int(comment_actor_contract(source).get("parent_batch_limit") or 1))
 
 
 SOURCE_CAPABILITIES = {
@@ -151,6 +191,7 @@ def comments_forecast(source: str, requested: bool, registry_cfg: dict | None = 
         "requested": bool(requested),
         "status": status,
         **cap,
+        "orchestration_contract": comment_actor_contract(source),
         "candidate_actor_id": configured_actor,
         "live_verified": live_verified,
         "contract_ready": contract_ready,
@@ -302,12 +343,19 @@ def build_comment_deepening_input(
     per_parent = max(1, int(max_per_parent or math.ceil(max_items / max(1, len(refs)))))
 
     if source == "x":
-        return {"mode": "replies", "replyTweetIds": [_x_id(x) for x in refs], "maxItems": max_items}
+        # "replies" is direct-only in Xquik. Thread mode preserves replies to
+        # replies; the normalizer drops the root tweet and keeps its descendants.
+        return {
+            "mode": "thread",
+            "threadTweetIds": [_x_id(x) for x in refs],
+            "maxItems": max_items,
+            "maxItemsPerTarget": max(1, per_parent),
+        }
     if source == "tiktok":
         return {"startUrls": refs, "includeReplies": bool(include_replies), "maxItems": max_items}
     if source == "instagram":
         # ScrapeSmith's schema uses a per-parent limit rather than maxItems.
-        return {"postUrls": refs, "maxCommentsPerPost": per_parent, "sortOrder": "popular"}
+        return {"postUrls": refs, "maxCommentsPerPost": per_parent, "sortOrder": "recent"}
     if source == "facebook":
         # Scraper One caps postUrls at 5. Batching is handled by the caller.
         # For a bounded research window request NEWEST first: "all"/"relevant"
