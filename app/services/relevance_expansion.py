@@ -1755,82 +1755,107 @@ def adaptive_expand_after_cleaning(
             got_open = 0 if "open" in done_buckets else harvest(
                 ranked_refs, ranked_meta, open_wanted, "open")
 
-            # If the explicit target is still short, try ONE more bounded wave
-            # using previously untried eligible parents. This is specifically for
-            # Actors whose engagement counts under-report which posts have comments.
+            # Continue through the already-discovered qualified parent pool until
+            # the explicit target is met, the pool is exhausted, the budget blocks,
+            # or this worker must hand off. This replaces the old hard-coded
+            # retry+wave2 ceiling: a 50-comment target could otherwise inspect only
+            # 36 of a 45-parent pool and stop even while safe untried parents existed.
+            #
+            # Selection is based on DURABLY attempted refs across every open_* pass,
+            # so a continuation worker advances to new parents instead of selecting
+            # the same retry wave and no-oping forever.
             got_open_retry = 0
+            got_open_wave2 = 0
             retry_refs: list[str] = []
             retry_meta: list[dict] = []
-            retry_mode = ""
-            missing_after_open = max(0, source_comment_target - collected_count())
-            if (
-                source_comment_target > 0
-                and missing_after_open > 0
-                and not last_call_hit_deadline
-                and not deadline_check()
-            ):
-                used_refs = set(owned_refs) | set(ranked_refs)
-                retry_refs, retry_meta, retry_mode = _comment_seed_refs(
-                    source,
-                    comment_cleaned,
-                    max_seeds=max_parents,
-                    exclude_refs=used_refs,
-                )
-                if retry_refs:
-                    retry_wanted = min(
-                        missing_after_open,
-                        len(retry_refs) * max_per_parent,
-                    )
-                    got_open_retry = harvest(
-                        retry_refs,
-                        retry_meta,
-                        retry_wanted,
-                        "open_retry",
-                    )
-                    audit.setdefault("comment_retry", {})[source] = {
-                        "selection": retry_mode,
-                        "parents": len(retry_refs),
-                        "requested": retry_wanted,
-                        "collected": got_open_retry,
-                    }
-
-            # One additional bounded harvest wave from the ALREADY-DISCOVERED
-            # parent cache. No new search Actor call is made here; this preserves
-            # the worker-handoff invariant that a paid discovery route is never
-            # bought twice on a continuation.
-            got_open_wave2 = 0
             wave2_refs: list[str] = []
             wave2_meta: list[dict] = []
-            missing_after_retry = max(0, source_comment_target - collected_count())
-            if (
+            extra_open_waves: list[dict] = []
+            extra_wave_index = 1
+
+            while (
                 source_comment_target > 0
-                and missing_after_retry > 0
+                and collected_count() < source_comment_target
                 and not last_call_hit_deadline
                 and not deadline_check()
             ):
-                used_refs = set(owned_refs) | set(ranked_refs) | set(retry_refs)
-                wave2_refs, wave2_meta, wave2_mode = _comment_seed_refs(
+                durable_harvest_state = store.read(
+                    folder / "comment-harvest-state.json", {}
+                ) or {}
+                durable_source_state = dict(
+                    durable_harvest_state.get(source) or {}
+                )
+                durable_by_bucket = dict(
+                    durable_source_state.get("attempted_refs_by_bucket") or {}
+                )
+                used_open_refs = set(owned_refs)
+                for durable_bucket, durable_refs in durable_by_bucket.items():
+                    if str(durable_bucket).startswith("open"):
+                        used_open_refs.update(str(x) for x in (durable_refs or []))
+
+                extra_refs, extra_meta, extra_mode = _comment_seed_refs(
                     source,
                     comment_cleaned,
                     max_seeds=max_parents,
-                    exclude_refs=used_refs,
+                    exclude_refs=used_open_refs,
                 )
-                if wave2_refs:
-                    wave2_wanted = min(
-                        missing_after_retry,
-                        len(wave2_refs) * max_per_parent,
-                    )
-                    got_open_wave2 = harvest(
-                        wave2_refs,
-                        wave2_meta,
-                        wave2_wanted,
-                        "open_wave2",
-                    )
+                if not extra_refs:
+                    break
+
+                missing_now = max(
+                    0, source_comment_target - collected_count()
+                )
+                extra_wanted = min(
+                    missing_now,
+                    len(extra_refs) * max_per_parent,
+                )
+                if extra_wanted <= 0:
+                    break
+
+                extra_bucket = f"open_extra_{extra_wave_index}"
+                extra_got = harvest(
+                    extra_refs,
+                    extra_meta,
+                    extra_wanted,
+                    extra_bucket,
+                )
+                extra_open_waves.append({
+                    "wave": extra_wave_index,
+                    "bucket": extra_bucket,
+                    "selection": extra_mode,
+                    "parents": len(extra_refs),
+                    "requested": extra_wanted,
+                    "collected": extra_got,
+                    "discovery_reused_cached_pool": True,
+                })
+
+                # Preserve legacy audit/status fields while allowing any number
+                # of bounded extra waves behind them.
+                if extra_wave_index == 1:
+                    retry_refs, retry_meta = extra_refs, extra_meta
+                    got_open_retry = extra_got
+                elif extra_wave_index == 2:
+                    wave2_refs, wave2_meta = extra_refs, extra_meta
+                    got_open_wave2 = extra_got
+
+                extra_wave_index += 1
+
+            if extra_open_waves:
+                audit.setdefault("comment_extra_waves", {})[source] = extra_open_waves
+                first = extra_open_waves[0]
+                audit.setdefault("comment_retry", {})[source] = {
+                    "selection": first["selection"],
+                    "parents": first["parents"],
+                    "requested": first["requested"],
+                    "collected": first["collected"],
+                }
+                if len(extra_open_waves) > 1:
+                    second = extra_open_waves[1]
                     audit.setdefault("comment_wave2", {})[source] = {
-                        "selection": wave2_mode,
-                        "parents": len(wave2_refs),
-                        "requested": wave2_wanted,
-                        "collected": got_open_wave2,
+                        "selection": second["selection"],
+                        "parents": second["parents"],
+                        "requested": second["requested"],
+                        "collected": second["collected"],
                         "discovery_reused_cached_pool": True,
                     }
 
