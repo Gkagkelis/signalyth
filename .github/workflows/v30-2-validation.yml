@@ -21,6 +21,12 @@ on:
       - 'app/main.py'
       - 'tests/test_conversation_context_v29.py'
       - 'tests/test_v31_acquisition_contracts.py'
+      - 'tests/test_master30_contract.py'
+      - 'tests/test_owned_pages_flow_v19.py'
+      - 'tests/test_relevance_expansion_v2.py'
+      - 'tests/test_smart_collection_v2.py'
+      - 'tests/test_v184_hardening.py'
+      - 'tests/test_worker_handoff_v20.py'
       - '.github/workflows/v30-2-validation.yml'
 
 permissions:
