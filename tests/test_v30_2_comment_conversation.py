@@ -90,13 +90,11 @@ def test_deadline_state_is_never_terminal():
     ) is False
 
 
-def test_second_parent_discovery_wave_is_deeper_but_still_hard_bounded():
-    first = _conversation_probe_target(50, 12, wave=1)
-    second = _conversation_probe_target(50, 12, wave=2)
-    assert first == 25
-    assert second > first
-    assert second <= 60
-    assert _conversation_probe_target(500, 12, wave=2) == 60
+def test_parent_discovery_pool_is_deep_enough_for_multiple_waves_but_bounded():
+    assert _conversation_probe_target(50, 12) == 45
+    assert _conversation_probe_target(100, 12) == 60
+    assert _conversation_probe_target(500, 12) == 60
+    assert _conversation_probe_target(0, 12) == 0
 
 
 def test_frontend_uses_source_collection_count_not_total_normalized_candidates():
@@ -112,8 +110,9 @@ def test_frontend_does_not_mark_deferred_comments_done():
     assert "else if(st==='deferred'){cls='queued'" in html
 
 
-def test_backend_contains_single_bounded_wave2_parent_discovery():
+def test_backend_wave2_reuses_cached_parent_pool_without_new_search():
     source = Path("app/services/relevance_expansion.py").read_text(encoding="utf-8")
-    assert source.count("wave=2,") == 1
+    assert "wave=2," not in source
     assert '"open_wave2"' in source
     assert '"wave2_parents"' in source
+    assert '"discovery_reused_cached_pool": True' in source
