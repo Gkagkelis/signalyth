@@ -253,6 +253,30 @@ def comment_source_is_complete(row: dict | None) -> bool:
     return set(COMMENT_BUCKETS) <= {str(b) for b in (row.get("buckets_done") or [])}
 
 
+def comment_fulfillment_status(
+    collected: int,
+    target: int,
+    every_pass_ran: bool,
+) -> tuple[str, str | None, int]:
+    """Return truthful terminal status for one source's comment layer.
+
+    Completing all configured passes is not the same as fulfilling the requested
+    comment target. A source that exhausted its eligible parents at 2/80 is a
+    terminal shortfall, not "collected".
+    """
+    collected = max(0, int(collected or 0))
+    target = max(0, int(target or 0))
+    shortfall = max(0, target - collected) if target > 0 else 0
+
+    if not every_pass_ran:
+        return "deferred", "worker_deadline_or_unfinished_pass", shortfall
+    if collected <= 0:
+        return "failed", "no_comments_returned", shortfall
+    if target > 0 and collected < target:
+        return "shortfall", "source_exhausted_before_comment_target", shortfall
+    return "collected", None, 0
+
+
 def operator_page_refs(plan: dict, source: str) -> list[str]:
     """Pages/accounts the operator named for this source, ready for its Actor."""
     raw = (plan.get("source_pages") or {}).get(source) or []
@@ -464,35 +488,58 @@ def _collect_seeds(source: str, rows: list[dict], max_seeds: int, skip_reported_
     return refs, meta
 
 
-def _comment_seed_refs(source: str, cleaned: list[dict], max_seeds: int = 40) -> tuple[list[str], list[dict], str]:
-    """Pick the relevant parent posts whose comments are worth buying.
+def _comment_seed_refs(
+    source: str,
+    cleaned: list[dict],
+    max_seeds: int = 40,
+    *,
+    exclude_refs: set[str] | None = None,
+) -> tuple[list[str], list[dict], str]:
+    """Pick useful parent posts without trusting engagement counts too much.
 
-    Returns (refs, meta, selection_mode). Preference order:
-
-    1. Parents the discovery Actor reports as having comments (or whose count
-       it does not report at all).
-    2. If that yields nothing because every row reports exactly zero — the
-       common case for search endpoints, which frequently omit real engagement
-       counts — a small bounded probe of the most engaged parents, so the
-       comment layer is attempted instead of silently skipped.
+    Search Actors often under-report commentsCount. Therefore finding one or two
+    parents with a reported non-zero count is NOT enough reason to stop parent
+    discovery. We keep those strong parents first, then add a bounded number of
+    eligible zero/unknown-count parents. A later retry wave can ask for the next
+    batch by passing ``exclude_refs``.
     """
-    # A post can be a doorway to the audience without being usable evidence
-    # itself: a page's own announcement often says nothing about the brand in
-    # its text, yet the argument is all in its comments. Blanket-excluding every
-    # row cleaning rejected therefore threw away the best parents. What stays
-    # blocked is what should never buy a second scrape — duplicates, spam,
-    # manipulation, explicit exclusions and clearly outside-market rows.
-    rows = [r for r in cleaned if _comment_parent_candidate_allowed(source, r)]
+    excluded = {str(x) for x in (exclude_refs or set()) if str(x or "").strip()}
+
+    rows: list[dict] = []
+    for row in cleaned:
+        if not _comment_parent_candidate_allowed(source, row):
+            continue
+        ref = _seed_ref(source, row)
+        if not ref or ref in excluded:
+            continue
+        rows.append(row)
+
     rows.sort(key=parent_heat_score, reverse=True)
     if not rows:
         return [], [], "no_relevant_parent_rows"
 
     refs, meta = _collect_seeds(source, rows, max_seeds, skip_reported_zero=True)
     if refs:
-        return refs, meta, "reported_comments"
+        probe_cap = min(max_seeds, len(refs) + UNRELIABLE_COUNT_PROBE_PARENTS)
+        all_refs, all_meta = _collect_seeds(
+            source, rows, probe_cap, skip_reported_zero=False,
+        )
+        seen = set(refs)
+        added = 0
+        for ref, item in zip(all_refs, all_meta):
+            if ref in seen:
+                continue
+            refs.append(ref)
+            meta.append(item)
+            seen.add(ref)
+            added += 1
+            if len(refs) >= probe_cap:
+                break
+        return refs, meta, "reported_comments_plus_probe" if added else "reported_comments"
 
     refs, meta = _collect_seeds(
-        source, rows, min(max_seeds, UNRELIABLE_COUNT_PROBE_PARENTS), skip_reported_zero=False,
+        source, rows, min(max_seeds, UNRELIABLE_COUNT_PROBE_PARENTS),
+        skip_reported_zero=False,
     )
     if refs:
         return refs, meta, "probe_unreliable_counts"
@@ -924,10 +971,21 @@ def adaptive_expand_after_cleaning(
             done_buckets = {str(b) for b in (prior_row.get("buckets_done") or [])}
             existing_comments = store.read(folder / f"normalized-comments-{source}.json", []) or []
             if comment_source_is_complete(prior_row):
-                audit["warnings"].append(f"{source}:comment_deepening_already_collected")
-                _comment_status_update(folder, source, status="collected",
-                                       collected=len(existing_comments),
-                                       reason="already_collected_in_previous_invocation")
+                planned_target = int((plan.get("per_source_comments") or {}).get(source, 0) or 0)
+                terminal_status, terminal_reason, terminal_shortfall = comment_fulfillment_status(
+                    len(existing_comments), planned_target, True,
+                )
+                audit["warnings"].append(
+                    f"{source}:comment_deepening_already_terminal:{terminal_status}"
+                )
+                _comment_status_update(
+                    folder, source,
+                    status=terminal_status,
+                    collected=len(existing_comments),
+                    target=planned_target,
+                    shortfall=terminal_shortfall,
+                    reason=terminal_reason or "already_collected_in_previous_invocation",
+                )
                 continue
             if done_buckets:
                 audit["warnings"].append(
@@ -1087,6 +1145,45 @@ def adaptive_expand_after_cleaning(
             got_open = 0 if "open" in done_buckets else harvest(
                 ranked_refs, ranked_meta, open_wanted, "open")
 
+            # If the explicit target is still short, try ONE more bounded wave
+            # using previously untried eligible parents. This is specifically for
+            # Actors whose engagement counts under-report which posts have comments.
+            got_open_retry = 0
+            retry_refs: list[str] = []
+            retry_meta: list[dict] = []
+            retry_mode = ""
+            missing_after_open = max(0, source_comment_target - collected_count())
+            if (
+                source_comment_target > 0
+                and missing_after_open > 0
+                and not last_call_hit_deadline
+                and not deadline_check()
+            ):
+                used_refs = set(owned_refs) | set(ranked_refs)
+                retry_refs, retry_meta, retry_mode = _comment_seed_refs(
+                    source,
+                    cleaned,
+                    max_seeds=max_parents,
+                    exclude_refs=used_refs,
+                )
+                if retry_refs:
+                    retry_wanted = min(
+                        missing_after_open,
+                        len(retry_refs) * max_per_parent,
+                    )
+                    got_open_retry = harvest(
+                        retry_refs,
+                        retry_meta,
+                        retry_wanted,
+                        "open_retry",
+                    )
+                    audit.setdefault("comment_retry", {})[source] = {
+                        "selection": retry_mode,
+                        "parents": len(retry_refs),
+                        "requested": retry_wanted,
+                        "collected": got_open_retry,
+                    }
+
             # ---- C. Whatever open search could not deliver comes back here ------
             # An empty bucket helps nobody: if the wider web returned little, the
             # remainder is taken from the pages the operator trusts.
@@ -1105,27 +1202,48 @@ def adaptive_expand_after_cleaning(
                                        min(missing, len(owned_refs) * max_per_parent), "owned_backfill")
 
             collected_now = collected_count()
+            every_pass_ran = set(COMMENT_BUCKETS) <= done_buckets
+            terminal_status, terminal_reason, comment_shortfall = comment_fulfillment_status(
+                collected_now,
+                source_comment_target,
+                every_pass_ran,
+            )
             audit.setdefault("comment_buckets", {})[source] = {
                 "target": source_comment_target,
-                "owned_quota": owned_quota, "open_quota": open_quota,
-                "owned": got_owned, "open": got_open, "backfill": got_backfill,
-                "owned_parents": len(owned_refs), "open_parents": len(ranked_refs),
+                "shortfall": comment_shortfall,
+                "owned_quota": owned_quota,
+                "open_quota": open_quota,
+                "owned": got_owned,
+                "open": got_open,
+                "open_retry": got_open_retry,
+                "backfill": got_backfill,
+                "owned_parents": len(owned_refs),
+                "open_parents": len(ranked_refs),
+                "retry_parents": len(retry_refs),
             }
-            every_pass_ran = set(COMMENT_BUCKETS) <= done_buckets
             if not every_pass_ran:
-                # Cut short by the clock. Saying "collected" here is what made
-                # the next worker skip the rest of this source for good.
                 audit["deadline_reached"] = True
+
+            total_parents = len(set(owned_refs) | set(ranked_refs) | set(retry_refs))
             _comment_status_update(
                 folder, source,
-                status=("collected" if collected_now else "failed") if every_pass_ran else "deferred",
+                status=terminal_status,
                 buckets_done=sorted(done_buckets),
                 collected=collected_now,
-                owned=got_owned, open_web=got_open, backfill=got_backfill,
+                target=source_comment_target,
+                shortfall=comment_shortfall,
+                parents=total_parents,
+                owned=got_owned,
+                open_web=got_open,
+                open_retry=got_open_retry,
+                backfill=got_backfill,
                 selection=selection_mode,
-                reason=None if collected_now else "no_comments_returned",
-                current_message=(f"Comments — {source}: {collected_now} "
-                                 f"({got_owned + got_backfill} own pages, {got_open} open search)"),
+                reason=terminal_reason,
+                current_message=(
+                    f"Comments — {source}: {collected_now}/{source_comment_target}"
+                    if source_comment_target > 0
+                    else f"Comments — {source}: {collected_now}"
+                ),
             )
             shortfall = int(report.get("trusted_sample_shortfall", 0) or 0)
 
