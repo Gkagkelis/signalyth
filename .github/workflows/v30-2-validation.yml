@@ -5,6 +5,7 @@ on:
     branches:
       - fix/v30-2-comment-conversation
       - fix/facebook-comment-harvest-now
+      - fix/v31-systemic-acquisition-contracts
     paths:
       - 'app/services/relevance_expansion.py'
       - 'app/services/source_capabilities.py'
@@ -13,6 +14,13 @@ on:
       - 'tests/test_v30_2_comment_conversation.py'
       - 'tests/test_comment_deepening.py'
       - 'tests/test_v30_conversation_acquisition.py'
+      - 'app/services/comment_deepening.py'
+      - 'app/services/cleaning.py'
+      - 'app/services/query_planner.py'
+      - 'app/services/resilience.py'
+      - 'app/main.py'
+      - 'tests/test_conversation_context_v29.py'
+      - 'tests/test_v31_acquisition_contracts.py'
       - '.github/workflows/v30-2-validation.yml'
 
 permissions:
