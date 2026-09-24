@@ -819,22 +819,25 @@ def _source_semantic_shortfall(report: dict, source: str, target: int) -> int:
     return max(0, target - analyzable)
 
 
-def _conversation_probe_target(comment_target: int, max_parents: int, wave: int = 1) -> int:
-    """Bounded candidate target for conversation-parent discovery.
+def _conversation_probe_target(comment_target: int, max_parents: int) -> int:
+    """Bounded parent-candidate pool sized for multiple comment harvest waves.
 
-    Wave 1 is conservative. Wave 2 is only reached after eligible parents were
-    actually tried and the comment target is still short, so it may look deeper
-    while remaining hard-capped.
+    Discovery itself runs once and is durable. We deliberately collect enough
+    qualified parent candidates up front to support more than one harvest wave
+    without re-running the same paid search on a continuation worker.
     """
     comment_target = max(0, int(comment_target or 0))
     max_parents = max(1, int(max_parents or 1))
-    wave = max(1, int(wave or 1))
     if comment_target <= 0:
         return 0
-    base = min(60, max(12, max_parents * 2, math.ceil(comment_target / 2)))
-    if wave <= 1:
-        return base
-    return min(60, max(base + max_parents, math.ceil(comment_target * 0.9)))
+    return min(
+        60,
+        max(
+            24,
+            max_parents * 3,
+            math.ceil(comment_target * 0.9),
+        ),
+    )
 
 def _conversation_parent_is_strong(source: str, row: dict) -> bool:
     if not _comment_parent_candidate_allowed(source, row):
@@ -897,12 +900,12 @@ def _discover_conversation_parent_candidates(
     deadline_check,
     time_left,
     heartbeat,
-    wave: int = 1,
 ) -> list[dict]:
     """Discover extra parent posts without adding them to analysis evidence.
 
-    Wave 2 is a single bounded deeper pass used only after already-qualified
-    parents were tried and still produced a comment shortfall.
+    The paid discovery pass is durable and runs once per route. Later comment
+    retries consume untried parents from this cached pool instead of paying for
+    the same search again after a worker handoff.
     """
     cache_path = folder / f"conversation-parent-candidates-{source}.json"
     cached = store.read(cache_path, []) or []
@@ -911,8 +914,7 @@ def _discover_conversation_parent_candidates(
         for row in cached
         if isinstance(row, dict) and row.get("id")
     }
-    wave = max(1, int(wave or 1))
-    probe_target = _conversation_probe_target(comment_target, max_parents, wave=wave)
+    probe_target = _conversation_probe_target(comment_target, max_parents)
     if probe_target <= 0 or len(cached_by_id) >= probe_target:
         return list(cached_by_id.values())
 
@@ -953,13 +955,12 @@ def _discover_conversation_parent_candidates(
         if cancel_check() or deadline_check():
             break
         purpose = str(sr.get("purpose") or f"route_{idx+1}")
-        route_key = f"wave{wave}:{idx}:{purpose}"
+        route_key = f"{idx}:{purpose}"
         if route_key in done:
             continue
         missing_candidates = max(1, probe_target - len(cached_by_id))
         remaining_routes = max(1, route_count - idx)
-        per_route_cap = 15 if wave <= 1 else 30
-        wanted = min(per_route_cap, max(4, math.ceil(missing_candidates / remaining_routes)))
+        wanted = min(30, max(4, math.ceil(missing_candidates / remaining_routes)))
         inp = _conversation_probe_input(
             source, dict(sr.get("input") or {}), wanted, date_from, date_to
         )
@@ -1003,7 +1004,6 @@ def _discover_conversation_parent_candidates(
 
         audit.setdefault("conversation_parent_discovery", {}).setdefault(source, []).append({
             "route": purpose,
-            "wave": wave,
             "requested": wanted,
             "qualified_candidates_total": len(cached_by_id),
             "target_candidates": probe_target,
@@ -1633,9 +1633,10 @@ def adaptive_expand_after_cleaning(
                         "collected": got_open_retry,
                     }
 
-            # One deeper bounded discovery wave. This does NOT relax subject or
-            # market qualification; it only looks further down the same planned
-            # routes after already-qualified parents did not fulfill the target.
+            # One additional bounded harvest wave from the ALREADY-DISCOVERED
+            # parent cache. No new search Actor call is made here; this preserves
+            # the worker-handoff invariant that a paid discovery route is never
+            # bought twice on a continuation.
             got_open_wave2 = 0
             wave2_refs: list[str] = []
             wave2_meta: list[dict] = []
@@ -1647,30 +1648,6 @@ def adaptive_expand_after_cleaning(
                 and not deadline_check()
             ):
                 used_refs = set(owned_refs) | set(ranked_refs) | set(retry_refs)
-                wave2_parent_rows = _discover_conversation_parent_candidates(
-                    folder,
-                    plan,
-                    sp,
-                    source,
-                    comment_target=source_comment_target,
-                    max_parents=max_parents,
-                    date_from=date_from,
-                    date_to=date_to,
-                    audit=audit,
-                    store=store,
-                    runner=runner,
-                    cancel_check=cancel_check,
-                    deadline_check=deadline_check,
-                    time_left=time_left,
-                    heartbeat=heartbeat,
-                    wave=2,
-                )
-                wave2_pool = {
-                    str(row.get("id")): row
-                    for row in [*comment_cleaned, *wave2_parent_rows]
-                    if isinstance(row, dict) and row.get("id")
-                }
-                comment_cleaned = list(wave2_pool.values())
                 wave2_refs, wave2_meta, wave2_mode = _comment_seed_refs(
                     source,
                     comment_cleaned,
@@ -1693,6 +1670,7 @@ def adaptive_expand_after_cleaning(
                         "parents": len(wave2_refs),
                         "requested": wave2_wanted,
                         "collected": got_open_wave2,
+                        "discovery_reused_cached_pool": True,
                     }
 
             # ---- C. Whatever open search could not deliver comes back here ------
