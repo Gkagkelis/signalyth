@@ -133,10 +133,13 @@ def test_facebook_comment_actor_requests_newest_for_bounded_date_windows():
     ]
     inp = build_comment_deepening_input(
         "facebook", refs, 50, max_per_parent=10, include_replies=True,
+        date_from="2026-09-14",
     )
-    assert len(inp["postUrls"]) == 5
-    assert inp["resultsLimit"] == 10
-    assert inp["commentsSortType"] == "newest"
+    assert len(inp["startUrls"]) == 5
+    assert inp["resultsLimit"] == 50
+    assert inp["includeNestedComments"] is True
+    assert inp["viewOption"] == "RECENT_ACTIVITY"
+    assert inp["onlyCommentsNewerThan"] == "2026-09-14"
 
 
 def test_comment_harvest_persists_batch_progress_across_worker_handoffs():
