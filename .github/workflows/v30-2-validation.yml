@@ -8,6 +8,7 @@ on:
       - 'app/services/relevance_expansion.py'
       - 'app/templates/index.html'
       - 'tests/test_v30_2_comment_conversation.py'
+      - 'tests/test_v30_conversation_acquisition.py'
       - '.github/workflows/v30-2-validation.yml'
 
 permissions:
