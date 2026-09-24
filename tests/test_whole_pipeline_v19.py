@@ -454,7 +454,13 @@ class WorkerReplacedTest(WholePipelineTest):
             for s in ("facebook", "instagram"))
         self.assertGreater(before_comments, 0, "the first pass collected no comments")
 
-        # The machine that ran it is gone. Everything local disappears.
+        # The machine that ran it is gone. Everything local disappears —
+        # INCLUDING its process. `_wait_terminal` returns the moment the status
+        # turns terminal, but the worker thread may still be inside its final
+        # checkpoint, writing into this very folder; wiping it under a live
+        # writer produced an intermittent FileNotFoundError that failed a
+        # different test each run. The process dies first, then the disk.
+        self.manager.shutdown(wait=True)
         shutil.rmtree(folder)
         self.assertFalse(folder.exists())
 

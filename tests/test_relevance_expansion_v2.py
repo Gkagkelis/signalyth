@@ -93,7 +93,11 @@ def test_reply_deepening_runs_when_comments_on_and_no_collision(tmp_path):
     }])
     result = adaptive_expand_after_cleaning(tmp_path, plan, report, runner=runner)
     assert runner.calls and runner.calls[0][1]["mode"] == "replies"
-    assert runner.calls[0][1]["replyTweetIds"] == ["400"]
+    # A reported zero is a ranking signal, not a verdict: 401 may be topped up
+    # as an extra parent, but 400 — the one that REPORTED replies — comes first.
+    reply_ids = [str(x) for x in runner.calls[0][1]["replyTweetIds"]]
+    assert reply_ids[0] == "400"
+    assert set(reply_ids) <= {"400", "401"}
     assert result["report"]["trusted_sample_shortfall"] == 0
 
 
