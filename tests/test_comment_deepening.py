@@ -1,14 +1,23 @@
 from app.models import SourceConfigUpdate
 from app.services.comment_deepening import normalize_comment_dataset
 from app.services.cleaning import clean_records
-from app.services.source_capabilities import build_comment_deepening_input, comments_forecast
+from app.services.source_capabilities import (
+    build_comment_deepening_input,
+    comment_parent_batch_limit,
+    comments_forecast,
+)
 
 
 def test_comment_input_shapes_are_actor_specific():
-    assert build_comment_deepening_input("x", ["https://x.com/u/status/123"], 7)["replyTweetIds"] == ["123"]
+    x = build_comment_deepening_input(
+        "x", ["https://x.com/u/status/123"], 7, max_per_parent=7,
+    )
+    assert x["mode"] == "thread"
+    assert x["threadTweetIds"] == ["123"]
+    assert x["maxItemsPerTarget"] == 7
     assert build_comment_deepening_input("tiktok", ["https://www.tiktok.com/@u/video/123"], 9)["includeReplies"] is True
     ig = build_comment_deepening_input("instagram", ["https://www.instagram.com/p/ABC/"], 12, max_per_parent=5)
-    assert ig == {"postUrls": ["https://www.instagram.com/p/ABC/"], "maxCommentsPerPost": 5, "sortOrder": "popular"}
+    assert ig == {"postUrls": ["https://www.instagram.com/p/ABC/"], "maxCommentsPerPost": 5, "sortOrder": "recent"}
     fb = build_comment_deepening_input("facebook", ["https://www.facebook.com/x/posts/1"], 12, max_per_parent=6)
     assert fb["resultsLimit"] == 6 and fb["commentsSortType"] == "newest"
 
@@ -91,3 +100,67 @@ def test_comment_can_be_contextually_relevant_via_parent_without_repeating_topic
     cleaned = result["cleaned"][0]
     assert "contextual_parent_match" in cleaned["cleaning"]["flags"]
     assert cleaned["cleaning"]["decision"] != "excluded"
+
+
+
+def test_comment_actor_parent_batch_contracts_protect_coverage():
+    assert comment_parent_batch_limit("x") == 2
+    assert comment_parent_batch_limit("tiktok") == 1
+    assert comment_parent_batch_limit("instagram") == 5
+    assert comment_parent_batch_limit("facebook") == 5
+
+
+def test_x_thread_normalization_keeps_nested_replies_but_drops_root():
+    rows = normalize_comment_dataset("x", [
+        {
+            "id": "123", "text": "root", "createdAt": "2026-09-18T09:00:00Z",
+            "authorUsername": "root", "conversationId": "123",
+            "url": "https://x.com/root/status/123",
+        },
+        {
+            "id": "200", "text": "direct", "createdAt": "2026-09-18T10:00:00Z",
+            "authorUsername": "a", "conversationId": "123", "sourceTweetId": "123",
+            "inReplyToId": "123", "url": "https://x.com/a/status/200",
+        },
+        {
+            "id": "201", "text": "nested", "createdAt": "2026-09-18T10:01:00Z",
+            "authorUsername": "b", "conversationId": "123", "sourceTweetId": "123",
+            "inReplyToId": "200", "url": "https://x.com/b/status/201",
+        },
+    ], seed_refs=["123"])
+    assert [r["comment_id"] for r in rows] == ["200", "201"]
+    assert all(r["parent_post"] == "123" for r in rows)
+    assert rows[0]["parent_comment_id"] is None
+    assert rows[1]["parent_comment_id"] == "200"
+
+
+def test_comment_inherits_structured_parent_subject_and_market_without_literal_words():
+    rows = normalize_comment_dataset(
+        "facebook",
+        [{
+            "commentText": "πάλι τίποτα", "id": "fb-ctx",
+            "timestamp": 1789725600000,
+            "postUrl": "https://www.facebook.com/example/posts/123",
+            "author": {"name": "Maria"},
+        }],
+        seed_refs=["https://www.facebook.com/example/posts/123"],
+        seed_context={
+            "https://www.facebook.com/example/posts/123": {
+                "text": "Μεγάλη κλήρωση απόψε",
+                "market_score": 0.72,
+                "subject_qualified": True,
+                "qualification_tier": "provenance",
+            }
+        },
+    )
+    plan = {
+        "client": "ΟΠΑΠ", "topic": "Eurojackpot", "market": "Greece",
+        "core_terms": ["Eurojackpot"], "context_terms": [],
+        "greeklish_variants": [], "exclusions": [], "target_total": 1,
+        "sources": [{"source": "facebook", "target_items": 1}],
+    }
+    cleaned = clean_records(rows, plan)["cleaned"][0]
+    assert cleaned["cleaning"]["decision"] == "review"
+    assert "contextual_parent_match" in cleaned["cleaning"]["flags"]
+    assert "parent_market_context" in cleaned["cleaning"]["flags"]
+    assert "provenance_parent_context" in cleaned["cleaning"]["flags"]
