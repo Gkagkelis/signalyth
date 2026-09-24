@@ -1488,10 +1488,16 @@ def adaptive_expand_after_cleaning(
                         max(1, len(batch_refs) * max_per_parent),
                     )
 
+                    actor_wanted = batch_wanted
+                    actor_per_parent = max_per_parent
+                    if source == "x":
+                        actor_wanted += len(batch_refs)
+                        actor_per_parent += 1
+
                     try:
                         inp = build_comment_deepening_input(
-                            source, batch_refs, batch_wanted,
-                            max_per_parent=max_per_parent,
+                            source, batch_refs, actor_wanted,
+                            max_per_parent=actor_per_parent,
                             include_replies=bool(cfg.get("comment_include_replies", True)),
                         )
                     except ValueError as exc:
@@ -1526,11 +1532,16 @@ def adaptive_expand_after_cleaning(
                     )
                     ok = do_call(
                         source, actor_id, f"comment_deepening_{bucket}",
-                        inp, batch_wanted, rate,
+                        inp, actor_wanted, rate,
                         mapping=mapping, evidence_layer="comment", origin=bucket,
                         seed_refs=batch_refs,
                         seed_context={
-                            str(m.get("ref")): str(m.get("text") or "")
+                            str(m.get("ref")): {
+                                "text": str(m.get("text") or ""),
+                                "market_score": float(m.get("market_score", 0) or 0),
+                                "subject_qualified": bool(m.get("subject_qualified", False)),
+                                "qualification_tier": str(m.get("qualification_tier") or ""),
+                            }
                             for m in batch_meta if m.get("ref")
                         },
                         minimum_attempt_charge_usd=minimum_attempt_charge_usd,
