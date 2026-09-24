@@ -79,9 +79,18 @@ def _parent_from_seed(source: str, raw: dict, seed_refs: list[str]) -> str | Non
                     return ref
         return seed_refs[0] if len(seed_refs) == 1 else None
     if source == "x":
-        parent_id = str(raw.get("inReplyToId") or raw.get("inReplyToTweetId") or raw.get("sourceTweetId") or "")
-        if parent_id:
-            return parent_id
+        # Thread mode returns descendants whose immediate inReplyToId may be
+        # another reply. Preserve the ROOT research parent instead. Xquik exposes
+        # sourceTweetId/sourceTarget in engagement modes and conversationId on
+        # tweet rows; any of these can map a nested row back to the requested root.
+        seed_set = {str(x) for x in seed_refs}
+        for key in ("sourceTweetId", "sourceTarget", "conversationId"):
+            candidate = str(raw.get(key) or "")
+            if candidate and candidate in seed_set:
+                return candidate
+        immediate = str(raw.get("inReplyToId") or raw.get("inReplyToTweetId") or "")
+        if immediate and immediate in seed_set:
+            return immediate
         return seed_refs[0] if len(seed_refs) == 1 else None
     return seed_refs[0] if len(seed_refs) == 1 else None
 
@@ -91,7 +100,7 @@ def normalize_comment_dataset(
     items: list[dict],
     *,
     seed_refs: list[str] | None = None,
-    seed_context: dict[str, str] | None = None,
+    seed_context: dict[str, str | dict] | None = None,
     mapping: dict | None = None,
 ) -> list[dict]:
     """Normalize comment/reply Actors into the same evidence contract as primary rows.
@@ -100,7 +109,7 @@ def normalize_comment_dataset(
     analysis can use comments while still separating publisher content from audience response.
     """
     seed_refs = [str(x) for x in (seed_refs or []) if str(x or "").strip()]
-    seed_context = {str(k): str(v or "").strip() for k, v in (seed_context or {}).items() if str(k or "").strip()}
+    seed_context = {str(k): v for k, v in (seed_context or {}).items() if str(k or "").strip()}
     raw_items = _instagram_flatten(items) if source == "instagram" else [x for x in items if isinstance(x, dict)]
     out: list[dict] = []
     seen: set[str] = set()
@@ -116,7 +125,7 @@ def normalize_comment_dataset(
             shares = _int(_mapped(raw, mapping, "shares", ("retweetCount", "repostCount"), 0))
             url = _mapped(raw, mapping, "url", ("url", "tweetUrl"))
             layer = "reply"
-            parent_comment_id = None
+            parent_comment_id = str(raw.get("inReplyToId") or raw.get("inReplyToTweetId") or "") or None
         elif source == "tiktok":
             text = _mapped(raw, mapping, "text", ("text", "commentText"), "")
             date_raw = _mapped(raw, mapping, "date", ("create_time", "createdAt", "createTime", "timestamp"))
@@ -166,9 +175,33 @@ def normalize_comment_dataset(
         if not text:
             continue
         parent_post = _parent_from_seed(source, raw, seed_refs)
-        parent_context = seed_context.get(str(parent_post or ""), "")
         dt = parse_date(date_raw)
         raw_id = str(native_id or "").strip()
+
+        # X thread mode may include the requested root itself. It is a parent
+        # discovery row, not audience evidence, so never normalize it as a reply.
+        if source == "x" and raw_id and raw_id in set(seed_refs):
+            continue
+
+        context_payload = seed_context.get(str(parent_post or ""), "")
+        if isinstance(context_payload, dict):
+            parent_context = str(context_payload.get("text") or "").strip()
+            try:
+                parent_market_score = float(context_payload.get("market_score") or 0.0)
+            except Exception:
+                parent_market_score = 0.0
+            parent_subject_qualified = bool(context_payload.get("subject_qualified"))
+            parent_qualification_tier = str(context_payload.get("qualification_tier") or "").strip() or None
+        else:
+            parent_context = str(context_payload or "").strip()
+            parent_market_score = 0.0
+            parent_subject_qualified = False
+            parent_qualification_tier = None
+
+        if source == "x" and parent_comment_id and str(parent_comment_id) == str(parent_post or ""):
+            # Direct reply to root; only nested replies have a comment parent.
+            parent_comment_id = None
+
         stable = raw_id or sha1(f"{source}|{parent_post}|{author}|{text}".encode("utf-8", errors="ignore")).hexdigest()[:24]
         record_id = f"comment:{source}:{stable}"
         if record_id in seen:
@@ -198,6 +231,9 @@ def normalize_comment_dataset(
             "content_type": layer,
             "parent_post": parent_post,
             "parent_context": parent_context or None,
+            "parent_market_score": round(parent_market_score, 4) if parent_market_score > 0 else 0.0,
+            "parent_subject_qualified": parent_subject_qualified,
+            "parent_qualification_tier": parent_qualification_tier,
             "parent_comment_id": parent_comment_id,
             "comment_id": raw_id or stable,
             "evidence_layer": layer,
