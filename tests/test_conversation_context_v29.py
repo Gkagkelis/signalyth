@@ -203,10 +203,10 @@ class TestInstagramAndTheProbe:
         blob = str(probes[0]["input"])
         assert "Eurojackpot" in blob or "eurojackpot" in blob
 
-    def test_the_probe_cap_is_a_quarter_and_never_more_than_twelve(self):
-        assert semantic_broad_probe_target(40) == 10
-        assert semantic_broad_probe_target(200) == 12
-        assert semantic_broad_probe_target(8) == 3
+    def test_the_probe_is_large_enough_to_measure_market_yield_but_bounded(self):
+        assert semantic_broad_probe_target(40) == 60
+        assert semantic_broad_probe_target(200) == 60
+        assert semantic_broad_probe_target(8) == 12
         assert semantic_broad_probe_target(0) == 0
 
     def test_native_filter_sources_need_no_probe(self):
