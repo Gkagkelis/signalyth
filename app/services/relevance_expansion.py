@@ -21,6 +21,7 @@ from app.services.smart_collection import (
 from app.services.storage import RunStore
 from app.services.source_capabilities import (
     build_comment_deepening_input,
+    comment_parent_batch_limit,
     is_comment_parent_ref,
     build_page_discovery_input,
     comments_forecast,
@@ -1394,68 +1395,143 @@ def adaptive_expand_after_cleaning(
             comment_attempt_outcomes: list[dict] = []
 
             def harvest(refs: list[str], seed_meta: list[dict], wanted: int, bucket: str) -> int:
-                """Buy comments under refs and preserve the Actor outcome separately.
+                """Buy comments under refs in provider-safe batches.
 
-                Returning zero rows is a valid EMPTY result, not an Actor failure.
+                Facebook's published Actor schema accepts at most five postUrls per
+                call. The old path sent every selected parent in one request (13 in
+                the failing run), which is outside that contract. We also persist
+                completed parent refs after every batch so a worker handoff never
+                re-pays the same comment request.
                 """
                 if not refs or wanted <= 0:
                     return 0
-                try:
-                    inp = build_comment_deepening_input(
-                        source, refs, wanted,
-                        max_per_parent=max_per_parent,
-                        include_replies=bool(cfg.get("comment_include_replies", True)),
-                    )
-                except ValueError as exc:
-                    audit["warnings"].append(f"{source}:{bucket}:comment_input_unavailable:{exc}")
-                    comment_attempt_outcomes.append({
-                        "bucket": bucket,
-                        "status": "actor_failed",
-                        "reason": f"comment_input_unavailable:{exc}",
-                        "parents": len(refs),
-                        "requested": wanted,
-                    })
+
+                harvest_state_path = folder / "comment-harvest-state.json"
+                harvest_state = store.read(harvest_state_path, {}) or {}
+                source_state = dict(harvest_state.get(source) or {})
+                attempted_by_bucket = dict(source_state.get("attempted_refs_by_bucket") or {})
+                attempted_refs = {str(x) for x in (attempted_by_bucket.get(bucket) or [])}
+                pairs = [
+                    (r, m) for r, m in zip(refs, seed_meta)
+                    if str(r) not in attempted_refs
+                ]
+
+                # If all parents for this pass were already completed by an earlier
+                # worker, the pass is durably complete and can be closed for free.
+                if not pairs:
+                    bucket_finished(bucket)
                     return 0
 
-                minimum_attempt_charge_usd = _comment_minimum_attempt_charge_usd(
-                    source, inp, wanted, rate,
-                )
-                before = collected_count()
-                heartbeat(source)
-                _comment_status_update(
-                    folder, source, status="running", actor_id=actor_id,
-                    parents=len(refs), requested=wanted, bucket=bucket,
-                    current_message=(f"Collecting comments — {source} ({bucket}): "
-                                     f"up to {wanted} under {len(refs)} posts"),
-                )
-                ok = do_call(
-                    source, actor_id, f"comment_deepening_{bucket}", inp, wanted, rate,
-                    mapping=mapping, evidence_layer="comment", origin=bucket,
-                    seed_refs=refs,
-                    seed_context={str(m.get("ref")): str(m.get("text") or "")
-                                  for m in seed_meta if m.get("ref")},
-                    minimum_attempt_charge_usd=minimum_attempt_charge_usd,
-                )
-                arrived = max(0, collected_count() - before)
-                outcome = dict(last_call_outcome or {})
-                outcome.update({
-                    "bucket": bucket,
-                    "parents": len(refs),
-                    "requested": wanted,
-                    "collected": arrived,
-                })
-                if ok and arrived <= 0 and outcome.get("status") == "success":
-                    outcome["status"] = "empty"
-                comment_attempt_outcomes.append(outcome)
+                batch_limit = comment_parent_batch_limit(source)
+                before_total = collected_count()
+                all_batches_finished = True
 
-                if not ok:
-                    audit["warnings"].append(
-                        f"{source}:{bucket}:actor_call_failed_or_budget_exhausted:"
-                        f"{outcome.get('status') or 'unknown'}"
+                for batch_index in range(0, len(pairs), batch_limit):
+                    if deadline_check():
+                        all_batches_finished = False
+                        audit["deadline_reached"] = True
+                        audit["warnings"].append(
+                            f"{source}:{bucket}:comment_batch_deferred_worker_deadline"
+                        )
+                        break
+
+                    batch_pairs = pairs[batch_index:batch_index + batch_limit]
+                    batch_refs = [r for r, _ in batch_pairs]
+                    batch_meta = [m for _, m in batch_pairs]
+                    already_arrived = max(0, collected_count() - before_total)
+                    remaining_wanted = max(0, wanted - already_arrived)
+                    if remaining_wanted <= 0:
+                        break
+                    batch_wanted = min(
+                        remaining_wanted,
+                        max(1, len(batch_refs) * max_per_parent),
                     )
-                if not last_call_hit_deadline:
+
+                    try:
+                        inp = build_comment_deepening_input(
+                            source, batch_refs, batch_wanted,
+                            max_per_parent=max_per_parent,
+                            include_replies=bool(cfg.get("comment_include_replies", True)),
+                        )
+                    except ValueError as exc:
+                        audit["warnings"].append(
+                            f"{source}:{bucket}:comment_input_unavailable:{exc}"
+                        )
+                        comment_attempt_outcomes.append({
+                            "bucket": bucket,
+                            "status": "actor_failed",
+                            "reason": f"comment_input_unavailable:{exc}",
+                            "parents": len(batch_refs),
+                            "requested": batch_wanted,
+                            "batch_index": batch_index // batch_limit,
+                        })
+                        # Invalid refs are terminal for this batch; record them so a
+                        # continuation does not buy the same impossible request.
+                        attempted_refs.update(str(r) for r in batch_refs)
+                        continue
+
+                    minimum_attempt_charge_usd = _comment_minimum_attempt_charge_usd(
+                        source, inp, batch_wanted, rate,
+                    )
+                    before_batch = collected_count()
+                    heartbeat(source)
+                    _comment_status_update(
+                        folder, source, status="running", actor_id=actor_id,
+                        parents=len(batch_refs), requested=batch_wanted, bucket=bucket,
+                        current_message=(
+                            f"Collecting comments — {source} ({bucket}): "
+                            f"up to {batch_wanted} under {len(batch_refs)} posts"
+                        ),
+                    )
+                    ok = do_call(
+                        source, actor_id, f"comment_deepening_{bucket}",
+                        inp, batch_wanted, rate,
+                        mapping=mapping, evidence_layer="comment", origin=bucket,
+                        seed_refs=batch_refs,
+                        seed_context={
+                            str(m.get("ref")): str(m.get("text") or "")
+                            for m in batch_meta if m.get("ref")
+                        },
+                        minimum_attempt_charge_usd=minimum_attempt_charge_usd,
+                    )
+                    arrived = max(0, collected_count() - before_batch)
+                    outcome = dict(last_call_outcome or {})
+                    outcome.update({
+                        "bucket": bucket,
+                        "parents": len(batch_refs),
+                        "requested": batch_wanted,
+                        "collected": arrived,
+                        "batch_index": batch_index // batch_limit,
+                        "parent_refs": list(batch_refs),
+                    })
+                    if ok and arrived <= 0 and outcome.get("status") == "success":
+                        outcome["status"] = "empty"
+                    comment_attempt_outcomes.append(outcome)
+
+                    if not ok:
+                        audit["warnings"].append(
+                            f"{source}:{bucket}:actor_call_failed_or_budget_exhausted:"
+                            f"{outcome.get('status') or 'unknown'}"
+                        )
+
+                    if last_call_hit_deadline:
+                        all_batches_finished = False
+                        break
+
+                    # The Actor call ended normally (success, empty or a bounded
+                    # failure). Persist these refs before the next paid call.
+                    attempted_refs.update(str(r) for r in batch_refs)
+                    attempted_by_bucket[bucket] = sorted(attempted_refs)
+                    source_state["attempted_refs_by_bucket"] = attempted_by_bucket
+                    harvest_state[source] = source_state
+                    store.write(harvest_state_path, harvest_state)
+
+                    if source_comment_target > 0 and collected_count() >= source_comment_target:
+                        break
+
+                if all_batches_finished and not last_call_hit_deadline:
                     bucket_finished(bucket)
-                return arrived
+                return max(0, collected_count() - before_total)
 
             # ---- A. The operator's own pages and links come first ----------------
             owned_refs, owned_meta = _owned_parent_refs(

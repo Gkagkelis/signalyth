@@ -7,6 +7,10 @@ from app.services.relevance_expansion import (
     comment_fulfillment_status,
     comment_source_is_complete,
 )
+from app.services.source_capabilities import (
+    build_comment_deepening_input,
+    comment_parent_batch_limit,
+)
 
 
 def test_zero_comments_after_normal_empty_actor_run_is_shortfall_not_failure():
@@ -116,3 +120,34 @@ def test_backend_wave2_reuses_cached_parent_pool_without_new_search():
     assert '"open_wave2"' in source
     assert '"wave2_parents"' in source
     assert '"discovery_reused_cached_pool": True' in source
+
+
+def test_facebook_comment_actor_contract_is_batched_to_five_parents():
+    assert comment_parent_batch_limit("facebook") == 5
+
+
+def test_facebook_comment_actor_requests_newest_for_bounded_date_windows():
+    refs = [
+        f"https://www.facebook.com/example/posts/pfbid{i}"
+        for i in range(1, 6)
+    ]
+    inp = build_comment_deepening_input(
+        "facebook", refs, 50, max_per_parent=10, include_replies=True,
+    )
+    assert len(inp["postUrls"]) == 5
+    assert inp["resultsLimit"] == 10
+    assert inp["commentsSortType"] == "newest"
+
+
+def test_comment_harvest_persists_batch_progress_across_worker_handoffs():
+    source = Path("app/services/relevance_expansion.py").read_text(encoding="utf-8")
+    assert 'harvest_state_path = folder / "comment-harvest-state.json"' in source
+    assert "batch_limit = comment_parent_batch_limit(source)" in source
+    assert 'attempted_by_bucket[bucket] = sorted(attempted_refs)' in source
+    assert "batch_pairs = pairs[batch_index:batch_index + batch_limit]" in source
+
+
+def test_collection_resume_preserves_adaptive_and_comment_spend():
+    source = Path("app/services/collector.py").read_text(encoding="utf-8")
+    assert 'prior_total_spent = max(0.0, float(prior_budget.get("spent_usd", 0) or 0))' in source
+    assert "guard.spent = min(guard.max_budget, max(guard.spent, prior_total_spent))" in source

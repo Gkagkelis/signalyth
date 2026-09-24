@@ -10,7 +10,7 @@ def test_comment_input_shapes_are_actor_specific():
     ig = build_comment_deepening_input("instagram", ["https://www.instagram.com/p/ABC/"], 12, max_per_parent=5)
     assert ig == {"postUrls": ["https://www.instagram.com/p/ABC/"], "maxCommentsPerPost": 5, "sortOrder": "popular"}
     fb = build_comment_deepening_input("facebook", ["https://www.facebook.com/x/posts/1"], 12, max_per_parent=6)
-    assert fb["resultsLimit"] == 6 and fb["commentsSortType"] == "all"
+    assert fb["resultsLimit"] == 6 and fb["commentsSortType"] == "newest"
 
 
 def test_instagram_comments_and_nested_replies_become_separate_evidence():

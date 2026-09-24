@@ -7,6 +7,20 @@ from urllib.parse import parse_qs, urlparse
 
 # Public-schema capability knowledge. This is NOT a live verification record.
 # Companion Actors remain OFF until explicitly paid-smoke-tested and committed.
+# Provider input caps that must be respected by the orchestration layer.
+# scraper_one/facebook-comments-scraper currently accepts at most 5 postUrls
+# per Actor run. Sending a larger list is outside the published Actor schema and
+# can produce empty/invalid harvests even when the parent posts have comments.
+COMMENT_PARENT_BATCH_LIMITS = {
+    "facebook": 5,
+}
+
+
+def comment_parent_batch_limit(source: str) -> int:
+    """Maximum concrete parent refs safe in one comment Actor call."""
+    return max(1, int(COMMENT_PARENT_BATCH_LIMITS.get(str(source or "").casefold(), 40)))
+
+
 SOURCE_CAPABILITIES = {
     "x": {
         "discovery": "primary_actor",
@@ -295,8 +309,11 @@ def build_comment_deepening_input(
         # ScrapeSmith's schema uses a per-parent limit rather than maxItems.
         return {"postUrls": refs, "maxCommentsPerPost": per_parent, "sortOrder": "popular"}
     if source == "facebook":
-        # Scraper One uses resultsLimit per post and Facebook's all/newest/relevant order.
-        return {"postUrls": refs, "resultsLimit": per_parent, "commentsSortType": "all"}
+        # Scraper One caps postUrls at 5. Batching is handled by the caller.
+        # For a bounded research window request NEWEST first: "all"/"relevant"
+        # can spend the per-post limit on older comments that are then correctly
+        # dropped by SIGNALYTH's exact date filter, creating a false 0-comment run.
+        return {"postUrls": refs, "resultsLimit": per_parent, "commentsSortType": "newest"}
     if source == "youtube":
         return {"startUrls": refs, "maxItems": max_items}
     field = cap.get("input_field")
