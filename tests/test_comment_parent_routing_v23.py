@@ -87,7 +87,16 @@ def test_page_discovery_prefers_concrete_post_field_over_page_url():
     assert ref.endswith("/posts/123456789")
 
 
-def test_subject_not_mentioned_can_still_seed_conversation():
+def test_subject_not_mentioned_no_longer_seeds_open_conversation():
+    """v30.1 deliberately reverses the v23 stance for OPEN parents.
+
+    Run 20260924T150750Z-32c20186 paid for 25 comments under parents like a
+    Filipino cooking video, because an open-search post with no subject signal
+    could still become a comment seed. An open parent must now carry a direct
+    subject anchor before another paid scrape is allowed. The v23 rationale —
+    "a page announcement often does not name the brand in its text" — was
+    about the client's OWN pages, and the owned-page path is untouched.
+    """
     row = _row(
         "facebook",
         "https://facebook.com/example/posts/123456789",
@@ -96,8 +105,8 @@ def test_subject_not_mentioned_can_still_seed_conversation():
         reasons=["subject_not_mentioned"],
     )
     refs, _, mode = _comment_seed_refs("facebook", [row], max_seeds=5)
-    assert refs == ["https://facebook.com/example/posts/123456789"]
-    assert mode == "reported_comments"
+    assert refs == []
+    assert mode == "no_relevant_parent_rows"
 
 
 def test_hard_quality_exclusions_still_block_paid_comment_scrape():

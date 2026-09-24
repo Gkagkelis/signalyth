@@ -26,7 +26,10 @@ def _fb_row(i: int, comments: int, known: bool = True) -> dict:
             "organic_eligible": True,
             "authenticity_status": "low_risk",
             "flags": [],
-            "reasons": [],
+            # v30.1: the open-parent gate demands what every REAL trusted row
+            # has — a direct subject hit. A trusted row without core_term
+            # reasons cannot exist in production.
+            "reasons": ["core_term:eurojackpot"],
         },
     }
 

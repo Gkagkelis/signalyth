@@ -67,7 +67,7 @@ def test_excluded_parents_never_become_comment_seeds():
         {"platform": "instagram", "evidence_layer": "primary", "comments": 3, "likes": 5,
          "url": "https://www.instagram.com/p/GR0001/", "text": "Μεγάλο τζακποτ απόψε", "raw_data": {},
          "metric_availability": {"comments_known": True},
-         "cleaning": {"decision": "trusted", "reasons": []}},
+         "cleaning": {"decision": "trusted", "market_score": 0.7, "reasons": ["core_term:τζακποτ"]}},
     ]
     refs, meta, mode = _comment_seed_refs("instagram", cleaned, max_seeds=10)
     assert refs == ["https://www.instagram.com/p/GR0001/"], refs
@@ -86,7 +86,7 @@ def test_all_zero_comment_counts_still_probe_instead_of_skipping():
         {"platform": "facebook", "evidence_layer": "primary", "comments": 0, "likes": likes,
          "url": f"https://www.facebook.com/page/posts/{i}", "text": "Stoiximan", "raw_data": {},
          "metric_availability": {"comments_known": True},
-         "cleaning": {"decision": "trusted", "reasons": []}}
+         "cleaning": {"decision": "trusted", "market_score": 0.7, "reasons": ["core_term:stoiximan"]}}
         for i, likes in enumerate([5, 900, 40, 120, 7, 300, 60, 20], start=1)
     ]
     refs, meta, mode = _comment_seed_refs("facebook", cleaned, max_seeds=12)

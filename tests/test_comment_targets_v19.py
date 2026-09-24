@@ -33,6 +33,10 @@ def _post(pid: str, *, comments=0, likes=0, relevance=0.8, content_class="organi
         "cleaning": {
             "decision": decision,
             "relevance_score": relevance,
+            # v30.1: the open-parent gate checks the fields every real cleaned
+            # row carries; a relevant row has a core_term hit and market score.
+            "market_score": 0.6 if relevance > 0 else 0.0,
+            "reasons": (["core_term:topic"] if relevance > 0 else []),
             "content_class": content_class,
             "origin_class": origin_class,
             "organic_eligible": organic,
