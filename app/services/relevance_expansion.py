@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
+import copy
 import math
 from pathlib import Path
 from typing import Callable
 
 from app.registry import output_mapping_for, load_registry
 from app.services.apify_service import ApifyRunner
-from app.services.cleaning import clean_run
+from app.services.cleaning import clean_run, clean_records, RULESET_CONFIG
 from app.services.collector import in_range
 from app.services.comment_deepening import normalize_comment_dataset
 from app.services.resilience import run_actor_resilient, split_diagnostic_rows
@@ -580,7 +581,8 @@ def _post_ref_from_row(source: str, row: dict) -> tuple[str, str]:
 
 def _probe_items(folder, plan, source, actor_id, actor_input, wanted, rate,
                  audit, store, runner, cancel_check,
-                 deadline_check=None, time_left=None, heartbeat=None) -> list[dict]:
+                 deadline_check=None, time_left=None, heartbeat=None,
+                 charge_cap_usd=None) -> list[dict]:
     """Run an Actor for references only, without filing its rows as evidence.
 
     Page discovery exists to find WHERE the conversation is. Its posts are not
@@ -596,6 +598,11 @@ def _probe_items(folder, plan, source, actor_id, actor_input, wanted, rate,
         audit["warnings"].append(f"{source}:page_discovery:budget_exhausted")
         return []
     cap = _charge_cap(remaining, rate, allowed)
+    if charge_cap_usd not in (None, ""):
+        try:
+            cap = min(cap, max(0.0, float(charge_cap_usd)))
+        except Exception:
+            pass
     if cap <= 0:
         audit["warnings"].append(f"{source}:page_discovery:no_safe_charge_cap")
         return []
@@ -757,6 +764,215 @@ def _comment_status_update(folder: Path, source: str, *, current_message: str | 
         pass
 
 
+def _limit_adaptive_input(source: str, actor_input: dict, wanted: int) -> dict:
+    """Clamp a planned Actor input to the bounded adaptive request."""
+    wanted = max(1, int(wanted or 1))
+    inp = copy.deepcopy(actor_input or {})
+    field = {
+        "x": "maxItems",
+        "tiktok": "maxItems",
+        "youtube": "maxItems",
+        "instagram": "resultsLimit",
+        "facebook": "resultsCount",
+    }.get(source)
+    if field and field in inp:
+        try:
+            inp[field] = min(max(1, int(inp.get(field) or wanted)), wanted)
+        except Exception:
+            inp[field] = wanted
+    if source == "news" and "maxArticles" in inp:
+        try:
+            inp["maxArticles"] = min(max(1, int(inp.get("maxArticles") or wanted)), wanted)
+        except Exception:
+            inp["maxArticles"] = wanted
+    return inp
+
+
+def _source_semantic_shortfall(report: dict, source: str, target: int) -> int:
+    target = max(0, int(target or 0))
+    row = ((report.get("source_breakdown") or {}).get(source) or {})
+    analyzable = int(row.get("trusted", 0) or 0) + int(row.get("review", 0) or 0)
+    return max(0, target - analyzable)
+
+
+def _conversation_probe_target(comment_target: int, max_parents: int) -> int:
+    comment_target = max(0, int(comment_target or 0))
+    max_parents = max(1, int(max_parents or 1))
+    if comment_target <= 0:
+        return 0
+    return min(60, max(12, max_parents * 2, math.ceil(comment_target / 2)))
+
+
+def _conversation_parent_is_strong(source: str, row: dict) -> bool:
+    if not _comment_parent_candidate_allowed(source, row):
+        return False
+    cleaning = row.get("cleaning") if isinstance(row.get("cleaning"), dict) else {}
+    flags = {str(x) for x in (cleaning.get("flags") or [])}
+    reasons = {str(x) for x in (cleaning.get("reasons") or [])}
+    if "no_subject_signal" in flags or "subject_not_mentioned" in reasons:
+        return False
+    if not any(reason.startswith("core_term:") for reason in reasons):
+        return False
+    try:
+        if float(cleaning.get("market_score", 0) or 0) < float(RULESET_CONFIG["market_review_below"]):
+            return False
+    except Exception:
+        return False
+    return True
+
+
+def _conversation_probe_input(
+    source: str,
+    actor_input: dict,
+    wanted: int,
+    date_from: date,
+    date_to: date,
+) -> dict:
+    inp = _limit_adaptive_input(source, actor_input, wanted)
+    parent_from = date_from - timedelta(days=PARENT_LOOKBACK_DAYS)
+    until_exclusive = date_to + timedelta(days=1)
+    if source == "facebook":
+        inp["resultsCount"] = wanted
+        inp["startDate"] = parent_from.isoformat()
+        inp["endDate"] = date_to.isoformat()
+    elif source == "instagram":
+        inp["resultsLimit"] = wanted
+        inp["onlyPostsNewerThan"] = parent_from.isoformat()
+    elif source == "x":
+        inp["maxItems"] = wanted
+        inp["since"] = f"{parent_from.isoformat()}_00:00:00_UTC"
+        inp["until"] = f"{until_exclusive.isoformat()}_00:00:00_UTC"
+    elif source == "tiktok":
+        inp["maxItems"] = wanted
+    return inp
+
+
+def _discover_conversation_parent_candidates(
+    folder: Path,
+    plan: dict,
+    source_plan: dict,
+    source: str,
+    *,
+    comment_target: int,
+    max_parents: int,
+    date_from: date,
+    date_to: date,
+    audit: dict,
+    store: RunStore,
+    runner,
+    cancel_check,
+    deadline_check,
+    time_left,
+    heartbeat,
+) -> list[dict]:
+    """Discover extra parent posts without adding them to analysis evidence."""
+    cache_path = folder / f"conversation-parent-candidates-{source}.json"
+    cached = store.read(cache_path, []) or []
+    cached_by_id = {
+        str(row.get("id")): row
+        for row in cached
+        if isinstance(row, dict) and row.get("id")
+    }
+    probe_target = _conversation_probe_target(comment_target, max_parents)
+    if probe_target <= 0 or len(cached_by_id) >= probe_target:
+        return list(cached_by_id.values())
+
+    routes = [
+        dict(sr)
+        for sr in [
+            *(source_plan.get("semantic_topup_subruns") or []),
+            *(source_plan.get("topup_subruns") or []),
+            *(source_plan.get("subruns") or []),
+        ]
+        if isinstance(sr, dict)
+    ]
+    dedup_routes = []
+    seen_route_keys = set()
+    for sr in routes:
+        key = (
+            str(sr.get("actor_id") or source_plan.get("actor_id") or ""),
+            str(sr.get("purpose") or ""),
+            repr(sr.get("input") or {}),
+        )
+        if key in seen_route_keys:
+            continue
+        seen_route_keys.add(key)
+        dedup_routes.append(sr)
+    routes = sorted(
+        dedup_routes,
+        key=lambda sr: 0 if str(sr.get("purpose") or "") == "semantic_broad_probe" else 1,
+    )[:3]
+    if not routes:
+        return list(cached_by_id.values())
+
+    state_path = folder / "conversation-parent-discovery-state.json"
+    state = store.read(state_path, {}) or {}
+    done = {str(x) for x in (state.get(source) or [])}
+    route_count = len(routes)
+
+    for idx, sr in enumerate(routes):
+        if cancel_check() or deadline_check():
+            break
+        purpose = str(sr.get("purpose") or f"route_{idx+1}")
+        route_key = f"{idx}:{purpose}"
+        if route_key in done:
+            continue
+        missing_candidates = max(1, probe_target - len(cached_by_id))
+        remaining_routes = max(1, route_count - idx)
+        wanted = min(15, max(4, math.ceil(missing_candidates / remaining_routes)))
+        inp = _conversation_probe_input(
+            source, dict(sr.get("input") or {}), wanted, date_from, date_to
+        )
+        raw_rows = _probe_items(
+            folder,
+            plan,
+            source,
+            str(sr.get("actor_id") or source_plan.get("actor_id") or ""),
+            inp,
+            wanted,
+            source_plan.get("price_per_1000_hint"),
+            audit,
+            store,
+            runner,
+            cancel_check,
+            deadline_check=deadline_check,
+            time_left=time_left,
+            heartbeat=lambda _note, _s=source: heartbeat(_s),
+            charge_cap_usd=sr.get("max_charge_usd"),
+        )
+        if not audit.get("deadline_reached"):
+            done.add(route_key)
+            state[source] = sorted(done)
+            store.write(state_path, state)
+
+        if raw_rows:
+            normalized = normalize_dataset(
+                source, raw_rows, mapping=output_mapping_for(source)
+            )
+            parent_from = date_from - timedelta(days=PARENT_LOOKBACK_DAYS)
+            normalized = [row for row in normalized if in_range(row, parent_from, date_to)]
+            if normalized:
+                cleaned_batch = clean_records(normalized, plan)["cleaned"]
+                for row in cleaned_batch:
+                    if not _conversation_parent_is_strong(source, row):
+                        continue
+                    rid = str(row.get("id") or "")
+                    if rid:
+                        cached_by_id[rid] = row
+                store.write(cache_path, list(cached_by_id.values()))
+
+        audit.setdefault("conversation_parent_discovery", {}).setdefault(source, []).append({
+            "route": purpose,
+            "requested": wanted,
+            "qualified_candidates_total": len(cached_by_id),
+            "target_candidates": probe_target,
+        })
+        if len(cached_by_id) >= probe_target:
+            break
+
+    return list(cached_by_id.values())
+
+
 def adaptive_expand_after_cleaning(
     folder: Path,
     plan: dict,
@@ -834,6 +1050,7 @@ def adaptive_expand_after_cleaning(
         seed_refs: list[str] | None = None,
         seed_context: dict[str, str] | None = None,
         minimum_attempt_charge_usd: float = 0.0,
+        logical_max_charge_usd: float | None = None,
     ):
         nonlocal report, last_call_hit_deadline
         last_call_hit_deadline = False
@@ -853,13 +1070,15 @@ def adaptive_expand_after_cleaning(
         if allowed <= 0:
             audit["warnings"].append(f"{source}:{kind}:budget_exhausted")
             return False
-        actor_input = dict(actor_input)
-        # Only Actors whose public schema actually contains maxItems receive it.
-        if "maxItems" in actor_input:
-            actor_input["maxItems"] = min(int(actor_input.get("maxItems") or allowed), allowed)
+        actor_input = _limit_adaptive_input(source, dict(actor_input), allowed)
         cap = _charge_cap(
             remaining, rate, allowed, minimum_usd=minimum_attempt_charge_usd,
         )
+        if logical_max_charge_usd not in (None, ""):
+            try:
+                cap = min(cap, max(0.0, float(logical_max_charge_usd)))
+            except Exception:
+                pass
         if cap <= 0:
             audit["warnings"].append(f"{source}:{kind}:no_safe_charge_cap")
             return False
@@ -920,6 +1139,63 @@ def adaptive_expand_after_cleaning(
                     shortfall = int(report.get("trusted_sample_shortfall", 0) or 0)
         else:
             audit["warnings"].append("x:adaptive_refinement_blocked_for_unverified_actor_capability")
+
+    # ---- v30: real post-cleaning semantic refill -------------------------------
+    semantic_state_path = folder / "semantic-refill-state.json"
+    semantic_state = store.read(semantic_state_path, {}) or {}
+    semantic_done = {str(x) for x in (semantic_state.get("done_routes") or [])}
+
+    for semantic_sp in (plan.get("sources") or []):
+        source = str(semantic_sp.get("source") or "")
+        routes = [dict(sr) for sr in (semantic_sp.get("semantic_topup_subruns") or []) if isinstance(sr, dict)]
+        if not source or not routes:
+            continue
+        source_target = int(semantic_sp.get("target_items", 0) or 0)
+        missing = _source_semantic_shortfall(report, source, source_target)
+        if missing <= 0:
+            continue
+        routes = sorted(
+            routes,
+            key=lambda sr: 0 if str(sr.get("purpose") or "") == "semantic_broad_probe" else 1,
+        )
+        for idx, sr in enumerate(routes[:3]):
+            if missing <= 0 or cancel_check():
+                break
+            if deadline_check():
+                audit["deadline_reached"] = True
+                audit["warnings"].append(f"{source}:semantic_refill_deferred_worker_deadline")
+                break
+            purpose = str(sr.get("purpose") or "semantic_refill")
+            route_key = f"{source}:{idx}:{purpose}"
+            if route_key in semantic_done:
+                continue
+            hard_cap = max(1, int(sr.get("target_items", 1) or 1))
+            wanted = min(hard_cap, max(1, missing * 2))
+            ok = do_call(
+                source,
+                str(sr.get("actor_id") or semantic_sp.get("actor_id") or ""),
+                purpose,
+                dict(sr.get("input") or {}),
+                wanted,
+                semantic_sp.get("price_per_1000_hint"),
+                logical_max_charge_usd=sr.get("max_charge_usd"),
+            )
+            if not last_call_hit_deadline:
+                semantic_done.add(route_key)
+                semantic_state["done_routes"] = sorted(semantic_done)
+                store.write(semantic_state_path, semantic_state)
+            missing = _source_semantic_shortfall(report, source, source_target)
+            audit.setdefault("semantic_refill", {}).setdefault(source, []).append({
+                "route": purpose,
+                "requested": wanted,
+                "completed": bool(ok),
+                "remaining_analyzable_shortfall": missing,
+            })
+            if last_call_hit_deadline:
+                audit["deadline_reached"] = True
+                break
+
+    shortfall = int(report.get("trusted_sample_shortfall", 0) or 0)
 
     # Comment deepening is independent from shortfall: it is requested audience evidence.
     if comments_requested:
@@ -1115,7 +1391,65 @@ def adaptive_expand_after_cleaning(
                 got_owned = harvest(owned_refs, owned_meta, owned_wanted, "owned")
 
             # ---- B. Then open conversation found by search -----------------------
-            ranked_refs, ranked_meta, selection_mode = _comment_seed_refs(source, cleaned, max_seeds=max_parents)
+            # Evidence target and conversation-parent capacity are separate.
+            comment_cleaned = list(cleaned)
+            cached_parent_candidates = (
+                store.read(folder / f"conversation-parent-candidates-{source}.json", []) or []
+            )
+            if cached_parent_candidates:
+                merged_rows = {
+                    str(row.get("id")): row
+                    for row in [*comment_cleaned, *cached_parent_candidates]
+                    if isinstance(row, dict) and row.get("id")
+                }
+                comment_cleaned = list(merged_rows.values())
+
+            capacity_refs, capacity_meta, _capacity_mode = _comment_seed_refs(
+                source, comment_cleaned, max_seeds=max_parents
+            )
+            reported_comment_capacity = sum(
+                max(0, int(m.get("comments", 0) or 0)) for m in capacity_meta
+            )
+            if (
+                source_comment_target > 0
+                and reported_comment_capacity < source_comment_target
+                and not deadline_check()
+            ):
+                extra_parent_rows = _discover_conversation_parent_candidates(
+                    folder,
+                    plan,
+                    sp,
+                    source,
+                    comment_target=source_comment_target,
+                    max_parents=max_parents,
+                    date_from=date_from,
+                    date_to=date_to,
+                    audit=audit,
+                    store=store,
+                    runner=runner,
+                    cancel_check=cancel_check,
+                    deadline_check=deadline_check,
+                    time_left=time_left,
+                    heartbeat=heartbeat,
+                )
+                merged_rows = {
+                    str(row.get("id")): row
+                    for row in [*cleaned, *extra_parent_rows]
+                    if isinstance(row, dict) and row.get("id")
+                }
+                comment_cleaned = list(merged_rows.values())
+
+            ranked_refs, ranked_meta, selection_mode = _comment_seed_refs(
+                source, comment_cleaned, max_seeds=max_parents
+            )
+            audit.setdefault("comment_parent_capacity", {})[source] = {
+                "evidence_pool_reported_comments": reported_comment_capacity,
+                "extra_parent_candidates": len(
+                    store.read(folder / f"conversation-parent-candidates-{source}.json", []) or []
+                ),
+                "selected_parents": len(ranked_refs),
+                "comment_target": source_comment_target,
+            }
             owned_set = set(owned_refs)
             pairs = [(r, m) for r, m in zip(ranked_refs, ranked_meta) if r not in owned_set]
             ranked_refs = [r for r, _ in pairs]
@@ -1162,7 +1496,7 @@ def adaptive_expand_after_cleaning(
                 used_refs = set(owned_refs) | set(ranked_refs)
                 retry_refs, retry_meta, retry_mode = _comment_seed_refs(
                     source,
-                    cleaned,
+                    comment_cleaned,
                     max_seeds=max_parents,
                     exclude_refs=used_refs,
                 )
@@ -1231,6 +1565,7 @@ def adaptive_expand_after_cleaning(
                 buckets_done=sorted(done_buckets),
                 collected=collected_now,
                 target=source_comment_target,
+                requested=source_comment_target,
                 shortfall=comment_shortfall,
                 parents=total_parents,
                 owned=got_owned,

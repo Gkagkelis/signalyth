@@ -195,6 +195,17 @@ def _elastic_subruns(source_plan: dict, adjusted_target: int, source_cap: float)
     return out
 
 
+def _route_request_target(planned_target: int, remaining_needed: int, *, primary: bool) -> int:
+    """Keep planned first-wave diversity; topups may take the full remainder."""
+    planned_target = max(0, int(planned_target or 0))
+    remaining_needed = max(0, int(remaining_needed or 0))
+    if remaining_needed <= 0:
+        return 0
+    if primary:
+        return min(planned_target, remaining_needed)
+    return remaining_needed
+
+
 def _source_base_cap(source_plan: dict) -> float:
     explicit = float(source_plan.get("source_budget_usd", 0) or 0)
     if explicit > 0:
@@ -573,10 +584,12 @@ def execute_plan(
 
                 sr_status = source_status["subruns"][sr_idx]
                 purpose = str(sr.get("purpose", "discovery"))
-                # Every planned query/batch is only a discovery route. It owns NO fixed
-                # fraction of the requested sample. Recompute the shared-source shortfall
-                # before every call and let the next route attempt the whole remainder.
-                current_norm, current_metrics = _normalize_partial(source, source_raw, desired_target, date_from, date_to)
+                # First wave = diversification contract. Every PRIMARY route keeps
+                # the planner share assigned to it; only TOP-UP routes may attempt
+                # the whole remaining shortfall.
+                current_norm, current_metrics = _normalize_partial(
+                    source, source_raw, desired_target, date_from, date_to
+                )
                 source_status.update(current_metrics)
                 remaining_needed = max(0, desired_target - len(current_norm))
                 if remaining_needed <= 0:
@@ -584,10 +597,23 @@ def execute_plan(
                     source_status["subruns_completed"] += 1
                     sync(f"{source}: target met; unused discovery route skipped", source, code="route_skipped_target_met", purpose=purpose)
                     continue
-                old_target = max(1, int(sr.get("target_items", desired_target) or desired_target))
-                sr["target_items"] = remaining_needed
-                sr["input"] = _resize_input(source, sr.get("input", {}), old_target, remaining_needed)
-                sr_status["target_items"] = remaining_needed
+
+                is_primary_route = sr_idx < len(primary_subruns)
+                planned_route_target = max(1, int(sr.get("target_items", desired_target) or desired_target))
+                route_target = _route_request_target(
+                    planned_route_target, remaining_needed, primary=is_primary_route
+                )
+                if route_target <= 0:
+                    sr_status.update({"status":"skipped_target_met","started_at":None,"completed_at":_utcnow(),"error":None})
+                    source_status["subruns_completed"] += 1
+                    continue
+
+                if route_target != planned_route_target:
+                    sr["input"] = _resize_input(
+                        source, sr.get("input", {}), planned_route_target, route_target
+                    )
+                sr["target_items"] = route_target
+                sr_status["target_items"] = route_target
                 sr_status.update({"status": "running", "started_at": _utcnow()})
                 sync(f"{source}: collecting {purpose}", source, code="collecting_purpose", purpose=purpose)
 
@@ -595,6 +621,11 @@ def execute_plan(
                 # Do not strand money in a route whose planned share happened to be small.
                 source_spent = max(0.0, float(source_status.get("cost_usd", 0.0) or 0.0))
                 safe_cap = min(max(0.0, source_cap - source_spent), max(0.0, guard.remaining))
+                if is_primary_route:
+                    planned_cap = max(0.0, float(sr.get("max_charge_usd", 0.0) or 0.0))
+                    if planned_cap > 0:
+                        cap_scale = route_target / max(1, planned_route_target)
+                        safe_cap = min(safe_cap, planned_cap * cap_scale)
                 if safe_cap <= 0:
                     sr_status.update({"status":"skipped_budget_safety","completed_at":_utcnow(),"error":"No remaining acquisition budget for this top-up route."})
                     source_status["subruns_completed"] += 1
