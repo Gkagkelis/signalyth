@@ -21,7 +21,7 @@ FACEBOOK_COMMENT_RUN_TIMEOUT_SECONDS = 420.0
 
 def actor_run_timeout_seconds(actor_id: str) -> float:
     actor = str(actor_id or "").strip().casefold()
-    if actor == "scraper_one/facebook-comments-scraper":
+    if actor in {"scraper_one/facebook-comments-scraper", "apify/facebook-comments-scraper"}:
         return FACEBOOK_COMMENT_RUN_TIMEOUT_SECONDS
     return ACTOR_RUN_TIMEOUT_SECONDS
 
