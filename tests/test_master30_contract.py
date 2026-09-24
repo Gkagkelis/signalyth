@@ -24,12 +24,12 @@ def test_topic_only_is_valid_and_facebook_uses_whole_target():
         assert sr.input["query"].strip() and sr.input["resultsCount"]==sr.target_items
 
 
-def test_x_has_global_target_without_per_query_quota():
+def test_x_has_global_target_with_per_query_coverage_guard():
     plan=build_collection_plan(draft())
     x=next(x for x in plan.sources if x.source=="x")
     assert x.subruns, "topic-only x planned no routes at all"
     assert sum(sr.input["maxItems"] for sr in x.subruns)==50
-    assert all("maxItemsPerTarget" not in sr.input for sr in x.subruns)
+    assert all(sr.input.get("maxItemsPerTarget", 0) >= 1 for sr in x.subruns)
 
 
 def test_instagram_uses_direct_hashtag_content_route_and_metadata_is_not_evidence():
