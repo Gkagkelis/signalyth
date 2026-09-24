@@ -155,10 +155,10 @@ class ColdHandoffTest(unittest.TestCase):
              patch("app.services.relevance_expansion.ApifyRunner", FakeApify), \
              patch("app.services.ai_analysis.OpenAIResponsesProvider", FakeModel):
 
-            new_worker = cut_worker_after_call(manager_a, 8)
+            new_worker = cut_worker_after_call(manager_a, 21)
             manager_a._worker(run_id)
             calls_a = len(FakeApify.calls)
-            self.assertGreaterEqual(calls_a, 7, "machine A never reached the comment layer")
+            self.assertGreaterEqual(calls_a, 20, "machine A never reached the comment layer")
             self.assertTrue(self.cloud.archive_exists(run_id),
                             "machine A never saved a durable copy")
             new_worker()
@@ -243,9 +243,10 @@ class MidSourceCutTest(unittest.TestCase):
              patch("app.services.relevance_expansion.ApifyRunner", FakeApify), \
              patch("app.services.ai_analysis.OpenAIResponsesProvider", FakeModel):
 
-            # One source: search, page discovery, then the FIRST comment call.
+            # One source under v30: six diversified searches, two semantic
+            # probes, page discovery at call 9, FIRST comment call at 10.
             # Cutting right after it leaves the owned pass done and open unrun.
-            new_worker = cut_worker_after_call(self.manager, 3)
+            new_worker = cut_worker_after_call(self.manager, 10)
             self.manager._worker(run_id)
             calls_a = list(FakeApify.calls)
 

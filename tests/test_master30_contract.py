@@ -11,18 +11,25 @@ def draft(**kw):
     base.update(kw);return AnalysisDraft(**base)
 
 
+# v30: a topic-only brief is still valid, but one route may no longer swallow
+# the whole target — the first wave is DIVERSIFIED across several routes that
+# together cover the target. These pins now guard that contract instead of the
+# old single-route one.
 def test_topic_only_is_valid_and_facebook_uses_whole_target():
     plan=build_collection_plan(draft())
     fb=next(x for x in plan.sources if x.source=="facebook")
-    assert len(fb.subruns)==1 and fb.subruns[0].target_items==50
-    assert fb.subruns[0].input["query"]=="Αλέξης Τσίπρας" and fb.subruns[0].input["resultsCount"]==50
+    assert len(fb.subruns)>=2, "topic-only facebook lost its diversified first wave"
+    assert sum(sr.target_items for sr in fb.subruns)==50
+    for sr in fb.subruns:
+        assert sr.input["query"].strip() and sr.input["resultsCount"]==sr.target_items
 
 
 def test_x_has_global_target_without_per_query_quota():
     plan=build_collection_plan(draft())
     x=next(x for x in plan.sources if x.source=="x")
-    assert x.subruns[0].input["maxItems"]==50
-    assert "maxItemsPerTarget" not in x.subruns[0].input
+    assert x.subruns, "topic-only x planned no routes at all"
+    assert sum(sr.input["maxItems"] for sr in x.subruns)==50
+    assert all("maxItemsPerTarget" not in sr.input for sr in x.subruns)
 
 
 def test_instagram_uses_direct_hashtag_content_route_and_metadata_is_not_evidence():

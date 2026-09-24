@@ -92,10 +92,18 @@ def test_reply_deepening_runs_when_comments_on_and_no_collision(tmp_path):
         "type": "reply", "inReplyToId": "400",
     }])
     result = adaptive_expand_after_cleaning(tmp_path, plan, report, runner=runner)
-    assert runner.calls and runner.calls[0][1]["mode"] == "replies"
+    # v30: with a measured analyzable shortfall the bounded semantic refill
+    # legitimately runs BEFORE comment deepening, so the replies call is no
+    # longer necessarily first. Any search call before it must stay bounded.
+    reply_calls = [c for c in runner.calls if c[1].get("mode") == "replies"]
+    assert reply_calls, f"no replies call at all: {[c[1].get('mode') for c in runner.calls]}"
+    for c in runner.calls:
+        if c[1].get("mode") == "search":
+            assert int(c[1].get("maxItems", 0)) <= 2 * report["trusted_sample_shortfall"], \
+                f"semantic refill call is not bounded: {c[1]}"
     # A reported zero is a ranking signal, not a verdict: 401 may be topped up
     # as an extra parent, but 400 — the one that REPORTED replies — comes first.
-    reply_ids = [str(x) for x in runner.calls[0][1]["replyTweetIds"]]
+    reply_ids = [str(x) for x in reply_calls[0][1]["replyTweetIds"]]
     assert reply_ids[0] == "400"
     assert set(reply_ids) <= {"400", "401"}
     assert result["report"]["trusted_sample_shortfall"] == 0
@@ -123,7 +131,9 @@ def test_reply_deepening_runs_from_configured_production_contract_without_separa
         "type": "reply", "inReplyToId": "800",
     }])
     result = adaptive_expand_after_cleaning(tmp_path, plan, report, runner=runner)
-    assert runner.calls and runner.calls[0][1]["mode"] == "replies"
-    assert runner.calls[0][1]["replyTweetIds"] == ["800"]
+    # v30: the semantic refill may run first (see above); find the replies call.
+    reply_calls = [c for c in runner.calls if c[1].get("mode") == "replies"]
+    assert reply_calls, f"no replies call at all: {[c[1].get('mode') for c in runner.calls]}"
+    assert reply_calls[0][1]["replyTweetIds"] == ["800"]
     assert "x:comment_deepening_not_operational" not in result["audit"]["warnings"]
     assert result["report"]["trusted_sample_shortfall"] == 0

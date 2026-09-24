@@ -32,11 +32,13 @@ from tests.test_whole_pipeline_v19 import FakeApify, FakeModel, _wait_terminal
 
 THREE = ["facebook", "instagram", "tiktok"]
 
-#: Where to cut worker A off. A full three-source run makes 16 Actor calls and
-#: the comment layer starts at call 7, so cutting after 8 leaves the run exactly
-#: where the live one died: Facebook comments half-collected, Instagram and
-#: TikTok comments not started, a cleaning file already on disk.
-CUT_AFTER_CALL = 8
+#: Where to cut worker A off. Under v30's diversified first wave a full
+#: three-source run makes 29 Actor calls and the comment layer starts at
+#: call 20 (searches 1-13, semantic probes 14-18, page discovery 19), so
+#: cutting after 21 leaves the run exactly where the live one died: Facebook
+#: comments half-collected, Instagram and TikTok comments not started, a
+#: cleaning file already on disk.
+CUT_AFTER_CALL = 21
 
 
 def cut_worker_after_call(manager, limit: int):
@@ -163,7 +165,7 @@ class WorkerHandoffTest(unittest.TestCase):
 
             # The cut has to land where it is supposed to, or this test proves
             # nothing: worker A must have REACHED the comment layer.
-            self.assertGreaterEqual(calls_a, 7,
+            self.assertGreaterEqual(calls_a, 20,
                                     f"worker A stopped before the comment layer ({calls_a} calls)")
             self.assertTrue(
                 (self.store.folder_for(run_id) / "cleaning" / "semantic-candidates.json").exists(),
@@ -207,7 +209,7 @@ class WorkerHandoffTest(unittest.TestCase):
             new_worker = cut_worker_after_call(self.manager, CUT_AFTER_CALL)
             self.manager._worker(run_id)
             after_a = [c for c in FakeApify.calls]
-            self.assertGreaterEqual(len(after_a), 7, "worker A never got far enough to matter")
+            self.assertGreaterEqual(len(after_a), 20, "worker A never got far enough to matter")
 
             new_worker()
             self.manager._worker(run_id)

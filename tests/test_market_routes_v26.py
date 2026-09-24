@@ -75,8 +75,25 @@ class TestItIsHorizontal:
             ["Nike", "Nike Deutschland"], "Nike", "Germany") == ["Nike Deutschland"]
 
     def test_the_last_route_is_never_taken_away(self):
-        """Leaving a source with zero queries would be worse than the noise."""
-        assert drop_bare_topic_route(["Nike"], "Nike", "Greece") == ["Nike"]
+        """v30 moved this guarantee one level up. The helper may now return
+        an empty list — restoring the bare route here silently reopened the
+        global firehose — but the PLANNER must never leave a source with
+        zero routes: the market top-ups are promoted into the first wave.
+        """
+        assert drop_bare_topic_route(["Nike"], "Nike", "Greece") == []
+        from datetime import date
+        from app.models import AnalysisDraft
+        from app.services.query_planner import build_collection_plan
+        d = AnalysisDraft(
+            client="Nike", topic="Nike", market="Greece",
+            date_from=date(2026, 9, 1), date_to=date(2026, 9, 7),
+            keywords=[], sources=["facebook", "x"], sample_mode="perSource",
+            per_source={"facebook": 20, "x": 20}, max_budget_usd=2.0,
+            smart_search=True, report_language="Ελληνικά",
+        )
+        for sp in build_collection_plan(d).sources:
+            assert sp.subruns, f"{sp.source}: a brand-only brief planned no routes at all"
+            assert sum(sr.target_items for sr in sp.subruns) >= 20
 
     def test_case_and_spacing_do_not_let_it_slip_through(self):
         assert drop_bare_topic_route(["  nike  ", "nike Greece"], "Nike", "Greece") == ["nike Greece"]
