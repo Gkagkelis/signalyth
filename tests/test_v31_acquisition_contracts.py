@@ -158,6 +158,13 @@ def test_subject_search_provenance_can_open_a_strong_greek_conversation_parent()
     assert meta[0]["market_score"] == pytest.approx(0.72)
 
 
+def test_provenance_keeps_real_greeklish_market_signal():
+    assert _comment_parent_candidate_tier(
+        "facebook", _provenance_parent(market_score=0.30)
+    ) == "provenance"
+
+
 def test_provenance_never_overrides_market_or_random_post_guards():
+    assert _comment_parent_candidate_tier("facebook", _provenance_parent(market_score=0.27)) is None
     assert _comment_parent_candidate_tier("facebook", _provenance_parent(market_score=0.1)) is None
     assert _comment_parent_candidate_tier("facebook", _provenance_parent(provenance=False)) is None
