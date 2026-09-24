@@ -1289,7 +1289,7 @@ def adaptive_expand_after_cleaning(
             routes,
             key=lambda sr: 0 if str(sr.get("purpose") or "") == "semantic_broad_probe" else 1,
         )
-        for idx, sr in enumerate(routes[:3]):
+        for idx, sr in enumerate(routes[:6]):
             if missing <= 0 or cancel_check():
                 break
             if deadline_check():
