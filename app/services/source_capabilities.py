@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import date, timedelta
 import math
 import re
 from urllib.parse import parse_qs, urlparse
@@ -321,6 +322,8 @@ def build_comment_deepening_input(
     *,
     max_per_parent: int | None = None,
     include_replies: bool = True,
+    date_from: date | None = None,
+    date_to: date | None = None,
 ) -> dict:
     """Build the curated public-schema input shape for a comment/reply route."""
     cap = source_capabilities(source).get("comment_deepening") or {}
@@ -345,12 +348,18 @@ def build_comment_deepening_input(
     if source == "x":
         # "replies" is direct-only in Xquik. Thread mode preserves replies to
         # replies; the normalizer drops the root tweet and keeps its descendants.
-        return {
+        out = {
             "mode": "thread",
             "threadTweetIds": [_x_id(x) for x in refs],
             "maxItems": max_items,
             "maxItemsPerTarget": max(1, per_parent),
         }
+        if date_from:
+            out["since"] = f"{date_from.isoformat()}_00:00:00_UTC"
+        if date_to:
+            until_exclusive = date_to + timedelta(days=1)
+            out["until"] = f"{until_exclusive.isoformat()}_00:00:00_UTC"
+        return out
     if source == "tiktok":
         return {"startUrls": refs, "includeReplies": bool(include_replies), "maxItems": max_items}
     if source == "instagram":
