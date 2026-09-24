@@ -39,8 +39,9 @@ DIAGNOSTIC_STATUSES = {
     "no-input", "invalid-input", "replies-incomplete", "zero-output", "aborted", "unexpected-error",
 }
 MULTI_TARGET_FIELDS = (
-    "searchTerms", "search", "queries", "keywords", "directUrls", "startUrls", "replyTweetIds",
-    "conversationIds", "tweetIds", "urls",
+    "searchTerms", "search", "queries", "keywords", "directUrls", "startUrls",
+    "postUrls", "replyTweetIds", "threadTweetIds", "conversationIds",
+    "twitterHandles", "profiles", "tweetIds", "urls",
 )
 DEFAULT_SAFE_BATCH_SIZE = {
     "x": 2,
