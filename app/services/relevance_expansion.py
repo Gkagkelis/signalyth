@@ -882,21 +882,7 @@ def _conversation_probe_target(comment_target: int, max_parents: int) -> int:
     )
 
 def _conversation_parent_is_strong(source: str, row: dict) -> bool:
-    if not _comment_parent_candidate_allowed(source, row):
-        return False
-    cleaning = row.get("cleaning") if isinstance(row.get("cleaning"), dict) else {}
-    flags = {str(x) for x in (cleaning.get("flags") or [])}
-    reasons = {str(x) for x in (cleaning.get("reasons") or [])}
-    if "no_subject_signal" in flags or "subject_not_mentioned" in reasons:
-        return False
-    if not any(reason.startswith("core_term:") for reason in reasons):
-        return False
-    try:
-        if float(cleaning.get("market_score", 0) or 0) < float(RULESET_CONFIG["market_review_below"]):
-            return False
-    except Exception:
-        return False
-    return True
+    return _comment_parent_candidate_tier(source, row) is not None
 
 
 def _conversation_probe_input(
@@ -1032,6 +1018,16 @@ def _discover_conversation_parent_candidates(
             normalized = normalize_dataset(
                 source, raw_rows, mapping=output_mapping_for(source)
             )
+            route_query = None
+            for query_field in ("query", "searchTerms", "search", "queries", "keywords", "directUrls", "startUrls"):
+                value = inp.get(query_field)
+                if value not in (None, "", []):
+                    route_query = copy.deepcopy(value)
+                    break
+            for row in normalized:
+                row["subject_search_provenance"] = True
+                row["collection_route"] = purpose
+                row["collection_query"] = route_query
             parent_from = date_from - timedelta(days=PARENT_LOOKBACK_DAYS)
             normalized = [row for row in normalized if in_range(row, parent_from, date_to)]
             if normalized:
