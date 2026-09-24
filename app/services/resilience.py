@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from app.config import settings
+from app.services.source_capabilities import DISCOVERY_ACTOR_CONTRACTS
 
 
 #: Default Actor wall time. A small number of known slow production routes
@@ -44,12 +45,8 @@ MULTI_TARGET_FIELDS = (
     "twitterHandles", "profiles", "tweetIds", "urls",
 )
 DEFAULT_SAFE_BATCH_SIZE = {
-    "x": 2,
-    "tiktok": 1,
-    "instagram": 1,
-    "facebook": 1,
-    "youtube": 1,
-    "news": 2,
+    source: max(1, int(contract.get("safe_target_batch") or 1))
+    for source, contract in DISCOVERY_ACTOR_CONTRACTS.items()
 }
 
 
