@@ -603,10 +603,24 @@ def make_source_plan(source: str, target: int, draft: AnalysisDraft, queries: li
             primary = promoted
             topups = topups[len(promoted):]
     if source == "x" and draft.market.casefold() == "greece":
+        # Always keep one broad subject+Greek-language route. Without it, a
+        # topic-only Latin brand (Nike, Eurojackpot, Vodafone) was narrowed to
+        # literal Greece/Ellada terms and missed ordinary Greek-language speech.
+        lang_topic = f"{routes['topic']} lang:el"
+        if draft.search_strategy == "balanced_smart" and draft.smart_search:
+            lang_topic += " -filter:nativeretweets"
+        primary = uniq([lang_topic, *primary])
         # X is the one source with a native language operator; use it as the
         # single anchor on every route that does not already carry one.
         primary = uniq([greece_x_route_anchor(q) for q in primary])
         topups = uniq([greece_x_route_anchor(q) for q in topups])
+
+    if source == "facebook" and str(draft.market or "").strip():
+        # Facebook search has no country-wide market control. Keep one bounded
+        # bare-subject slice alongside market-anchored routes, then let the
+        # deterministic Greece gate decide what survives. This recovers Greek
+        # posts that naturally say "Eurojackpot" but never literally "Greece".
+        primary = uniq([*primary, routes["topic"]])
     safe = max(1, int(get_safe_batch_size(source, actor)))
     source_budget = max(0.0, float(source_budget))
     has_topups = bool(topups) or source == "x"
@@ -672,7 +686,8 @@ def make_source_plan(source: str, target: int, draft: AnalysisDraft, queries: li
             primary_tag = tags[0]
             inp = {"directUrls": [f"https://www.instagram.com/explore/tags/{primary_tag.lower()}/"],
                    "resultsType": "posts", "resultsLimit": target,
-                   "onlyPostsNewerThan": draft.date_from.isoformat(), "addParentData": True}
+                   "onlyPostsNewerThan": draft.date_from.isoformat(),
+                   "skipPinnedPosts": True, "addParentData": True}
             subruns = [_sub(actor, inp, target, primary_budget, "primary_hashtag_posts", draft)]
             extra_tags = tags[1:4]
             for i, tag in enumerate(extra_tags):
@@ -747,6 +762,7 @@ def make_source_plan(source: str, target: int, draft: AnalysisDraft, queries: li
                 probe_inp = {"directUrls": [f"https://www.instagram.com/explore/tags/{hashtag(routes['topic']).lower()}/"],
                              "resultsType": "posts", "resultsLimit": cap_items,
                              "onlyPostsNewerThan": draft.date_from.isoformat(),
+                             "skipPinnedPosts": True,
                              "addParentData": True}
             semantic_subruns.append(
                 _sub(actor, probe_inp, cap_items, probe_budget,
