@@ -87,6 +87,11 @@ def _charge_cap(
 TIKTOK_COMMENT_QUERY_USD = 0.003
 TIKTOK_REPLY_QUERY_USD = 0.003
 
+# Official Facebook Comments Actor, conservative no-discount event prices.
+# This only sizes the maximum charge envelope; the provider bills actual usage.
+FACEBOOK_COMMENT_ACTOR_START_USD = 0.001
+FACEBOOK_DATE_FILTER_PER_POST_USD = 0.002
+
 
 def _comment_minimum_attempt_charge_usd(
     source: str,
@@ -100,7 +105,7 @@ def _comment_minimum_attempt_charge_usd(
     deliberately conservative: at most one reply-query event per requested
     output item. This is a CAP, not a charge; Apify still bills only used events.
     """
-    if source != "tiktok":
+    if source not in {"tiktok", "facebook"}:
         return 0.0
     refs = actor_input.get("startUrls") if isinstance(actor_input, dict) else None
     parent_count = len(refs) if isinstance(refs, list) else 0
@@ -110,6 +115,18 @@ def _comment_minimum_attempt_charge_usd(
     item_cost = 0.0
     if rate_per_1000 not in (None, 0):
         item_cost = float(rate_per_1000) * wanted / 1000.0
+
+    if source == "facebook":
+        date_cost = (
+            FACEBOOK_DATE_FILTER_PER_POST_USD * parent_count
+            if actor_input.get("onlyCommentsNewerThan")
+            else 0.0
+        )
+        return round(
+            (FACEBOOK_COMMENT_ACTOR_START_USD + date_cost + item_cost) * 1.10,
+            6,
+        )
+
     query_cost = TIKTOK_COMMENT_QUERY_USD * parent_count
     reply_cost = TIKTOK_REPLY_QUERY_USD * wanted if actor_input.get("includeReplies") else 0.0
     # Small headroom prevents floating-point/event-rounding edge cases.
