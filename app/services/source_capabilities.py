@@ -93,13 +93,13 @@ SOURCE_CAPABILITIES = {
         "discovery": "primary_actor",
         "comment_deepening": {
             "mode": "companion_actor",
-            "candidate_actor_id": "scraper_one/facebook-comments-scraper",
+            "candidate_actor_id": "apify/facebook-comments-scraper",
             "input_route": "comments",
-            "input_field": "postUrls",
+            "input_field": "startUrls",
             "public_schema_known": True,
             "live_verified": False,
             "enabled": False,
-            "note": "Companion Actor accepts Facebook post URLs and returns comment evidence.",
+            "note": "Official Apify Actor supports Facebook post URLs, up to three nested reply levels, recent-activity ordering and a lower date bound.",
         },
     },
     "tiktok": {
@@ -366,11 +366,20 @@ def build_comment_deepening_input(
         # ScrapeSmith's schema uses a per-parent limit rather than maxItems.
         return {"postUrls": refs, "maxCommentsPerPost": per_parent, "sortOrder": "recent"}
     if source == "facebook":
-        # Scraper One caps postUrls at 5. Batching is handled by the caller.
-        # For a bounded research window request NEWEST first: "all"/"relevant"
-        # can spend the per-post limit on older comments that are then correctly
-        # dropped by SIGNALYTH's exact date filter, creating a false 0-comment run.
-        return {"postUrls": refs, "resultsLimit": per_parent, "commentsSortType": "newest"}
+        # The official Apify Actor is used because the research contract includes
+        # replies-to-comments, not only top-level comments. It returns nested
+        # replies as separate dataset rows (up to three levels). Recent activity
+        # plus the native lower bound protects a bounded research window; the
+        # exact date_to remains enforced by SIGNALYTH after normalization.
+        inp = {
+            "startUrls": [{"url": r} for r in refs],
+            "resultsLimit": max_items,
+            "includeNestedComments": bool(include_replies),
+            "viewOption": "RECENT_ACTIVITY",
+        }
+        if date_from:
+            inp["onlyCommentsNewerThan"] = str(date_from)
+        return inp
     if source == "youtube":
         return {"startUrls": refs, "maxItems": max_items}
     field = cap.get("input_field")
