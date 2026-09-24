@@ -18,8 +18,15 @@ def test_comment_input_shapes_are_actor_specific():
     assert build_comment_deepening_input("tiktok", ["https://www.tiktok.com/@u/video/123"], 9)["includeReplies"] is True
     ig = build_comment_deepening_input("instagram", ["https://www.instagram.com/p/ABC/"], 12, max_per_parent=5)
     assert ig == {"postUrls": ["https://www.instagram.com/p/ABC/"], "maxCommentsPerPost": 5, "sortOrder": "recent"}
-    fb = build_comment_deepening_input("facebook", ["https://www.facebook.com/x/posts/1"], 12, max_per_parent=6)
-    assert fb["resultsLimit"] == 6 and fb["commentsSortType"] == "newest"
+    fb = build_comment_deepening_input(
+        "facebook", ["https://www.facebook.com/x/posts/1"], 12,
+        max_per_parent=6, include_replies=True, date_from="2026-09-14",
+    )
+    assert fb["startUrls"] == [{"url": "https://www.facebook.com/x/posts/1"}]
+    assert fb["resultsLimit"] == 12
+    assert fb["includeNestedComments"] is True
+    assert fb["viewOption"] == "RECENT_ACTIVITY"
+    assert fb["onlyCommentsNewerThan"] == "2026-09-14"
 
 
 def test_instagram_comments_and_nested_replies_become_separate_evidence():
@@ -67,7 +74,7 @@ def test_x_reply_normalization_is_reply_layer():
 
 
 def test_forecast_allows_curated_configured_actor_when_enabled():
-    cfg = {"comment_actor_id": "scraper_one/facebook-comments-scraper", "comment_deepening_status": "configured", "comment_enabled": False}
+    cfg = {"comment_actor_id": "apify/facebook-comments-scraper", "comment_deepening_status": "configured", "comment_enabled": False}
     assert comments_forecast("facebook", True, cfg)["status"] == "configured_disabled"
     cfg["comment_enabled"] = True
     assert comments_forecast("facebook", True, cfg)["status"] == "configured_available"
@@ -164,3 +171,33 @@ def test_comment_inherits_structured_parent_subject_and_market_without_literal_w
     assert "contextual_parent_match" in cleaned["cleaning"]["flags"]
     assert "parent_market_context" in cleaned["cleaning"]["flags"]
     assert "provenance_parent_context" in cleaned["cleaning"]["flags"]
+
+
+def test_facebook_official_nested_reply_normalization():
+    parent = "https://www.facebook.com/example/posts/123"
+    rows = normalize_comment_dataset("facebook", [
+        {
+            "facebookUrl": parent,
+            "commentId": "top",
+            "date": "2026-09-18T10:00:00Z",
+            "text": "top level",
+            "profileName": "A",
+            "likesCount": "2",
+            "commentsCount": 1,
+            "threadingDepth": 0,
+            "comments": [{
+                "commentId": "reply",
+                "date": "2026-09-18T10:01:00Z",
+                "text": "nested reply",
+                "profileName": "B",
+                "likesCount": "1",
+                "threadingDepth": 1,
+                "replyToCommentId": "top",
+            }],
+        }
+    ], seed_refs=[parent])
+    by_id = {r["comment_id"]: r for r in rows}
+    assert by_id["top"]["evidence_layer"] == "comment"
+    assert by_id["reply"]["evidence_layer"] == "reply"
+    assert by_id["reply"]["parent_comment_id"] == "top"
+    assert by_id["reply"]["parent_post"] == parent
