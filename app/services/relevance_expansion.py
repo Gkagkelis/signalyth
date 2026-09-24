@@ -530,11 +530,18 @@ def _collect_seeds(source: str, rows: list[dict], max_seeds: int, skip_reported_
             continue
         seen.add(ref)
         refs.append(ref)
+        cleaning = row.get("cleaning") if isinstance(row.get("cleaning"), dict) else {}
+        tier = _comment_parent_candidate_tier(source, row) or "direct"
         meta.append({
             "ref": ref, "comments": comments_n, "url": row.get("url"),
             "text": str(row.get("text") or "")[:220],
             "heat": round(parent_heat_score(row), 3),
             "origin": "ranked",
+            "market_score": float(cleaning.get("market_score", 0) or 0),
+            "subject_qualified": True,
+            "qualification_tier": tier,
+            "collection_route": row.get("collection_route"),
+            "collection_query": row.get("collection_query"),
         })
         if len(refs) >= max_seeds:
             break
@@ -560,14 +567,21 @@ def _comment_seed_refs(
 
     rows: list[dict] = []
     for row in cleaned:
-        if not _comment_parent_candidate_allowed(source, row):
+        tier = _comment_parent_candidate_tier(source, row)
+        if not tier:
             continue
         ref = _seed_ref(source, row)
         if not ref or ref in excluded:
             continue
         rows.append(row)
 
-    rows.sort(key=parent_heat_score, reverse=True)
+    rows.sort(
+        key=lambda row: (
+            1 if _comment_parent_candidate_tier(source, row) == "direct" else 0,
+            parent_heat_score(row),
+        ),
+        reverse=True,
+    )
     if not rows:
         return [], [], "no_relevant_parent_rows"
 
