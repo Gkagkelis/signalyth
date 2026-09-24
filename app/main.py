@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import json
+import os
 import re
 import traceback
 from pathlib import Path as _Path
@@ -95,6 +96,18 @@ async def _unhandled_exception_to_json(request: Request, exc: Exception):
     except Exception:
         pass
     return JSONResponse(status_code=500, content={"detail": f"Server error: {record['error']}"})
+
+
+@app.get("/api/version")
+def app_version():
+    """Expose the deployed Git commit so operators can verify a rollout."""
+    return {
+        "app": "SIGNALYTH",
+        "version": app.version,
+        "acquisition_contract": "v31",
+        "git_sha": os.environ.get("VERCEL_GIT_COMMIT_SHA") or os.environ.get("GIT_COMMIT_SHA") or None,
+        "vercel_env": os.environ.get("VERCEL_ENV") or None,
+    }
 
 
 @app.get("/api/debug/disk")
