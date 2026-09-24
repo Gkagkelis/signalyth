@@ -398,7 +398,11 @@ def semantic_broad_probe_target(target: int) -> int:
     target = max(0, int(target or 0))
     if target <= 0:
         return 0
-    return min(12, max(3, int(math.ceil(target * 0.25))))
+    # Broad recall is post-cleaning and therefore may safely over-fetch:
+    # final evidence still has to pass subject + market cleaning. A tiny 25%
+    # probe starved topic-only Facebook/Instagram briefs before Greece rows had
+    # a chance to appear. Keep it bounded, but large enough to measure yield.
+    return min(60, max(12, int(math.ceil(target * 1.5))))
 
 
 def instagram_discovery_tags(draft: AnalysisDraft) -> list[str]:
@@ -415,7 +419,11 @@ def instagram_discovery_tags(draft: AnalysisDraft) -> list[str]:
         for alias in routes["aliases"][:2]: tags.append(hashtag(alias))
         for term in [*routes["required"], *routes["contexts"]][:2]: tags.append(hashtag(f"{topic} {term}"))
         tags = uniq([t for t in tags if t])[:4]
-        return tags
+        # A subject-only brief can legitimately have no local alias/context.
+        # Zero primary routes is worse than a bounded global topic route: the
+        # cleaner still enforces Greece before analysis, and adaptive refill can
+        # continue if the first global slice is mostly foreign.
+        return tags or [hashtag(topic)]
     tags = [hashtag(topic)]
     for alias in routes["aliases"][:1]: tags.append(hashtag(alias))
     for term in [*routes["required"], *routes["contexts"]][:2]: tags.append(hashtag(f"{topic} {term}"))
@@ -617,7 +625,9 @@ def make_source_plan(source: str, target: int, draft: AnalysisDraft, queries: li
         shares = split_target(target, len(batches))
         caps = caps_for(shares, primary_budget)
         for i, (batch, share) in enumerate(zip(batches, shares)):
-            inp = {"mode": "search", "searchTerms": batch, "maxItems": share, "includeSearchTerms": True,
+            inp = {"mode": "search", "searchTerms": batch, "maxItems": share,
+                   "maxItemsPerTarget": max(1, math.ceil(share / max(1, len(batch)))),
+                   "includeSearchTerms": True,
                    "queryType": "Latest", "since": f"{draft.date_from.isoformat()}_00:00:00_UTC",
                    "until": f"{until_exclusive.isoformat()}_00:00:00_UTC"}
             purpose = "primary_global" if len(batches) == 1 else f"primary_route_{i+1}"
@@ -626,7 +636,9 @@ def make_source_plan(source: str, target: int, draft: AnalysisDraft, queries: li
         tbatches = batched(tq, safe)[:4]
         tcaps = [topup_budget / max(1, len(tbatches)) for _ in tbatches]
         for i, batch in enumerate(tbatches):
-            inp = {"mode": "search", "searchTerms": batch, "maxItems": target, "includeSearchTerms": True,
+            inp = {"mode": "search", "searchTerms": batch, "maxItems": target,
+                   "maxItemsPerTarget": max(1, math.ceil(target / max(1, len(batch)))),
+                   "includeSearchTerms": True,
                    "queryType": "Latest + Top", "since": f"{draft.date_from.isoformat()}_00:00:00_UTC",
                    "until": f"{until_exclusive.isoformat()}_00:00:00_UTC"}
             topup_subruns.append(_sub(actor, inp, target, tcaps[i], f"topup_latest_plus_top_{i+1}", draft))
