@@ -57,7 +57,14 @@ jobs:
           pip install pytest
       - name: Compile
         run: python -m compileall -q app tests
-      - name: v30.2 focused regression
-        run: pytest -q tests/test_v30_2_comment_conversation.py
+      - name: v31 focused acquisition regression
+        run: >-
+          pytest -q
+          tests/test_v31_acquisition_contracts.py
+          tests/test_v30_2_comment_conversation.py
+          tests/test_v30_conversation_acquisition.py
+          tests/test_market_routes_v26.py
+          tests/test_page_never_reaches_comments_v23.py
+          tests/test_cold_handoff_v21.py
       - name: Full regression suite
         run: pytest -q --tb=short
