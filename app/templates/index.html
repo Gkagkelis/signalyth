@@ -201,6 +201,8 @@ function saveAgencyBranding(){const company=(document.getElementById('agencyComp
 
 let runsPollTimer=null;let detailPollTimer=null,lastDetailHtml='',detailRunId=null,lastRunsHtml='';
 let autoResumeAt={};
+const AUTO_RESUME_STALE_MS=21*60*1000; // backend orphan threshold is 20m; 1m clock-skew cushion
+const AUTO_RESUME_RETRY_MS=60*1000;
 function t9(k){try{return t(k)}catch(e){return k}}
 function heartbeatInfo(updatedAt){
   const age=(Date.now()-Date.parse(updatedAt||0))/1000;
@@ -210,13 +212,21 @@ function heartbeatInfo(updatedAt){
 }
 async function maybeAutoResume(run){
   const active=['running','queued','cancelling'].includes(run.status);
-  const recoverable=run.status==='failed'&&['ai_analysis_failed','exports_failed'].includes(run.phase);
-  const age=(Date.now()-Date.parse(run.updated_at||0))/1000;
-  if(!(((active&&age>660))||recoverable&&false))return (active&&age>660);
+  const ageMs=Date.now()-Date.parse(run.updated_at||0);
+  if(!active||!Number.isFinite(ageMs)||ageMs<AUTO_RESUME_STALE_MS)return false;
   const last=autoResumeAt[run.run_id]||0;
-  if(Date.now()-last<15*60*1000)return true;
+  if(Date.now()-last<AUTO_RESUME_RETRY_MS)return true;
   autoResumeAt[run.run_id]=Date.now();
-  try{await fetch('/api/runs/'+encodeURIComponent(run.run_id)+'/start',{method:'POST'})}catch(e){}
+  try{
+    const rr=await fetch('/api/runs/'+encodeURIComponent(run.run_id)+'/start',{method:'POST'});
+    if(!rr.ok){
+      // Do not hide a failed recovery attempt for 15 minutes. The backend only
+      // accepts the resume once its own stale-worker threshold is reached.
+      autoResumeAt[run.run_id]=Date.now();
+    }
+  }catch(e){
+    autoResumeAt[run.run_id]=Date.now();
+  }
   return true;
 }
 const actors=[['X','xquik/x-tweet-scraper'],['TikTok','epctex/tiktok-search-scraper'],['Instagram','apify/instagram-scraper'],['Facebook','scraper_one/facebook-posts-search'],['YouTube','apidojo/youtube-scraper'],['News','logiover/google-news-scraper']];
@@ -554,7 +564,7 @@ function runCard(x){
   const spent=Number(x.budget?.spent_usd)||0;
   const max=Number(x.budget?.max_usd||x.max_budget_usd)||0;
   const current=currentStepText(x);
-  return `<button class="run-card" data-run-id="${esc(x.run_id)}"><div class="run-top"><div><div class="run-title">${esc(x.topic||'—')}</div><div class="run-meta"><span>${esc(x.client||'—')}</span><span>${esc(x.market||'—')}</span><span>${esc(x.date_from||'')} → ${esc(x.date_to||'')}</span></div></div><div class="run-side">${(['running','queued'].includes(x.status)&&(Date.now()-Date.parse(x.updated_at||0))>660000)?`<span class="run-status" style="background:#FDF3E7;color:#B26A00" title="${t('autoResuming')}">⟳ ${t('staleChip')}</span>`:''}<span class="run-status ${runStatusClass(x.status)}">${esc(runStatusLabel(x.status))}</span><span class="run-delete" data-del-run="${esc(x.run_id)}" title="${t('deleteRun')}" style="margin-left:8px;cursor:pointer;font-size:17px;line-height:1;color:var(--muted);padding:2px 8px;border-radius:8px">×</span></div></div><div class="run-progress"><span style="width:${p}%"></span></div><div class="run-foot"><span class="run-current">${esc(current)}</span><span><span class="run-number">${fmtInt(collected)}</span> / ${fmtInt(target)}</span><span>${fmtUsd(spent)} / ${fmtUsd(max)}</span></div></button>`;
+  return `<button class="run-card" data-run-id="${esc(x.run_id)}"><div class="run-top"><div><div class="run-title">${esc(x.topic||'—')}</div><div class="run-meta"><span>${esc(x.client||'—')}</span><span>${esc(x.market||'—')}</span><span>${esc(x.date_from||'')} → ${esc(x.date_to||'')}</span></div></div><div class="run-side">${(['running','queued'].includes(x.status)&&(Date.now()-Date.parse(x.updated_at||0))>AUTO_RESUME_STALE_MS)?`<span class="run-status" style="background:#FDF3E7;color:#B26A00" title="${t('autoResuming')}">⟳ ${t('staleChip')}</span>`:''}<span class="run-status ${runStatusClass(x.status)}">${esc(runStatusLabel(x.status))}</span><span class="run-delete" data-del-run="${esc(x.run_id)}" title="${t('deleteRun')}" style="margin-left:8px;cursor:pointer;font-size:17px;line-height:1;color:var(--muted);padding:2px 8px;border-radius:8px">×</span></div></div><div class="run-progress"><span style="width:${p}%"></span></div><div class="run-foot"><span class="run-current">${esc(current)}</span><span><span class="run-number">${fmtInt(collected)}</span> / ${fmtInt(target)}</span><span>${fmtUsd(spent)} / ${fmtUsd(max)}</span></div></button>`;
 }
 async function renderRuns(){
   const host=document.getElementById('view-runs');
@@ -669,9 +679,10 @@ async function openRunDetails(runId,isRefresh){
     const aiDone=['intelligence','intelligence_ready','investigations','investigations_ready','visualizations','visualizations_ready','exports','exports_ready','completed'].includes(ph);
     const repDone=['exports_ready','completed'].includes(ph)||d.visualizations?.status==='succeeded';
     const cd=d.comment_deepening||{};
-    const cdKeys=Object.keys(cd);
+    const commentEntries=Object.entries(cd).filter(([,v])=>v&&typeof v==='object'&&!Array.isArray(v));
+    const cdKeys=commentEntries.map(([k])=>k);
     const commentsOn=!!d.comments_requested;
-    const commentStates=Object.values(cd).map(c=>String(c?.status||''));
+    const commentStates=commentEntries.map(([,c])=>String(c.status||''));
     const commentRunning=commentStates.some(st=>st==='running');
     const commentPending=commentStates.some(st=>['queued','pending','deferred','retrying'].includes(st));
     const commentFailed=commentStates.some(st=>st==='failed');
@@ -708,7 +719,7 @@ async function openRunDetails(runId,isRefresh){
         info=`<span class="source-ok">${got} ${t('commentsUnit')} · ${fmtInt(c.parents||0)} ${t('commentsPosts')} · ${fmtUsd(c.cost_usd||0)}</span>`}
       const shownTarget=Number(c.target||c.requested||0);
       return `<div class="source-run"><strong>${esc(name)}</strong><span class="run-status ${runStatusClass(cls)}">${esc(st)}</span>${info}<span>${shownTarget?fmtInt(shownTarget):''}</span></div>`}).join('');
-    const detailHtml=`<div class="review-head"><div><div class="sum-label" style="color:var(--muted)">${t('runDetails')}</div><h3 id="reviewTitle">${esc(d.topic||'—')}</h3><div class="hint">${esc(d.client||'—')} · ${esc(d.market||'—')} · ${esc(d.date_from||'')} → ${esc(d.date_to||'')}</div></div><button class="close-x" id="reviewClose">×</button></div><div class="review-body"><div class="review-section"><div class="run-detail-head"><span class="run-status ${runStatusClass(d.status)}">${esc(runStatusLabel(d.status))}</span><span class="n">${Math.max(0,Math.min(100,Number(d.progress?.percent)||0))}%</span><div style="font-size:11px;margin-top:4px;color:${hb.cls==='stale'?'#B23B32':hb.cls==='warn'?'#B26A00':'var(--muted)'}">● ${t('lastSignal')}: ${hb.text}${hb.cls==='stale'?' — '+t('autoResuming'):''}</div></div><div class="run-progress"><span style="width:${Math.max(0,Math.min(100,Number(d.progress?.percent)||0))}%"></span></div><div class="review-grid"><div class="review-item"><span>${t('currentStep')}</span><b>${esc(currentStepText(d)||'—')}</b></div><div class="review-item"><span>${t('sampleProgress')}</span><b>${fmtInt(detailCollected)} / ${fmtInt(d.target_total||d.sample_target||0)}</b></div><div class="review-item"><span>${t('budgetUsed')}</span><b>${fmtUsd(d.budget?.spent_usd||0)} / ${fmtUsd(d.budget?.max_usd||d.max_budget_usd||0)}</b></div><div class="review-item"><span>${t('runProgress')}</span><b>${fmtInt(d.progress?.completed_sources||0)} / ${fmtInt(d.progress?.total_sources||0)} sources</b></div></div>${fatal}<div class="run-detail-head" style="margin-top:18px"><div class="sum-label" style="color:var(--muted)">${t('pipeline')}</div></div>${pipeHtml}</div><div class="review-section"><h4>${t('commentsLayer')}</h4><div class="source-run-list">${cdRows||'—'}</div></div>${d.cleaning?.summary?cleaningSummaryHtml(d.cleaning.summary,runId):''}${d.analysis?.summary?aiSummaryHtml(d.analysis.summary,runId):''}${d.intelligence?.summary?intelligenceSummaryHtml(d.intelligence.summary):''}${d.investigations?.summary?investigationsSummaryHtml(d.investigations.summary):''}${d.visualizations?.summary?visualizationsSummaryHtml(d.visualizations.summary,runId):''}<div class="review-section"><h4>${t('sourceStatus')}</h4><div class="source-run-list">${sources||'—'}</div></div></div><div class="review-foot"><div class="lifecycle-note">${t('lifecycleCopy')}</div><button class="btn secondary" id="runClose">${t('close')}</button>${d.visualizations?.status==='succeeded'?`<button class="btn" id="runExports">${t('exports')} →</button>`:''}${planned?`<button class="btn" id="runStart">${t('startRun')}</button>`:''}${((['running','queued','cancelling'].includes(d.status)&&(Date.now()-Date.parse(d.updated_at||0))>600000)||(d.status==='failed'&&['ai_analysis_failed','exports_failed'].includes(d.phase)))?`<button class="btn" id="runResume" title="${t('resumeHint')}">${t('resumeRun')}</button>`:''}${active?`<button class="btn danger-btn" id="runCancel">${t('cancelRun')}</button>`:''}</div>`;
+    const detailHtml=`<div class="review-head"><div><div class="sum-label" style="color:var(--muted)">${t('runDetails')}</div><h3 id="reviewTitle">${esc(d.topic||'—')}</h3><div class="hint">${esc(d.client||'—')} · ${esc(d.market||'—')} · ${esc(d.date_from||'')} → ${esc(d.date_to||'')}</div></div><button class="close-x" id="reviewClose">×</button></div><div class="review-body"><div class="review-section"><div class="run-detail-head"><span class="run-status ${runStatusClass(d.status)}">${esc(runStatusLabel(d.status))}</span><span class="n">${Math.max(0,Math.min(100,Number(d.progress?.percent)||0))}%</span><div style="font-size:11px;margin-top:4px;color:${hb.cls==='stale'?'#B23B32':hb.cls==='warn'?'#B26A00':'var(--muted)'}">● ${t('lastSignal')}: ${hb.text}${hb.cls==='stale'?' — '+t('autoResuming'):''}</div></div><div class="run-progress"><span style="width:${Math.max(0,Math.min(100,Number(d.progress?.percent)||0))}%"></span></div><div class="review-grid"><div class="review-item"><span>${t('currentStep')}</span><b>${esc(currentStepText(d)||'—')}</b></div><div class="review-item"><span>${t('sampleProgress')}</span><b>${fmtInt(detailCollected)} / ${fmtInt(d.target_total||d.sample_target||0)}</b></div><div class="review-item"><span>${t('budgetUsed')}</span><b>${fmtUsd(d.budget?.spent_usd||0)} / ${fmtUsd(d.budget?.max_usd||d.max_budget_usd||0)}</b></div><div class="review-item"><span>${t('runProgress')}</span><b>${fmtInt(d.progress?.completed_sources||0)} / ${fmtInt(d.progress?.total_sources||0)} sources</b></div></div>${fatal}<div class="run-detail-head" style="margin-top:18px"><div class="sum-label" style="color:var(--muted)">${t('pipeline')}</div></div>${pipeHtml}</div><div class="review-section"><h4>${t('commentsLayer')}</h4><div class="source-run-list">${cdRows||'—'}</div></div>${d.cleaning?.summary?cleaningSummaryHtml(d.cleaning.summary,runId):''}${d.analysis?.summary?aiSummaryHtml(d.analysis.summary,runId):''}${d.intelligence?.summary?intelligenceSummaryHtml(d.intelligence.summary):''}${d.investigations?.summary?investigationsSummaryHtml(d.investigations.summary):''}${d.visualizations?.summary?visualizationsSummaryHtml(d.visualizations.summary,runId):''}<div class="review-section"><h4>${t('sourceStatus')}</h4><div class="source-run-list">${sources||'—'}</div></div></div><div class="review-foot"><div class="lifecycle-note">${t('lifecycleCopy')}</div><button class="btn secondary" id="runClose">${t('close')}</button>${d.visualizations?.status==='succeeded'?`<button class="btn" id="runExports">${t('exports')} →</button>`:''}${planned?`<button class="btn" id="runStart">${t('startRun')}</button>`:''}${((['running','queued','cancelling'].includes(d.status)&&(Date.now()-Date.parse(d.updated_at||0))>AUTO_RESUME_STALE_MS)||(d.status==='failed'&&['ai_analysis_failed','exports_failed'].includes(d.phase)))?`<button class="btn" id="runResume" title="${t('resumeHint')}">${t('resumeRun')}</button>`:''}${active?`<button class="btn danger-btn" id="runCancel">${t('cancelRun')}</button>`:''}</div>`;
     // Repaint the open dialog ONLY when its content changed, keeping scroll position,
     // so the progress bar and steps move live without closing and reopening.
     if(!isRefresh||detailHtml!==lastDetailHtml){
