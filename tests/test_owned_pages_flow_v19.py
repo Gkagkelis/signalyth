@@ -46,16 +46,26 @@ class FakeRunner:
         meta = {"usageTotalUsd": min(0.01, max_charge_usd), "defaultDatasetId": "fake"}
         if run_input.get("mode") == "profile":
             return meta, self.profile_posts[:max_items]
-        if run_input.get("mode") == "replies":
+        if run_input.get("mode") == "thread":
             out = []
-            for parent in run_input.get("replyTweetIds") or []:
+            for parent in run_input.get("threadTweetIds") or []:
+                # Real thread mode includes the root; SIGNALYTH intentionally
+                # removes it before counting audience evidence.
+                root = _tweet(int(parent), f"{TOPIC} root", "root", day=16)
+                root["conversationId"] = str(parent)
+                if len(out) < max_items:
+                    out.append(root)
                 for _ in range(int(self.replies_per_parent.get(str(parent), 0))):
                     if len(out) >= max_items:
                         break
                     self._seq += 1
-                    out.append(_tweet(900000 + self._seq,
-                                      f"Πάλι τίποτα, σχόλιο {self._seq}",
-                                      f"person{self._seq}", day=17))
+                    row = _tweet(900000 + self._seq,
+                                 f"Πάλι τίποτα, σχόλιο {self._seq}",
+                                 f"person{self._seq}", day=17)
+                    row["conversationId"] = str(parent)
+                    row["sourceTweetId"] = str(parent)
+                    row["inReplyToId"] = str(parent)
+                    out.append(row)
                 if len(out) >= max_items:
                     break
             return meta, out
@@ -111,11 +121,11 @@ class TestTheOperatorsPagesComeFirst:
 
         modes = [c[1].get("mode") for c in runner.calls]
         assert "profile" in modes, "the page must be asked for its posts"
-        assert modes.index("profile") < modes.index("replies"), "posts before comments"
+        assert modes.index("profile") < modes.index("thread"), "posts before comments"
 
-        first_reply_call = next(c for c in runner.calls if c[1].get("mode") == "replies")
+        first_reply_call = next(c for c in runner.calls if c[1].get("mode") == "thread")
         owned_ids = {str(p["id"]) for p in OWNED_POSTS}
-        assert set(map(str, first_reply_call[1]["replyTweetIds"])) & owned_ids, \
+        assert set(map(str, first_reply_call[1]["threadTweetIds"])) & owned_ids, \
             "the operator's own posts must be asked first"
 
     def test_the_reserved_share_is_respected(self, tmp_path):
