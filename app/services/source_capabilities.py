@@ -36,13 +36,13 @@ COMMENT_ACTOR_CONTRACTS = {
         "reply_depth": "nested",
         "sort": "recent",
     },
-    # Scraper One exposes a per-post cap. Five URLs is compatible with the
-    # documented free-plan ceiling and keeps paid/serverless calls bounded too.
+    # Official Apify actor supports nested replies. Five parents per call is a
+    # conservative serverless/runtime batch, not a claimed provider hard limit.
     "facebook": {
         "parent_batch_limit": 5,
-        "limit_scope": "per_parent",
-        "reply_depth": "actor_available",
-        "sort": "newest",
+        "limit_scope": "global",
+        "reply_depth": "nested_up_to_3",
+        "sort": "recent_activity",
     },
 }
 
