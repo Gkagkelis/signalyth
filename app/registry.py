@@ -19,7 +19,7 @@ BASE_HISTORY_PATH = BASE_DIR / "config" / "source_registry_history.json"
 
 COMMENT_ROLLOUT_VERSION = "comments-production-ready-v1"
 COMMENT_PRODUCTION_ROLLOUT = {
-    "x": {"actor_id": "xquik/x-tweet-scraper", "route": "replies", "input_field": "replyTweetIds", "price": 0.15},
+    "x": {"actor_id": "xquik/x-tweet-scraper", "route": "thread", "input_field": "threadTweetIds", "price": 0.15},
     "tiktok": {"actor_id": "epctex/tiktok-comment-scraper", "route": "comments", "input_field": "startUrls", "price": 0.30},
     "instagram": {"actor_id": "scrapesmith/instagram-comments-scraper", "route": "comments", "input_field": "postUrls", "price": 0.50},
     "facebook": {"actor_id": "scraper_one/facebook-comments-scraper", "route": "comments", "input_field": "postUrls", "price": 0.40},
