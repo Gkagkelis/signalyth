@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 
 import pytest
 
@@ -168,3 +169,11 @@ def test_provenance_never_overrides_market_or_random_post_guards():
     assert _comment_parent_candidate_tier("facebook", _provenance_parent(market_score=0.27)) is None
     assert _comment_parent_candidate_tier("facebook", _provenance_parent(market_score=0.1)) is None
     assert _comment_parent_candidate_tier("facebook", _provenance_parent(provenance=False)) is None
+
+
+def test_open_comment_harvest_advances_through_all_untried_cached_parents():
+    source = Path("app/services/relevance_expansion.py").read_text(encoding="utf-8")
+    assert 'extra_bucket = f"open_extra_{extra_wave_index}"' in source
+    assert 'if str(durable_bucket).startswith("open")' in source
+    assert 'while (\n                source_comment_target > 0' in source
+    assert 'exclude_refs=used_open_refs' in source
