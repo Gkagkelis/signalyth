@@ -152,6 +152,7 @@ def _append_source_items(
     origin: str | None = None,
     seed_refs: list[str] | None = None,
     seed_context: dict[str, str | dict] | None = None,
+    max_new_normalized: int | None = None,
 ) -> dict:
     store = RunStore()
     normalized_source_path = folder / f"normalized-{source}.json"
@@ -167,6 +168,8 @@ def _append_source_items(
         new_norm = normalize_comment_dataset(source, data_items, seed_refs=seed_refs or [], seed_context=seed_context or {}, mapping=mapping)
         # Comments outside the requested research window are not analysis evidence.
         new_norm = [r for r in new_norm if in_range(r, date_from, date_to)]
+        if max_new_normalized is not None:
+            new_norm = new_norm[:max(0, int(max_new_normalized))]
         if origin:
             # Where this evidence came from decides what the report may claim:
             # a comment under the brand's own post is not the same public as a
@@ -1132,7 +1135,8 @@ def adaptive_expand_after_cleaning(
         evidence_layer: str = "primary",
         origin: str | None = None,
         seed_refs: list[str] | None = None,
-        seed_context: dict[str, str] | None = None,
+        seed_context: dict[str, str | dict] | None = None,
+        max_new_normalized: int | None = None,
         minimum_attempt_charge_usd: float = 0.0,
         logical_max_charge_usd: float | None = None,
     ):
@@ -1201,6 +1205,7 @@ def adaptive_expand_after_cleaning(
                 folder, source, combined, date_from, date_to, mapping=mapping,
                 evidence_layer=evidence_layer, origin=origin,
                 seed_refs=seed_refs, seed_context=seed_context,
+                max_new_normalized=max_new_normalized,
             )
             report = clean_run(folder, plan=plan, cancel_check=cancel_check)
 
@@ -1546,6 +1551,7 @@ def adaptive_expand_after_cleaning(
                             }
                             for m in batch_meta if m.get("ref")
                         },
+                        max_new_normalized=batch_wanted,
                         minimum_attempt_charge_usd=minimum_attempt_charge_usd,
                     )
                     arrived = max(0, collected_count() - before_batch)
