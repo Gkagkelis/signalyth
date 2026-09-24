@@ -720,7 +720,9 @@ def _owned_parent_refs(source, plan, cfg, max_parents, *, date_from, date_to,
         if url not in refs:
             refs.append(url)
             meta.append({"ref": url, "comments": 0, "url": url,
-                         "text": operator_parent_context(plan), "origin": "operator_link"})
+                         "text": operator_parent_context(plan), "origin": "operator_link",
+                         "market_score": 0.0, "subject_qualified": True,
+                         "qualification_tier": "operator"})
 
     pages = operator_page_refs(plan, source)
     if pages and cfg.get("page_enabled", True):
@@ -768,7 +770,9 @@ def _owned_parent_refs(source, plan, cfg, max_parents, *, date_from, date_to,
             found = {"ref": ref, "comments": int(row.get("commentsCount")
                                                  or row.get("comments") or 0),
                      "url": row.get("url"), "text": text or operator_parent_context(plan),
-                     "origin": "owned_page"}
+                     "origin": "owned_page",
+                     "market_score": 0.0, "subject_qualified": True,
+                     "qualification_tier": "operator"}
             refs.append(ref)
             meta.append(found)
             discovered.append(found)
