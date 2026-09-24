@@ -86,6 +86,45 @@ def _fold_alias(x: str) -> str:
     return re.sub(r"\s+", " ", str(x or "").strip().casefold())
 
 
+#: Sources whose Actor input already carries a NATIVE country/language filter
+#: (TikTok location=GR, YouTube gl/hl, News country/language). Inside such a
+#: filter the bare subject name is market-safe — the platform itself anchors
+#: the market — and dropping it there only costs recall.
+NATIVE_MARKET_FILTER_SOURCES = {"tiktok", "youtube", "news"}
+
+
+def greece_x_route_anchor(query: str) -> str:
+    """Exactly ONE market anchor per primary X route, never two stacked.
+
+    `lang:el` is the anchor of choice: it finds the Greek who writes
+    "Κέρδισα 50€ στο Eurojackpot" without demanding the word «Ελλάδα». But
+    stacked on a route that already has an anchor it turns into a veto:
+
+    * a Greeklish route ("Eurojackpot klirosi") is Latin-script and X does not
+      classify such tweets as Greek — `lang:el` on it returns nothing, killing
+      the very users the route exists for;
+    * an explicit-market route ("Eurojackpot Greece") is how mixed-language
+      Greeks are found — their English tweets are not `lang:el`.
+
+    So: explicit market word → left alone; pure-Latin (Greeklish) → left
+    alone; Greek-script routes gain `lang:el`, which narrows the English
+    OR-halves of the intent buckets to the Greek market.
+    """
+    q = re.sub(r"\s+", " ", str(query or "")).strip()
+    if not q:
+        return q
+    if re.search(r"(?<!\w)lang:[a-z-]+", q, flags=re.I):
+        return q
+    if re.search(r"(?<!\w)(Greece|Ellada|Hellas|Ελλάδα|Ελλαδα)(?!\w)", q, flags=re.I):
+        return q
+    if not re.search(r"[\u0370-\u03ff\u1f00-\u1fff]", q):
+        return q
+    marker = " -filter:nativeretweets"
+    if marker in q:
+        return q.replace(marker, f" lang:el{marker}", 1)
+    return f"{q} lang:el"
+
+
 def drop_bare_topic_route(queries: list[str], topic: str, market: str) -> list[str]:
     """Remove the query that is nothing but the subject's name.
 
@@ -345,8 +384,36 @@ def budget_for_subrun(source_budget: float, shares: list[int], idx: int) -> floa
     return math.floor(raw * 100_000_000) / 100_000_000
 
 
+def semantic_broad_probe_target(target: int) -> int:
+    """How many items the bare-subject probe may buy, ever.
+
+    The broad/global route exists to recover natural mixed-language and
+    Greeklish mentions that every anchored route misses. It runs only AFTER
+    cleaning, only against a measured shortfall, and this cap means it can
+    never refill the sample with another country's conversation: at most a
+    quarter of the source target, and never more than 12 items.
+    """
+    target = max(0, int(target or 0))
+    if target <= 0:
+        return 0
+    return min(12, max(3, int(math.ceil(target * 0.25))))
+
+
 def instagram_discovery_tags(draft: AnalysisDraft) -> list[str]:
     routes = _research_routes(draft); topic = routes["topic"]
+    if str(draft.market or "").strip():
+        # Instagram has no native country filter, so on a market run the
+        # GLOBAL #topic tag is the one hashtag with no market signal at all —
+        # the same firehose the bare search query was. It still runs, but as
+        # the bounded post-cleaning probe, not as the primary route. Primary
+        # goes to the REAL market-anchored tags: the Greek alias spelling and
+        # topic+context concatenations people actually use. No country tag is
+        # ever fabricated.
+        tags = []
+        for alias in routes["aliases"][:2]: tags.append(hashtag(alias))
+        for term in [*routes["required"], *routes["contexts"]][:2]: tags.append(hashtag(f"{topic} {term}"))
+        tags = uniq([t for t in tags if t])[:4]
+        return tags or [hashtag(topic)]
     tags = [hashtag(topic)]
     for alias in routes["aliases"][:1]: tags.append(hashtag(alias))
     for term in [*routes["required"], *routes["contexts"]][:2]: tags.append(hashtag(f"{topic} {term}"))
@@ -502,9 +569,19 @@ def make_source_plan(source: str, target: int, draft: AnalysisDraft, queries: li
 
     primary = primary or [routes["topic"]]
     topups = uniq(topups)
-    # The bare global name is the only route with no market signal at all.
-    primary = drop_bare_topic_route(primary, routes["topic"], draft.market)
-    topups = drop_bare_topic_route(topups, routes["topic"], draft.market)
+    # The bare global name is the only route with no market signal of its
+    # own — EXCEPT where the Actor's native country filter supplies one.
+    if source in NATIVE_MARKET_FILTER_SOURCES:
+        if str(draft.market or "").strip() and routes["topic"] not in primary:
+            primary = uniq([*primary, routes["topic"]])
+    else:
+        primary = drop_bare_topic_route(primary, routes["topic"], draft.market)
+        topups = drop_bare_topic_route(topups, routes["topic"], draft.market)
+    if source == "x" and draft.market.casefold() == "greece":
+        # X is the one source with a native language operator; use it as the
+        # single anchor on every route that does not already carry one.
+        primary = uniq([greece_x_route_anchor(q) for q in primary])
+        topups = uniq([greece_x_route_anchor(q) for q in topups])
     safe = max(1, int(get_safe_batch_size(source, actor)))
     source_budget = max(0.0, float(source_budget))
     has_topups = bool(topups) or source == "x"
@@ -609,12 +686,35 @@ def make_source_plan(source: str, target: int, draft: AnalysisDraft, queries: li
             subruns.append(_sub(actor, inp, share, caps[i], f"primary_route_{i+1}", draft, exact=False))
 
     preview = _query_preview(source, primary, topups, draft)
+    semantic_subruns = copy.deepcopy(topup_subruns or subruns)
+    if str(draft.market or "").strip() and source in {"facebook", "instagram"}:
+        # The bounded broad probe: the bare subject, capped hard, run by the
+        # semantic-refill pass — which fires only AFTER cleaning and only
+        # against a measured analyzable shortfall. This is the one place the
+        # global name is allowed on a source without a native country filter,
+        # and the cap keeps it a minority route for ever.
+        cap_items = semantic_broad_probe_target(target)
+        if cap_items > 0:
+            probe_budget = max(0.02, min(0.25, source_budget * 0.1))
+            if source == "facebook":
+                probe_inp = {"query": routes["topic"], "resultsCount": cap_items,
+                             "searchType": "latest",
+                             "startDate": draft.date_from.isoformat(),
+                             "endDate": draft.date_to.isoformat()}
+            else:
+                probe_inp = {"directUrls": [f"https://www.instagram.com/explore/tags/{hashtag(routes['topic']).lower()}/"],
+                             "resultsType": "posts", "resultsLimit": cap_items,
+                             "onlyPostsNewerThan": draft.date_from.isoformat(),
+                             "addParentData": True}
+            semantic_subruns.append(
+                _sub(actor, probe_inp, cap_items, probe_budget,
+                     "semantic_broad_probe", draft, exact=False))
     return SourcePlan(
         source=source, actor_id=actor, target_items=target, estimated_cost_usd=est,
         price_per_1000_hint=rate, date_strategy=cfg.get("date_support", "post_filter_exact"),
         market_strategy=cfg.get("market_support", "query_context"), queries=uniq([*primary, *topups]),
         subruns=subruns, topup_subruns=topup_subruns,
-        semantic_topup_subruns=copy.deepcopy(topup_subruns or subruns),
+        semantic_topup_subruns=semantic_subruns,
         intent_buckets=intent_buckets, query_preview=preview,
         source_budget_usd=source_budget, source_contract_version="actor-contract-v3",
     )

@@ -228,6 +228,12 @@ GREEKLISH_MARKERS = frozenset({
     "axizoun", "kainourgia", "kainourgio", "kainourgies", "paidia", "malista",
     "episis", "etsi", "giati", "ligo", "megalo", "mikro", "kalhmera",
     "kalimera", "kalispera", "efxaristw", "efharisto", "parakalw", "sygnwmh",
+    # Words a Greek writing about everyday wins, losses and luck cannot avoid.
+    # "kerdisa 20 evro" and "pame gia to tzakpot, kali tyxi" scored 0.00
+    # without them, while being unmistakably Greek prose.
+    "pame", "kali", "kalh", "tyxi", "tixi", "olous", "oloi", "oles", "evro",
+    "kerdisa", "kerdise", "kerdisame", "exasa", "exase", "exasame",
+    "klirosi", "klirwsi", "kliroseis",
 })
 
 #: Words that look Greeklish but are ordinary in another language. Seeing these
@@ -266,6 +272,33 @@ def greeklish_prose_score(text: str) -> tuple[float, list[str]]:
         return 0.0, []
     score = 0.30 + 0.10 * min(3, len(hits) - 2)
     return round(score, 2), [f"greeklish:{x}" for x in hits[:3]]
+
+
+
+def _parent_market_signal(parent_text: str) -> float:
+    """How strongly the PARENT post reads as Greek-market conversation.
+
+    Subject inheritance and market inheritance are two different questions.
+    A comment under a Eurojackpot post inherits the SUBJECT from any such
+    parent — but it may only inherit the MARKET from a parent that is itself
+    Greek. Before this existed, "Wygralem 50 euro!" under a Polish Eurojackpot
+    post sailed through the market gate purely because its parent mentioned
+    the brand: subject inheritance was silently granting market immunity.
+    """
+    body = str(parent_text or "").strip()
+    if not body:
+        return 0.0
+    greek = sum(1 for ch in body if "\u0370" <= ch <= "\u03ff" or "\u1f00" <= ch <= "\u1fff")
+    letters = sum(1 for ch in body if ch.isalpha()) or 1
+    if greek / letters >= 0.08:
+        return 0.55
+    folded = _fold(body)
+    if any(_term_present(folded, term) for term in GREECE_MARKET_TERMS):
+        return 0.45
+    greeklish, _ = greeklish_prose_score(body)
+    if greeklish > 0:
+        return 0.40
+    return 0.0
 
 
 def _market_score(row: dict, plan: dict, view: TextView) -> tuple[float, list[str]]:
@@ -308,6 +341,12 @@ def _market_score(row: dict, plan: dict, view: TextView) -> tuple[float, list[st
     # Only a genuinely transliterated spelling counts: a "variant" identical to
     # the brand/person name itself proves nothing (a German writes "Eurojackpot"
     # too), so it is excluded exactly like the ambiguous market terms above.
+    if score < 0.35 and str(row.get("evidence_layer") or "primary") in {"comment", "reply"}:
+        inherited = _parent_market_signal(row.get("parent_context"))
+        if inherited > 0:
+            score += min(inherited, 0.45)
+            reasons.append("parent_market_context")
+
     subject_greeklish = [x for x in (plan.get("greeklish_variants") or [])
                          if str(x).strip() and _fold(x) not in ambiguous_own_terms]
     if any(_term_present(view.folded, x) for x in subject_greeklish):
@@ -377,6 +416,8 @@ def _relevance_score(row: dict, plan: dict, view: TextView, market_score: float)
             score += 0.08
         reasons.extend([f"parent_core_context:{x}" for x in parent_core_hits[:3]])
         flags.append("contextual_parent_match")
+        if _parent_market_signal(str(row.get("parent_context") or "")) > 0:
+            flags.append("parent_market_context")
 
     if direct_context_hits:
         score += min(0.22, 0.08 + 0.05 * len(direct_context_hits))
@@ -646,9 +687,11 @@ def _decision(relevance: float, market: float, spam: float, bot_risk: float, bot
         # No mention of the subject in the text or its parent: off-topic noise
         # from hashtag/location discovery, not a brand/person mention.
         return "excluded", ["subject_not_mentioned"]
-    if market < RULESET_CONFIG["market_exclude_below"] and "contextual_parent_match" not in flags:
-        # No market language, no market terms, no market location, no market
-        # parent: this is another country's conversation about the same brand.
+    if market < RULESET_CONFIG["market_exclude_below"] and "parent_market_context" not in flags:
+        # No market language, no market terms, no market location — and no
+        # GREEK parent either. A parent that merely mentions the subject is
+        # not a market anchor: the same brand is discussed in 19 countries,
+        # and inheriting the topic must never smuggle in the market.
         return "excluded", ["outside_target_market"]
     # Lexical relevance is only a cheap pre-AI signal. Low lexical overlap is sent
     # to semantic review rather than destroyed before the model can understand it.
