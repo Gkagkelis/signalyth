@@ -17,7 +17,7 @@ class FakeRunner:
 
     def run(self, actor_id, run_input, *, max_items, max_charge_usd):
         self.calls.append((actor_id, dict(run_input), max_items, max_charge_usd))
-        items = self.reply_items if run_input.get("mode") == "replies" else self.search_items
+        items = self.reply_items if run_input.get("mode") == "thread" else self.search_items
         return {"usageTotalUsd": min(0.01, max_charge_usd), "defaultDatasetId": "fake"}, items[:max_items]
 
 
@@ -95,15 +95,15 @@ def test_reply_deepening_runs_when_comments_on_and_no_collision(tmp_path):
     # v30: with a measured analyzable shortfall the bounded semantic refill
     # legitimately runs BEFORE comment deepening, so the replies call is no
     # longer necessarily first. Any search call before it must stay bounded.
-    reply_calls = [c for c in runner.calls if c[1].get("mode") == "replies"]
-    assert reply_calls, f"no replies call at all: {[c[1].get('mode') for c in runner.calls]}"
+    reply_calls = [c for c in runner.calls if c[1].get("mode") == "thread"]
+    assert reply_calls, f"no thread call at all: {[c[1].get('mode') for c in runner.calls]}"
     for c in runner.calls:
         if c[1].get("mode") == "search":
             assert int(c[1].get("maxItems", 0)) <= 2 * report["trusted_sample_shortfall"], \
                 f"semantic refill call is not bounded: {c[1]}"
     # A reported zero is a ranking signal, not a verdict: 401 may be topped up
     # as an extra parent, but 400 — the one that REPORTED replies — comes first.
-    reply_ids = [str(x) for x in reply_calls[0][1]["replyTweetIds"]]
+    reply_ids = [str(x) for x in reply_calls[0][1]["threadTweetIds"]]
     assert reply_ids[0] == "400"
     assert set(reply_ids) <= {"400", "401"}
     assert result["report"]["trusted_sample_shortfall"] == 0
@@ -132,8 +132,8 @@ def test_reply_deepening_runs_from_configured_production_contract_without_separa
     }])
     result = adaptive_expand_after_cleaning(tmp_path, plan, report, runner=runner)
     # v30: the semantic refill may run first (see above); find the replies call.
-    reply_calls = [c for c in runner.calls if c[1].get("mode") == "replies"]
-    assert reply_calls, f"no replies call at all: {[c[1].get('mode') for c in runner.calls]}"
-    assert reply_calls[0][1]["replyTweetIds"] == ["800"]
+    reply_calls = [c for c in runner.calls if c[1].get("mode") == "thread"]
+    assert reply_calls, f"no thread call at all: {[c[1].get('mode') for c in runner.calls]}"
+    assert reply_calls[0][1]["threadTweetIds"] == ["800"]
     assert "x:comment_deepening_not_operational" not in result["audit"]["warnings"]
     assert result["report"]["trusted_sample_shortfall"] == 0
