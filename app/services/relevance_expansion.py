@@ -413,18 +413,11 @@ def _seed_ref(source: str, row: dict) -> str:
 
 
 def _comment_parent_candidate_allowed(source: str, row: dict) -> bool:
-    """Hard gate for conversation parents, separate from final evidence status.
+    """Hard gate for OPEN conversation parents.
 
-    A discovery post can be a useful doorway to audience discussion even when
-    the post itself is not final analyzable evidence. We therefore do NOT reject
-    it merely because cleaning.decision == "excluded".
-
-    We still reject conditions that should never trigger another paid scrape:
-    explicit exclusions, duplicate parents, high spam/manipulation risk, and
-    clearly outside-market content. `subject_not_mentioned` is deliberately not
-    a hard block here: discovery itself can provide weak topic context when an
-    Actor's post text/metadata is incomplete, while parent_heat_score still
-    pushes stronger topical candidates to the top.
+    Open-search parents are paid doorways into audience conversation, so they
+    must satisfy both a direct subject/alias anchor and a positive target-market
+    signal before another paid scrape is allowed.
     """
     if str(row.get("platform") or "") != source:
         return False
@@ -437,6 +430,12 @@ def _comment_parent_candidate_allowed(source: str, row: dict) -> bool:
     flags = {str(x) for x in (cleaning.get("flags") or [])}
     reasons = {str(x) for x in (cleaning.get("reasons") or [])}
 
+    if "no_subject_signal" in flags or "subject_not_mentioned" in reasons:
+        return False
+
+    if not any(reason.startswith("core_term:") for reason in reasons):
+        return False
+
     if flags & {
         "exact_duplicate",
         "near_duplicate_same_author",
@@ -445,6 +444,7 @@ def _comment_parent_candidate_allowed(source: str, row: dict) -> bool:
         "likely_automated",
     }:
         return False
+
     if reasons & {
         "duplicate_not_independent_evidence",
         "explicit_exclusion_context",
@@ -453,13 +453,19 @@ def _comment_parent_candidate_allowed(source: str, row: dict) -> bool:
         "outside_target_market",
     }:
         return False
+
     try:
-        if float(cleaning.get("spam_score", 0) or 0) >= 0.82:
+        market_score = float(cleaning.get("market_score", 0) or 0)
+        if market_score < float(RULESET_CONFIG["market_review_below"]):
+            return False
+        if float(cleaning.get("spam_score", 0) or 0) >= float(RULESET_CONFIG["spam_exclude_at"]):
             return False
     except Exception:
-        pass
+        return False
+
     if str(cleaning.get("authenticity_status") or "") == "likely_automated":
         return False
+
     return True
 
 
