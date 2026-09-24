@@ -419,11 +419,11 @@ def instagram_discovery_tags(draft: AnalysisDraft) -> list[str]:
         for alias in routes["aliases"][:2]: tags.append(hashtag(alias))
         for term in [*routes["required"], *routes["contexts"]][:2]: tags.append(hashtag(f"{topic} {term}"))
         tags = uniq([t for t in tags if t])[:4]
-        # A subject-only brief can legitimately have no local alias/context.
-        # Zero primary routes is worse than a bounded global topic route: the
-        # cleaner still enforces Greece before analysis, and adaptive refill can
-        # continue if the first global slice is mostly foreign.
-        return tags or [hashtag(topic)]
+        # A subject-only market brief can legitimately have no safe local
+        # hashtag. Do NOT turn the bare global hashtag into primary evidence on
+        # a source with no country-wide filter; semantic_broad_probe handles the
+        # bounded post-cleaning fallback instead.
+        return tags
     tags = [hashtag(topic)]
     for alias in routes["aliases"][:1]: tags.append(hashtag(alias))
     for term in [*routes["required"], *routes["contexts"]][:2]: tags.append(hashtag(f"{topic} {term}"))
@@ -615,12 +615,6 @@ def make_source_plan(source: str, target: int, draft: AnalysisDraft, queries: li
         primary = uniq([greece_x_route_anchor(q) for q in primary])
         topups = uniq([greece_x_route_anchor(q) for q in topups])
 
-    if source == "facebook" and str(draft.market or "").strip():
-        # Facebook search has no country-wide market control. Keep one bounded
-        # bare-subject slice alongside market-anchored routes, then let the
-        # deterministic Greece gate decide what survives. This recovers Greek
-        # posts that naturally say "Eurojackpot" but never literally "Greece".
-        primary = uniq([*primary, routes["topic"]])
     safe = max(1, int(get_safe_batch_size(source, actor)))
     source_budget = max(0.0, float(source_budget))
     has_topups = bool(topups) or source == "x"
