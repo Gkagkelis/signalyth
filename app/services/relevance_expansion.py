@@ -658,6 +658,10 @@ def _probe_items(folder, plan, source, actor_id, actor_input, wanted, rate,
     the sample — the comments under them are — so they are never written into
     the normalized set, only mined for parent references.
     """
+    # This marker distinguishes "worker refused to start because time was gone"
+    # from "an Actor call actually started and may already have been charged".
+    # Continuation workers must never repay the latter.
+    audit.setdefault("probe_last_attempted", {})[source] = False
     if cancel_check():
         return []
     status = store.read(folder / "status.json", {}) or {}
@@ -684,6 +688,11 @@ def _probe_items(folder, plan, source, actor_id, actor_input, wanted, rate,
     except Exception as exc:
         audit["warnings"].append(f"{source}:page_discovery:orchestrator_failed:{exc}")
         return []
+    probe_attempted = bool(resilient.attempts)
+    audit.setdefault("probe_last_attempted", {})[source] = probe_attempted
+    audit.setdefault("probe_last_accounted_cost_usd", {})[source] = round(
+        float(resilient.accounted_cost_usd or 0.0), 6
+    )
     _update_budget(folder, resilient.accounted_cost_usd)
     data_items, _ = split_diagnostic_rows(resilient.items)
     deadline_hit = "worker_deadline_reached" in (resilient.failure_kinds or [])
@@ -782,8 +791,15 @@ def _owned_parent_refs(source, plan, cfg, max_parents, *, date_from, date_to,
         # Successful zero-yield is also a result and must not be re-paid on
         # every continuation. If the clock stopped after useful rows arrived,
         # accept that bounded parent set and let the next worker harvest comments.
-        cache_complete = page_outcome == "complete" or (
-            page_outcome == "deadline_with_rows" and bool(discovered)
+        probe_attempted = bool((audit.get("probe_last_attempted") or {}).get(source))
+        cache_complete = (
+            page_outcome == "complete"
+            or (page_outcome == "deadline_with_rows" and bool(discovered))
+            # If a paid page-discovery call actually started, never buy that
+            # identical page lookup again after a worker handoff. Persist even
+            # a zero-row partial outcome; later open-search routes can still
+            # deepen conversation without duplicate spend.
+            or (page_outcome == "deadline" and probe_attempted)
         )
         if cache_path and cache_complete:
             RunStore().write(cache_path, {
@@ -1016,7 +1032,12 @@ def _discover_conversation_parent_candidates(
             heartbeat=lambda _note, _s=source: heartbeat(_s),
             charge_cap_usd=sr.get("max_charge_usd"),
         )
-        if not audit.get("deadline_reached"):
+        probe_attempted = bool((audit.get("probe_last_attempted") or {}).get(source))
+        # A route becomes durable once it actually started a paid Actor call,
+        # even if the worker deadline arrived before a retry. Leaving such a
+        # route pending made the next worker buy the identical search again.
+        # Only a deadline reached BEFORE the first Actor attempt keeps it owed.
+        if probe_attempted or not audit.get("deadline_reached"):
             done.add(route_key)
             state[source] = sorted(done)
             store.write(state_path, state)
