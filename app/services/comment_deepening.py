@@ -68,9 +68,43 @@ def _instagram_flatten(items: list[dict]) -> list[dict]:
     return out
 
 
+def _facebook_flatten(items: list[dict]) -> list[dict]:
+    """Flatten nested Facebook replies while remaining safe if Actor already emits them separately."""
+    out: list[dict] = []
+
+    def visit(raw: dict, parent_comment_id: str | None = None, inherited_post: str | None = None):
+        if not isinstance(raw, dict):
+            return
+        row = dict(raw)
+        nested = row.pop("comments", []) or []
+        if inherited_post and not (row.get("facebookUrl") or row.get("inputUrl")):
+            row["facebookUrl"] = inherited_post
+        if parent_comment_id and not row.get("replyToCommentId"):
+            row["replyToCommentId"] = parent_comment_id
+        out.append(row)
+        this_id = str(row.get("commentId") or row.get("id") or "") or parent_comment_id
+        parent_post = str(row.get("facebookUrl") or row.get("inputUrl") or inherited_post or "")
+        for reply in nested if isinstance(nested, list) else []:
+            visit(reply, this_id, parent_post)
+
+    for item in items:
+        visit(item)
+    return out
+
+
 def _parent_from_seed(source: str, raw: dict, seed_refs: list[str]) -> str | None:
-    if source in {"instagram", "facebook"}:
+    if source == "instagram":
         return str(raw.get("postUrl") or raw.get("inputUrl") or (seed_refs[0] if len(seed_refs) == 1 else "")) or None
+    if source == "facebook":
+        candidate = str(
+            raw.get("facebookUrl")
+            or raw.get("postUrl")
+            or raw.get("inputUrl")
+            or ""
+        ).strip()
+        if candidate:
+            return candidate
+        return seed_refs[0] if len(seed_refs) == 1 else None
     if source == "tiktok":
         aweme = str(raw.get("aweme_id") or raw.get("awemeId") or raw.get("videoId") or "")
         if aweme:
@@ -110,7 +144,12 @@ def normalize_comment_dataset(
     """
     seed_refs = [str(x) for x in (seed_refs or []) if str(x or "").strip()]
     seed_context = {str(k): v for k, v in (seed_context or {}).items() if str(k or "").strip()}
-    raw_items = _instagram_flatten(items) if source == "instagram" else [x for x in items if isinstance(x, dict)]
+    if source == "instagram":
+        raw_items = _instagram_flatten(items)
+    elif source == "facebook":
+        raw_items = _facebook_flatten(items)
+    else:
+        raw_items = [x for x in items if isinstance(x, dict)]
     out: list[dict] = []
     seen: set[str] = set()
 
@@ -150,15 +189,25 @@ def normalize_comment_dataset(
             layer = "reply" if raw.get("__is_reply") or parent_comment_id else "comment"
         elif source == "facebook":
             text = _mapped(raw, mapping, "text", ("commentText", "text", "message"), "")
-            date_raw = _mapped(raw, mapping, "date", ("timestamp", "createdAt", "created_at"))
-            author = _mapped(raw, mapping, "author", ("author.name", "authorName", "username"))
-            native_id = _first(raw, ("id", "legacyId", "commentId"))
-            likes = _int(_mapped(raw, mapping, "likes", ("reactionsCount", "likesCount", "likeCount"), 0))
-            replies = _int(_mapped(raw, mapping, "comments", ("replyCount", "repliesCount"), 0))
+            date_raw = _mapped(raw, mapping, "date", ("date", "timestamp", "createdAt", "created_at"))
+            author = _mapped(raw, mapping, "author", ("profileName", "name", "author.name", "authorName", "username"))
+            native_id = _first(raw, ("commentId", "id", "legacyId"))
+            likes = _int(_mapped(raw, mapping, "likes", ("likesCount", "reactionsCount", "likeCount"), 0))
+            replies = _int(_mapped(raw, mapping, "comments", ("commentsCount", "replyCount", "repliesCount"), 0))
             shares = 0
-            url = _mapped(raw, mapping, "url", ("url", "commentUrl"))
-            parent_comment_id = str(raw.get("parentCommentId") or raw.get("parent_id") or "") or None
-            layer = "reply" if parent_comment_id else "comment"
+            url = _mapped(raw, mapping, "url", ("commentUrl", "url"))
+            parent_comment_id = str(
+                raw.get("replyToCommentId")
+                or raw.get("parentCommentId")
+                or raw.get("parent_id")
+                or _nested(raw, "parentComment.commentId")
+                or ""
+            ) or None
+            try:
+                threading_depth = int(raw.get("threadingDepth") or 0)
+            except Exception:
+                threading_depth = 0
+            layer = "reply" if parent_comment_id or threading_depth > 0 else "comment"
         else:
             text = _mapped(raw, mapping, "text", ("text", "commentText", "content"), "")
             date_raw = _mapped(raw, mapping, "date", ("timestamp", "createdAt", "date"))
