@@ -44,10 +44,10 @@ MULTI_TARGET_FIELDS = (
 )
 DEFAULT_SAFE_BATCH_SIZE = {
     "x": 2,
-    "tiktok": 2,
+    "tiktok": 1,
     "instagram": 1,
     "facebook": 1,
-    "youtube": 2,
+    "youtube": 1,
     "news": 2,
 }
 
