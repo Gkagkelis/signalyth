@@ -106,8 +106,11 @@ def test_semantic_shortfall_counts_trusted_plus_review():
 
 
 def test_conversation_probe_is_bounded():
-    assert _conversation_probe_target(50, 12) == 25
-    assert _conversation_probe_target(100, 12) == 50
+    # v30.2 deliberately builds one deeper durable parent pool up front so
+    # continuation workers can retry untried parents without re-paying the same
+    # discovery routes. The hard ceiling remains 60 candidates.
+    assert _conversation_probe_target(50, 12) == 45
+    assert _conversation_probe_target(100, 12) == 60
     assert _conversation_probe_target(500, 12) == 60
     assert _conversation_probe_target(0, 12) == 0
 

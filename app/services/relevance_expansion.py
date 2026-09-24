@@ -258,25 +258,43 @@ def comment_fulfillment_status(
     collected: int,
     target: int,
     every_pass_ran: bool,
+    attempt_outcomes: list[dict] | None = None,
 ) -> tuple[str, str | None, int]:
-    """Return truthful terminal status for one source's comment layer.
+    """Return a truthful terminal status for one source's comment layer.
 
-    Completing all configured passes is not the same as fulfilling the requested
-    comment target. A source that exhausted its eligible parents at 2/80 is a
-    terminal shortfall, not "collected".
+    Zero comments is not automatically an operational failure. If at least one
+    Actor call completed normally but returned no comments, that is a terminal
+    source shortfall. Failed is reserved for runs where no comment attempt
+    completed normally and every attempted route was blocked or failed.
     """
     collected = max(0, int(collected or 0))
     target = max(0, int(target or 0))
     shortfall = max(0, target - collected) if target > 0 else 0
+    outcomes = [dict(x or {}) for x in (attempt_outcomes or []) if isinstance(x, dict)]
 
     if not every_pass_ran:
         return "deferred", "worker_deadline_or_unfinished_pass", shortfall
-    if collected <= 0:
-        return "failed", "no_comments_returned", shortfall
-    if target > 0 and collected < target:
-        return "shortfall", "source_exhausted_before_comment_target", shortfall
-    return "collected", None, 0
 
+    normal = [x for x in outcomes if str(x.get("status") or "") in {"success", "empty"}]
+    failed = [x for x in outcomes if str(x.get("status") or "") in {"actor_failed", "budget_blocked"}]
+
+    if collected <= 0 and failed and not normal:
+        if any(str(x.get("status") or "") == "budget_blocked" for x in failed):
+            return "failed", "comment_budget_blocked_before_successful_attempt", shortfall
+        return "failed", "comment_actor_failed_before_successful_attempt", shortfall
+
+    if target > 0 and collected < target:
+        reason = (
+            "no_comments_found_after_bounded_parent_discovery"
+            if collected <= 0
+            else "source_exhausted_before_comment_target"
+        )
+        return "shortfall", reason, shortfall
+
+    if collected <= 0:
+        return "shortfall", "no_comments_found_after_bounded_parent_discovery", shortfall
+
+    return "collected", None, 0
 
 def operator_page_refs(plan: dict, source: str) -> list[str]:
     """Pages/accounts the operator named for this source, ready for its Actor."""
@@ -802,12 +820,24 @@ def _source_semantic_shortfall(report: dict, source: str, target: int) -> int:
 
 
 def _conversation_probe_target(comment_target: int, max_parents: int) -> int:
+    """Bounded parent-candidate pool sized for multiple comment harvest waves.
+
+    Discovery itself runs once and is durable. We deliberately collect enough
+    qualified parent candidates up front to support more than one harvest wave
+    without re-running the same paid search on a continuation worker.
+    """
     comment_target = max(0, int(comment_target or 0))
     max_parents = max(1, int(max_parents or 1))
     if comment_target <= 0:
         return 0
-    return min(60, max(12, max_parents * 2, math.ceil(comment_target / 2)))
-
+    return min(
+        60,
+        max(
+            24,
+            max_parents * 3,
+            math.ceil(comment_target * 0.9),
+        ),
+    )
 
 def _conversation_parent_is_strong(source: str, row: dict) -> bool:
     if not _comment_parent_candidate_allowed(source, row):
@@ -871,7 +901,12 @@ def _discover_conversation_parent_candidates(
     time_left,
     heartbeat,
 ) -> list[dict]:
-    """Discover extra parent posts without adding them to analysis evidence."""
+    """Discover extra parent posts without adding them to analysis evidence.
+
+    The paid discovery pass is durable and runs once per route. Later comment
+    retries consume untried parents from this cached pool instead of paying for
+    the same search again after a worker handoff.
+    """
     cache_path = folder / f"conversation-parent-candidates-{source}.json"
     cached = store.read(cache_path, []) or []
     cached_by_id = {
@@ -925,7 +960,7 @@ def _discover_conversation_parent_candidates(
             continue
         missing_candidates = max(1, probe_target - len(cached_by_id))
         remaining_routes = max(1, route_count - idx)
-        wanted = min(15, max(4, math.ceil(missing_candidates / remaining_routes)))
+        wanted = min(30, max(4, math.ceil(missing_candidates / remaining_routes)))
         inp = _conversation_probe_input(
             source, dict(sr.get("input") or {}), wanted, date_from, date_to
         )
@@ -1041,6 +1076,7 @@ def adaptive_expand_after_cleaning(
     #: some rows before stopping looked like an ordinary partial success, and
     #: the caller wrote the source down as collected.
     last_call_hit_deadline = False
+    last_call_outcome: dict = {"status": "not_run"}
 
     def do_call(
         source: str,
@@ -1058,11 +1094,15 @@ def adaptive_expand_after_cleaning(
         minimum_attempt_charge_usd: float = 0.0,
         logical_max_charge_usd: float | None = None,
     ):
-        nonlocal report, last_call_hit_deadline
+        nonlocal report, last_call_hit_deadline, last_call_outcome
         last_call_hit_deadline = False
+        last_call_outcome = {"status": "not_started", "kind": kind, "source": source}
+
         if cancel_check():
             audit["warnings"].append(f"{source}:{kind}:cancelled_before_call")
+            last_call_outcome = {"status": "cancelled", "kind": kind, "source": source}
             return False
+
         status = store.read(folder / "status.json", {}) or {}
         remaining = _remaining_budget(status, plan)
         minimum_attempt_charge_usd = max(0.0, float(minimum_attempt_charge_usd or 0.0))
@@ -1071,11 +1111,21 @@ def adaptive_expand_after_cleaning(
                 f"{source}:{kind}:minimum_actor_charge_exceeds_remaining_budget:"
                 f"{minimum_attempt_charge_usd:.6f}>{remaining:.6f}"
             )
+            last_call_outcome = {
+                "status": "budget_blocked", "kind": kind, "source": source,
+                "reason": "minimum_actor_charge_exceeds_remaining_budget",
+            }
             return False
+
         allowed = _max_affordable_items(remaining, rate, wanted)
         if allowed <= 0:
             audit["warnings"].append(f"{source}:{kind}:budget_exhausted")
+            last_call_outcome = {
+                "status": "budget_blocked", "kind": kind, "source": source,
+                "reason": "budget_exhausted",
+            }
             return False
+
         actor_input = _limit_adaptive_input(source, dict(actor_input), allowed)
         cap = _charge_cap(
             remaining, rate, allowed, minimum_usd=minimum_attempt_charge_usd,
@@ -1087,14 +1137,18 @@ def adaptive_expand_after_cleaning(
                 pass
         if cap <= 0:
             audit["warnings"].append(f"{source}:{kind}:no_safe_charge_cap")
+            last_call_outcome = {
+                "status": "budget_blocked", "kind": kind, "source": source,
+                "reason": "no_safe_charge_cap",
+            }
             return False
+
         try:
             resilient = run_actor_resilient(
                 runner, actor_id, actor_input, max_items=allowed,
                 max_charge_usd=cap, rate_per_1000=rate, max_calls=4,
                 minimum_attempt_charge_usd=minimum_attempt_charge_usd,
                 deadline_check=deadline_check, time_left=time_left,
-                # Pulse on every attempt, keeping the source name the UI shows.
                 heartbeat=lambda _note, _s=source: heartbeat(_s),
             )
             charged = resilient.accounted_cost_usd
@@ -1107,6 +1161,28 @@ def adaptive_expand_after_cleaning(
                 seed_refs=seed_refs, seed_context=seed_context,
             )
             report = clean_run(folder, plan=plan, cancel_check=cancel_check)
+
+            if last_call_hit_deadline:
+                outcome_status = "deadline"
+            elif resilient.status == "failed":
+                outcome_status = "actor_failed"
+            elif len(resilient.items) <= 0:
+                outcome_status = "empty"
+            else:
+                outcome_status = "success"
+
+            last_call_outcome = {
+                "status": outcome_status,
+                "kind": kind,
+                "source": source,
+                "requested_items": allowed,
+                "returned_items": len(resilient.items),
+                "normalized_added": int((append or {}).get("in_range_normalized_added", 0) or 0),
+                "resilience_status": resilient.status,
+                "failure_kinds": list(resilient.failure_kinds or []),
+                "accounted_cost_usd": round(charged, 6),
+            }
+
             audit["steps"].append({
                 "source": source, "kind": kind, "actor_id": actor_id,
                 "requested_items": allowed, "max_charge_usd": round(cap, 6),
@@ -1117,13 +1193,20 @@ def adaptive_expand_after_cleaning(
                 "trusted_after": int(report.get("trusted_records", 0) or 0),
                 "trusted_shortfall_after": int(report.get("trusted_sample_shortfall", 0) or 0),
                 "actor_meta": [dict(m or {}) for m in resilient.metas],
+                "call_outcome": outcome_status,
             })
+
             if resilient.status == "failed":
                 audit["warnings"].append(f"{source}:{kind}:resilient_failure")
                 return False
             return True
+
         except Exception as exc:
             audit["warnings"].append(f"{source}:{kind}:orchestrator_failed:{exc}")
+            last_call_outcome = {
+                "status": "actor_failed", "kind": kind, "source": source,
+                "reason": f"orchestrator_failed:{exc}",
+            }
             return False
 
     # Normal adaptive discovery is still driven only by a genuine sample shortfall.
@@ -1308,8 +1391,13 @@ def adaptive_expand_after_cleaning(
             def collected_count() -> int:
                 return len(store.read(comment_path, []) or [])
 
+            comment_attempt_outcomes: list[dict] = []
+
             def harvest(refs: list[str], seed_meta: list[dict], wanted: int, bucket: str) -> int:
-                """Buy `wanted` comments under `refs`. Returns how many arrived."""
+                """Buy comments under refs and preserve the Actor outcome separately.
+
+                Returning zero rows is a valid EMPTY result, not an Actor failure.
+                """
                 if not refs or wanted <= 0:
                     return 0
                 try:
@@ -1320,7 +1408,15 @@ def adaptive_expand_after_cleaning(
                     )
                 except ValueError as exc:
                     audit["warnings"].append(f"{source}:{bucket}:comment_input_unavailable:{exc}")
+                    comment_attempt_outcomes.append({
+                        "bucket": bucket,
+                        "status": "actor_failed",
+                        "reason": f"comment_input_unavailable:{exc}",
+                        "parents": len(refs),
+                        "requested": wanted,
+                    })
                     return 0
+
                 minimum_attempt_charge_usd = _comment_minimum_attempt_charge_usd(
                     source, inp, wanted, rate,
                 )
@@ -1340,13 +1436,26 @@ def adaptive_expand_after_cleaning(
                                   for m in seed_meta if m.get("ref")},
                     minimum_attempt_charge_usd=minimum_attempt_charge_usd,
                 )
+                arrived = max(0, collected_count() - before)
+                outcome = dict(last_call_outcome or {})
+                outcome.update({
+                    "bucket": bucket,
+                    "parents": len(refs),
+                    "requested": wanted,
+                    "collected": arrived,
+                })
+                if ok and arrived <= 0 and outcome.get("status") == "success":
+                    outcome["status"] = "empty"
+                comment_attempt_outcomes.append(outcome)
+
                 if not ok:
-                    audit["warnings"].append(f"{source}:{bucket}:actor_call_failed_or_budget_exhausted")
+                    audit["warnings"].append(
+                        f"{source}:{bucket}:actor_call_failed_or_budget_exhausted:"
+                        f"{outcome.get('status') or 'unknown'}"
+                    )
                 if not last_call_hit_deadline:
-                    # The pass ran to its end — success, empty or failure alike.
-                    # Only the clock running out leaves it owed.
                     bucket_finished(bucket)
-                return max(0, collected_count() - before)
+                return arrived
 
             # ---- A. The operator's own pages and links come first ----------------
             owned_refs, owned_meta = _owned_parent_refs(
@@ -1524,6 +1633,46 @@ def adaptive_expand_after_cleaning(
                         "collected": got_open_retry,
                     }
 
+            # One additional bounded harvest wave from the ALREADY-DISCOVERED
+            # parent cache. No new search Actor call is made here; this preserves
+            # the worker-handoff invariant that a paid discovery route is never
+            # bought twice on a continuation.
+            got_open_wave2 = 0
+            wave2_refs: list[str] = []
+            wave2_meta: list[dict] = []
+            missing_after_retry = max(0, source_comment_target - collected_count())
+            if (
+                source_comment_target > 0
+                and missing_after_retry > 0
+                and not last_call_hit_deadline
+                and not deadline_check()
+            ):
+                used_refs = set(owned_refs) | set(ranked_refs) | set(retry_refs)
+                wave2_refs, wave2_meta, wave2_mode = _comment_seed_refs(
+                    source,
+                    comment_cleaned,
+                    max_seeds=max_parents,
+                    exclude_refs=used_refs,
+                )
+                if wave2_refs:
+                    wave2_wanted = min(
+                        missing_after_retry,
+                        len(wave2_refs) * max_per_parent,
+                    )
+                    got_open_wave2 = harvest(
+                        wave2_refs,
+                        wave2_meta,
+                        wave2_wanted,
+                        "open_wave2",
+                    )
+                    audit.setdefault("comment_wave2", {})[source] = {
+                        "selection": wave2_mode,
+                        "parents": len(wave2_refs),
+                        "requested": wave2_wanted,
+                        "collected": got_open_wave2,
+                        "discovery_reused_cached_pool": True,
+                    }
+
             # ---- C. Whatever open search could not deliver comes back here ------
             # An empty bucket helps nobody: if the wider web returned little, the
             # remainder is taken from the pages the operator trusts.
@@ -1542,11 +1691,16 @@ def adaptive_expand_after_cleaning(
                                        min(missing, len(owned_refs) * max_per_parent), "owned_backfill")
 
             collected_now = collected_count()
-            every_pass_ran = set(COMMENT_BUCKETS) <= done_buckets
+            every_pass_ran = (
+                set(COMMENT_BUCKETS) <= done_buckets
+                and not last_call_hit_deadline
+                and not deadline_check()
+            )
             terminal_status, terminal_reason, comment_shortfall = comment_fulfillment_status(
                 collected_now,
                 source_comment_target,
                 every_pass_ran,
+                attempt_outcomes=comment_attempt_outcomes,
             )
             audit.setdefault("comment_buckets", {})[source] = {
                 "target": source_comment_target,
@@ -1556,15 +1710,20 @@ def adaptive_expand_after_cleaning(
                 "owned": got_owned,
                 "open": got_open,
                 "open_retry": got_open_retry,
+                "open_wave2": got_open_wave2,
                 "backfill": got_backfill,
                 "owned_parents": len(owned_refs),
                 "open_parents": len(ranked_refs),
                 "retry_parents": len(retry_refs),
+                "wave2_parents": len(wave2_refs),
+                "attempt_outcomes": comment_attempt_outcomes,
             }
             if not every_pass_ran:
                 audit["deadline_reached"] = True
 
-            total_parents = len(set(owned_refs) | set(ranked_refs) | set(retry_refs))
+            total_parents = len(
+                set(owned_refs) | set(ranked_refs) | set(retry_refs) | set(wave2_refs)
+            )
             _comment_status_update(
                 folder, source,
                 status=terminal_status,
@@ -1577,7 +1736,9 @@ def adaptive_expand_after_cleaning(
                 owned=got_owned,
                 open_web=got_open,
                 open_retry=got_open_retry,
+                open_wave2=got_open_wave2,
                 backfill=got_backfill,
+                attempt_outcomes=comment_attempt_outcomes,
                 selection=selection_mode,
                 reason=terminal_reason,
                 current_message=(

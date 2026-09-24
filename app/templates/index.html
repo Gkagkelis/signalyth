@@ -548,7 +548,8 @@ function fmtInt(v){return new Intl.NumberFormat(lang==='el'?'el-GR':'en-US').for
 function fmtUsd(v){return '$'+(Number(v)||0).toFixed(2)}
 function runCard(x){
   const p=Math.max(0,Math.min(100,Number(x.progress?.percent)||0));
-  const collected=Number(x.normalized_total)||Object.values(x.sources||{}).reduce((a,v)=>a+(Number(v.collected)||0),0);
+  const sourceCollected=Object.values(x.sources||{}).reduce((a,v)=>a+(Number(v.collected)||0),0);
+  const collected=sourceCollected||Number(x.normalized_total)||0;
   const target=Number(x.target_total||x.sample_target)||0;
   const spent=Number(x.budget?.spent_usd)||0;
   const max=Number(x.budget?.max_usd||x.max_budget_usd)||0;
@@ -655,7 +656,8 @@ async function openRunDetails(runId,isRefresh){
     const active=['queued','running','cancelling'].includes(d.status);const planned=d.status==='planned';
     const sources=Object.entries(d.sources||{}).map(([name,s])=>{const info=s.error?`<span class="source-error" title="${esc(s.error)}">${esc(s.error)}</span>`:`<span class="source-ok">${fmtInt(s.collected||0)} / ${fmtInt(s.adjusted_target||s.base_target||0)} · ${fmtUsd(s.cost_usd||0)}</span>`;return `<div class="source-run"><strong>${esc(name)}</strong><span class="run-status ${runStatusClass(s.status)}">${esc(runStatusLabel(s.status))}</span>${info}<span>${fmtInt(s.subruns_completed||0)} / ${fmtInt(s.subruns_total||0)}</span></div>`}).join('');
     const fatal=d.fatal_error?`<div class="fatal">${esc(d.fatal_error)}</div>`:'';
-    const detailCollected=(Number(d.normalized_total)||Object.values(d.sources||{}).reduce((a,v)=>a+(Number(v.collected)||0),0));
+    const detailSourceCollected=Object.values(d.sources||{}).reduce((a,v)=>a+(Number(v.collected)||0),0);
+    const detailCollected=detailSourceCollected||Number(d.normalized_total)||0;
     const hb=heartbeatInfo(d.updated_at);
     // ---- Πορεία run: όλα τα στάδια, πάντα ορατά ----
     const ph=String(d.phase||''),stt=String(d.status||'');
@@ -669,7 +671,21 @@ async function openRunDetails(runId,isRefresh){
     const cd=d.comment_deepening||{};
     const cdKeys=Object.keys(cd);
     const commentsOn=!!d.comments_requested;
-    const cStage=!commentsOn?wait(t('phComments'),t('stOff')):(cdKeys.length?(Object.values(cd).some(c=>c.status==='running')?now_(t('phComments')):done(t('phComments'))):wait(t('phComments')));
+    const commentStates=Object.values(cd).map(c=>String(c?.status||''));
+    const commentRunning=commentStates.some(st=>st==='running');
+    const commentPending=commentStates.some(st=>['queued','pending','deferred','retrying'].includes(st));
+    const commentFailed=commentStates.some(st=>st==='failed');
+    const cStage=!commentsOn
+      ?wait(t('phComments'),t('stOff'))
+      :(cdKeys.length
+        ?(commentRunning
+          ?now_(t('phComments'))
+          :(commentPending
+            ?wait(t('phComments'),runStatusLabel('queued'))
+            :(commentFailed
+              ?wait(t('phComments'),runStatusLabel('failed'))
+              :done(t('phComments')))))
+        :wait(t('phComments')));
     const pipeHtml=`<div class="pipeline">`
       +`<div class="ph">${collectDone?done(t('phCollect')):(ph==='collecting'||stt==='running'?now_(t('phCollect')):wait(t('phCollect')))}</div>`
       +`<div class="ph">${cleanDone?done(t('phClean')):(ph==='cleaning'?now_(t('phClean')):wait(t('phClean')))}</div>`
@@ -682,7 +698,8 @@ async function openRunDetails(runId,isRefresh){
     const cdRows=cdSources.map((name)=>{const c=cd[name]||{};let st=String(c.status||'');let cls,info;
       if(!commentsOn){st=t('stOff');cls='queued';info=`<span class="source-ok">${t('commentsOffHint')}</span>`}
       else if(!st){st=t('stWait');cls='queued';info=`<span class="source-ok">${t('commentsWaitHint')}</span>`}
-      else if(st==='skipped'||st==='deferred'){cls='failed';info=`<span class="source-error" title="${esc(c.reason||'')}">${esc(c.reason||st)}</span>`}
+      else if(st==='skipped'){cls='failed';info=`<span class="source-error" title="${esc(c.reason||'')}">${esc(c.reason||st)}</span>`}
+      else if(st==='deferred'){cls='queued';info=`<span class="source-ok" title="${esc(c.reason||'')}">${esc(c.reason||st)}</span>`}
       else{cls=st==='collected'?'succeeded':st==='running'?'running':(st==='failed'||st==='shortfall')?'failed':'queued';
         // Always show collected AGAINST the target. "2 comments" reads like a
         // result; "2 / 80" reads like what it is.
