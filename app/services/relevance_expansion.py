@@ -1499,6 +1499,8 @@ def adaptive_expand_after_cleaning(
                             source, batch_refs, actor_wanted,
                             max_per_parent=actor_per_parent,
                             include_replies=bool(cfg.get("comment_include_replies", True)),
+                            date_from=date_from,
+                            date_to=date_to,
                         )
                     except ValueError as exc:
                         audit["warnings"].append(
