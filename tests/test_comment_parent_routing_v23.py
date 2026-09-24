@@ -50,7 +50,7 @@ def test_comment_input_drops_page_and_keeps_post():
     page = "https://facebook.com/allwyngr.official.account"
     post = "https://www.facebook.com/allwyngr.official.account/posts/123456789"
     payload = build_comment_deepening_input("facebook", [page, post], 40, max_per_parent=40)
-    assert payload["postUrls"] == [post]
+    assert payload["startUrls"] == [{"url": post}]
 
 
 def test_comment_input_refuses_page_only():
