@@ -1,0 +1,947 @@
+From 4eb6a0ae0c9a50cfa564f45dbb665f46549d646d Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 25 Sep 2026 11:59:25 +0300
+Subject: [PATCH 2/2] v31.2: bounded continuations, documented X routes,
+ page-discovery conformance
+
+- run_manager: a step that is resumed MAX_ADAPTIVE_CONTINUATIONS_WITHOUT_PROGRESS
+  (3) times at the same durable fingerprint is closed honestly (unfinished
+  comment passes -> shortfall with reason) and the run proceeds to analysis.
+  Production run 20260925T002306Z-65236947 looped for 8h+ without this.
+- X comments: back to documented mode=replies/replyTweetIds (thread mode has
+  undocumented semantics and never finished in production); rollout v4
+- X page discovery: mode 'profile' is not a mode value -> profileTweets
+- Instagram page discovery: remove invented skipPinnedPosts
+- lifecycle test waits hardened (1s flaked under load)
+- tests: test_v31_2_continuation_guard.py (3), page-discovery conformance (3)
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FM9VfoHhfyZmxPfBDYfQjP
+---
+ app/registry.py                         |   4 +-
+ app/services/run_manager.py             | 122 ++++++++++++++++++++-
+ app/services/source_capabilities.py     |  30 ++++--
+ config/source_registry.json             |  16 +--
+ config/source_registry_history.json     |  76 +++++++-------
+ tests/test_comment_deepening.py         |   4 +-
+ tests/test_owned_pages_flow_v19.py      |  22 ++--
+ tests/test_relevance_expansion_v2.py    |  14 +--
+ tests/test_v184_hardening.py            |   2 +-
+ tests/test_v31_1_schema_conformance.py  |  33 ++++++
+ tests/test_v31_2_continuation_guard.py  | 134 ++++++++++++++++++++++++
+ tests/test_v31_acquisition_contracts.py |   8 +-
+ 12 files changed, 378 insertions(+), 87 deletions(-)
+ create mode 100644 tests/test_v31_2_continuation_guard.py
+
+diff --git a/app/registry.py b/app/registry.py
+index 8948155..4674ebc 100644
+--- a/app/registry.py
++++ b/app/registry.py
+@@ -17,9 +17,9 @@ HISTORY_PATH = RUNTIME_CONFIG_DIR / "source_registry_history.json"
+ BASE_REGISTRY_PATH = BASE_DIR / "config" / "source_registry.json"
+ BASE_HISTORY_PATH = BASE_DIR / "config" / "source_registry_history.json"
+ 
+-COMMENT_ROLLOUT_VERSION = "comments-production-ready-v3"
++COMMENT_ROLLOUT_VERSION = "comments-production-ready-v4"
+ COMMENT_PRODUCTION_ROLLOUT = {
+-    "x": {"actor_id": "xquik/x-tweet-scraper", "route": "thread", "input_field": "threadTweetIds", "price": 0.15, "include_replies": True},
++    "x": {"actor_id": "xquik/x-tweet-scraper", "route": "replies", "input_field": "replyTweetIds", "price": 0.15, "include_replies": True},
+     "tiktok": {"actor_id": "epctex/tiktok-comment-scraper", "route": "comments", "input_field": "startUrls", "price": 0.30, "include_replies": True},
+     "instagram": {"actor_id": "scrapesmith/instagram-comments-scraper", "route": "comments", "input_field": "postUrls", "price": 0.50, "include_replies": True},
+     "facebook": {"actor_id": "scraper_one/facebook-comments-scraper", "route": "comments", "input_field": "postUrls", "price": 0.40, "include_replies": False},
+diff --git a/app/services/run_manager.py b/app/services/run_manager.py
+index 28bfbf2..9eeea2d 100644
+--- a/app/services/run_manager.py
++++ b/app/services/run_manager.py
+@@ -90,6 +90,98 @@ def resume_at_analysis(prior_status: dict, folder: Path, plan: dict | None = Non
+             or (folder / "cleaning" / "trusted.json").exists())
+ 
+ 
++#: How many times a fresh worker may resume the adaptive/comment step at the
++#: SAME durable state before the run stops waiting for it. Run
++#: 20260925T002306Z-65236947 resumed the X comment pass every ~25 minutes for
++#: eight hours: the pass never finished inside one worker, never recorded any
++#: progress, and nothing bounded the loop.
++MAX_ADAPTIVE_CONTINUATIONS_WITHOUT_PROGRESS = 3
++
++
++def adaptive_progress_fingerprint(store: RunStore, folder: Path, status: dict) -> str:
++    """A stable digest of everything the adaptive step has durably achieved.
++
++    Two consecutive continuations with the same fingerprint did no work.
++    """
++    import hashlib
++    import json as _json
++    parts = []
++    deepening = status.get("comment_deepening") if isinstance(status.get("comment_deepening"), dict) else {}
++    for source in sorted(COMMENT_CAPABLE_SOURCES):
++        rows = store.read(folder / f"normalized-comments-{source}.json", []) or []
++        row = deepening.get(source) if isinstance(deepening.get(source), dict) else {}
++        parts.append([source, len(rows), sorted(str(b) for b in (row.get("buckets_done") or [])),
++                      str(row.get("status") or ""), int(row.get("collected") or 0),
++                      len(row.get("attempted_refs") or [])])
++    parts.append(len(store.read(folder / "analysis" / "analysis-ready.json", []) or []))
++    parts.append(sorted((store.read(folder / "semantic-refill-state.json", {}) or {}).get("done_routes") or []))
++    parts.append(store.read(folder / "conversation-parent-discovery-state.json", {}) or {})
++    blob = _json.dumps(parts, sort_keys=True, ensure_ascii=False, default=str)
++    return hashlib.sha1(blob.encode("utf-8")).hexdigest()
++
++
++def update_adaptive_continuation_guard(status: dict, fingerprint: str) -> dict:
++    """Count consecutive continuations that left the adaptive step where it was.
++
++    Returns the guard block (also written into ``status``). ``tripped`` becomes
++    true once the limit is reached; the caller then closes the step honestly
++    instead of resuming it again.
++    """
++    guard = dict(status.get("adaptive_continuation_guard") or {})
++    count = int(guard.get("count") or 0) + 1 if guard.get("fingerprint") == fingerprint else 1
++    guard.update({
++        "fingerprint": fingerprint,
++        "count": count,
++        "updated_at": _utcnow(),
++        "limit": MAX_ADAPTIVE_CONTINUATIONS_WITHOUT_PROGRESS,
++    })
++    if count >= MAX_ADAPTIVE_CONTINUATIONS_WITHOUT_PROGRESS:
++        guard["tripped"] = True
++        guard["reason"] = "no_progress_after_repeated_continuations"
++    status["adaptive_continuation_guard"] = guard
++    return guard
++
++
++def close_adaptive_step_without_progress(store: RunStore, run_id: str, guard: dict) -> None:
++    """Write an honest terminal state for every comment pass still 'owed'.
++
++    Every source still marked unfinished becomes a shortfall with an explicit
++    reason, so the operator sees WHY, and ``resume_at_analysis`` lets the next
++    worker analyse the evidence that exists instead of resuming forever.
++    """
++    status = store.read_status(run_id)
++    deepening = dict(status.get("comment_deepening") or {})
++    for source, row in list(deepening.items()):
++        if not isinstance(row, dict):
++            continue
++        if str(row.get("status") or "") in UNFINISHED_STEP_STATES or not comment_source_is_complete(row):
++            collected = int(row.get("collected") or 0)
++            requested = int(row.get("requested") or row.get("target") or 0)
++            row.update({
++                "status": "shortfall",
++                "reason": "no_progress_after_repeated_continuations",
++                "collected": collected,
++                "shortfall": max(0, requested - collected) if requested else 0,
++                "buckets_done": ["owned", "open", "backfill"],
++                "updated_at": _utcnow(),
++            })
++            deepening[source] = row
++    status["comment_deepening"] = deepening
++    status["adaptive_collection"] = {
++        **(status.get("adaptive_collection") or {}),
++        "status": "completed_no_progress",
++        "completed_at": _utcnow(),
++        "guard": guard,
++    }
++    status["current"] = {
++        "source": None,
++        "code": "adaptive_closed_no_progress",
++        "message": (f"The comment/adaptive pass made no progress across "
++                    f"{guard.get('count')} worker continuations; analysing the evidence collected so far"),
++    }
++    store.write_status(run_id, status)
++
++
+ class RunManager:
+     """Background lifecycle manager for collection runs.
+ 
+@@ -933,6 +1025,12 @@ class RunManager:
+                 int(report.get("trusted_sample_shortfall", 0) or 0) > 0
+                 or bool(plan.get("comments_requested"))
+             )
++            guard_before = dict((self.store.read_status(run_id).get("adaptive_continuation_guard") or {}))
++            if guard_before.get("tripped"):
++                # A previous continuation already decided this step cannot
++                # progress. Close it honestly (idempotent) and move on.
++                close_adaptive_step_without_progress(self.store, run_id, guard_before)
++                needs_adaptive = False
+             if needs_adaptive and plan.get("search_strategy_version") in {"smart-collection-v2", "master30-search-v1"}:
+                 adaptive_status = self.store.read_status(run_id)
+                 adaptive_status.update({
+@@ -983,8 +1081,30 @@ class RunManager:
+                 self.store.write_status(run_id, adaptive_status)
+                 if (expanded.get("audit") or {}).get("deadline_reached"):
+                     # Collected evidence is already durable; hand the rest of the
+-                    # pipeline to a fresh invocation instead of dying at the wall.
++                    # pipeline to a fresh invocation instead of dying at the wall —
++                    # but only a bounded number of times at the SAME state.
+                     cont = self.store.read_status(run_id)
++                    guard = update_adaptive_continuation_guard(
++                        cont, adaptive_progress_fingerprint(self.store, folder, cont))
++                    self.store.write_status(run_id, cont)
++                    if guard.get("tripped"):
++                        close_adaptive_step_without_progress(self.store, run_id, guard)
++                        cont = self.store.read_status(run_id)
++                        cont.update({
++                            "status": "queued",
++                            "phase": "cleaning",
++                            "fatal_error": None,
++                        })
++                        self.store.write_status(run_id, cont)
++                        try:
++                            self.store.checkpoint_run(run_id)
++                        except Exception:
++                            pass
++                        try:
++                            self._requeue_continuation(run_id)
++                        except Exception:
++                            pass
++                        return
+                     cont.update({
+                         "status": "queued",
+                         "phase": "cleaning",
+diff --git a/app/services/source_capabilities.py b/app/services/source_capabilities.py
+index fa05ec6..6b06aa0 100644
+--- a/app/services/source_capabilities.py
++++ b/app/services/source_capabilities.py
+@@ -93,13 +93,13 @@ def discovery_actor_contract(source: str) -> dict:
+ # coverage and resumability matter more than minimizing Actor call count.
+ COMMENT_ACTOR_CONTRACTS = {
+     # Xquik's maxItems is global across a run; maxItemsPerTarget prevents one
+-    # thread from consuming the whole quota. mode=thread is used so nested
+-    # conversation replies are not silently lost (mode=replies is direct-only).
++    # parent from consuming the whole quota. mode=replies is the documented
++    # audience-reply route (direct replies).
+     "x": {
+         "parent_batch_limit": 2,
+         "limit_scope": "global",
+-        "reply_depth": "thread",
+-        "sort": "actor_thread",
++        "reply_depth": "direct",
++        "sort": "actor_default",
+     },
+     # epctex maxItems is a run-level cap across startUrls. One parent per call
+     # guarantees every selected video receives an attempt.
+@@ -428,11 +428,16 @@ def build_comment_deepening_input(
+     per_parent = max(1, int(max_per_parent or math.ceil(max_items / max(1, len(refs)))))
+ 
+     if source == "x":
+-        # "replies" is direct-only in Xquik. Thread mode preserves replies to
+-        # replies; the normalizer drops the root tweet and keeps its descendants.
++        # `mode: replies` + `replyTweetIds` is the DOCUMENTED audience-reply
++        # route ("every row has inReplyToId equal to the requested tweet").
++        # `mode: thread` exists in the schema but its semantics are not
++        # documented, and the Actor's own examples use "thread" for an author's
++        # chained posts. The one production run on thread mode
++        # (20260925T002306Z-65236947) never finished the X comment pass.
++        # Nested replies have a documented route of their own (conversationIds).
+         out = {
+-            "mode": "thread",
+-            "threadTweetIds": [_x_id(x) for x in refs],
++            "mode": "replies",
++            "replyTweetIds": [_x_id(x) for x in refs],
+             "maxItems": max_items,
+             "maxItemsPerTarget": max(1, per_parent),
+         }
+@@ -529,8 +534,10 @@ def build_page_discovery_input(
+             out["onlyPostsOlderThan"] = date_to
+         return out
+     if source == "instagram":
++        # (`skipPinnedPosts` is not a documented apify/instagram-scraper field;
++        # pinned posts are handled by SIGNALYTH's exact date post-filter.)
+         out = {"directUrls": refs, "resultsType": "posts", "resultsLimit": limit,
+-               "skipPinnedPosts": True, "addParentData": True}
++               "addParentData": True}
+         if date_from:
+             out["onlyPostsNewerThan"] = date_from
+         return out
+@@ -543,7 +550,10 @@ def build_page_discovery_input(
+             out["newestPostDate"] = date_to
+         return out
+     if source == "x":
+-        return {"twitterHandles": refs, "mode": "profile", "maxItems": limit}
++        # Documented mode for a handle's own timeline is `profileTweets`
++        # ("matches the Posts tab on X"). `profile` is not a mode value.
++        return {"twitterHandles": refs, "mode": "profileTweets", "maxItems": limit,
++                "maxItemsPerTarget": max(1, limit // max(1, len(refs)))}
+     raise ValueError(f"Page discovery is not configured for source {source}.")
+ 
+ 
+diff --git a/config/source_registry.json b/config/source_registry.json
+index f1f6d19..c6ab2cd 100644
+--- a/config/source_registry.json
++++ b/config/source_registry.json
+@@ -23,15 +23,15 @@
+     "comment_deepening_status": "configured",
+     "comment_actor_id": "xquik/x-tweet-scraper",
+     "comment_last_smoke_test_at": null,
+-    "comment_route": "thread",
+-    "comment_input_field": "threadTweetIds",
++    "comment_route": "replies",
++    "comment_input_field": "replyTweetIds",
+     "comment_output_mapping": {},
+     "comment_enabled": true,
+     "comment_price_per_1000_hint": 0.15,
+     "comment_max_per_parent": 40,
+     "comment_max_parents": 12,
+     "comment_include_replies": true,
+-    "comment_rollout_version": "comments-production-ready-v3",
++    "comment_rollout_version": "comments-production-ready-v4",
+     "comment_last_live_success_at": null,
+     "page_actor_id": "xquik/x-tweet-scraper",
+     "page_input_field": "twitterHandles",
+@@ -72,7 +72,7 @@
+     "comment_max_per_parent": 40,
+     "comment_max_parents": 12,
+     "comment_include_replies": true,
+-    "comment_rollout_version": "comments-production-ready-v3",
++    "comment_rollout_version": "comments-production-ready-v4",
+     "comment_last_live_success_at": null,
+     "page_actor_id": "clockworks/tiktok-scraper",
+     "page_input_field": "profiles",
+@@ -113,7 +113,7 @@
+     "comment_max_per_parent": 40,
+     "comment_max_parents": 12,
+     "comment_include_replies": true,
+-    "comment_rollout_version": "comments-production-ready-v3",
++    "comment_rollout_version": "comments-production-ready-v4",
+     "comment_last_live_success_at": null,
+     "page_actor_id": "apify/instagram-scraper",
+     "page_input_field": "directUrls",
+@@ -154,7 +154,7 @@
+     "comment_max_per_parent": 40,
+     "comment_max_parents": 12,
+     "comment_include_replies": false,
+-    "comment_rollout_version": "comments-production-ready-v3",
++    "comment_rollout_version": "comments-production-ready-v4",
+     "comment_last_live_success_at": null,
+     "page_actor_id": "apify/facebook-posts-scraper",
+     "page_input_field": "startUrls",
+@@ -195,7 +195,7 @@
+     "comment_max_per_parent": 40,
+     "comment_max_parents": 12,
+     "comment_include_replies": true,
+-    "comment_rollout_version": "comments-production-ready-v3",
++    "comment_rollout_version": "comments-production-ready-v4",
+     "comment_last_live_success_at": null
+   },
+   "news": {
+@@ -230,7 +230,7 @@
+     "comment_max_per_parent": 40,
+     "comment_max_parents": 12,
+     "comment_include_replies": true,
+-    "comment_rollout_version": "comments-production-ready-v3",
++    "comment_rollout_version": "comments-production-ready-v4",
+     "comment_last_live_success_at": null
+   }
+ }
+diff --git a/config/source_registry_history.json b/config/source_registry_history.json
+index 5826a5b..46f1be4 100644
+--- a/config/source_registry_history.json
++++ b/config/source_registry_history.json
+@@ -1,7 +1,7 @@
+ {
+   "facebook": [
+     {
+-      "saved_at": "2026-09-22T17:39:19.922383+00:00",
++      "saved_at": "2026-09-22T15:51:30.900370+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -46,7 +46,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T17:39:19.929120+00:00",
++      "saved_at": "2026-09-22T15:51:30.908524+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -91,7 +91,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T18:48:07.578364+00:00",
++      "saved_at": "2026-09-22T16:49:08.028328+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -136,7 +136,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T18:48:07.584767+00:00",
++      "saved_at": "2026-09-22T16:49:08.035626+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -181,7 +181,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T20:02:17.644172+00:00",
++      "saved_at": "2026-09-22T17:01:21.584194+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -226,7 +226,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T20:02:17.651287+00:00",
++      "saved_at": "2026-09-22T17:01:21.590931+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -271,7 +271,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T20:08:13.787149+00:00",
++      "saved_at": "2026-09-22T17:35:28.057613+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -316,7 +316,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T20:08:13.793515+00:00",
++      "saved_at": "2026-09-22T17:35:28.064830+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -361,7 +361,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T20:13:01.113715+00:00",
++      "saved_at": "2026-09-22T17:39:19.922383+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -406,7 +406,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T20:13:01.119841+00:00",
++      "saved_at": "2026-09-22T17:39:19.929120+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -451,7 +451,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-23T06:33:15.432148+00:00",
++      "saved_at": "2026-09-22T18:48:07.578364+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -496,7 +496,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-23T06:33:15.439290+00:00",
++      "saved_at": "2026-09-22T18:48:07.584767+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -541,7 +541,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-24T23:58:52.816519+00:00",
++      "saved_at": "2026-09-22T20:02:17.644172+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -586,7 +586,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-24T23:58:52.822632+00:00",
++      "saved_at": "2026-09-22T20:02:17.651287+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -631,7 +631,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-25T00:21:52.711317+00:00",
++      "saved_at": "2026-09-22T20:08:13.787149+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -664,19 +664,19 @@
+         "comment_price_per_1000_hint": 0.4,
+         "comment_max_per_parent": 40,
+         "comment_max_parents": 12,
+-        "comment_include_replies": false,
+-        "comment_rollout_version": "comments-production-ready-v3",
++        "comment_include_replies": true,
++        "comment_rollout_version": "comments-production-ready-v1",
+         "comment_last_live_success_at": null,
+         "page_actor_id": "apify/facebook-posts-scraper",
+         "page_input_field": "startUrls",
+-        "page_price_per_1000_hint": 2,
++        "page_price_per_1000_hint": 2.0,
+         "page_kind": "page_url",
+         "page_enabled": true,
+         "page_max_posts": 60
+       }
+     },
+     {
+-      "saved_at": "2026-09-25T00:21:52.717025+00:00",
++      "saved_at": "2026-09-22T20:08:13.793515+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -709,19 +709,19 @@
+         "comment_price_per_1000_hint": 0.4,
+         "comment_max_per_parent": 40,
+         "comment_max_parents": 12,
+-        "comment_include_replies": false,
+-        "comment_rollout_version": "comments-production-ready-v3",
++        "comment_include_replies": true,
++        "comment_rollout_version": "comments-production-ready-v1",
+         "comment_last_live_success_at": null,
+         "page_actor_id": "apify/facebook-posts-scraper",
+         "page_input_field": "startUrls",
+-        "page_price_per_1000_hint": 2,
++        "page_price_per_1000_hint": 2.0,
+         "page_kind": "page_url",
+         "page_enabled": true,
+         "page_max_posts": 60
+       }
+     },
+     {
+-      "saved_at": "2026-09-25T00:27:44.480100+00:00",
++      "saved_at": "2026-09-22T20:13:01.113715+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -754,19 +754,19 @@
+         "comment_price_per_1000_hint": 0.4,
+         "comment_max_per_parent": 40,
+         "comment_max_parents": 12,
+-        "comment_include_replies": false,
+-        "comment_rollout_version": "comments-production-ready-v3",
++        "comment_include_replies": true,
++        "comment_rollout_version": "comments-production-ready-v1",
+         "comment_last_live_success_at": null,
+         "page_actor_id": "apify/facebook-posts-scraper",
+         "page_input_field": "startUrls",
+-        "page_price_per_1000_hint": 2,
++        "page_price_per_1000_hint": 2.0,
+         "page_kind": "page_url",
+         "page_enabled": true,
+         "page_max_posts": 60
+       }
+     },
+     {
+-      "saved_at": "2026-09-25T00:27:44.486735+00:00",
++      "saved_at": "2026-09-22T20:13:01.119841+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -799,19 +799,19 @@
+         "comment_price_per_1000_hint": 0.4,
+         "comment_max_per_parent": 40,
+         "comment_max_parents": 12,
+-        "comment_include_replies": false,
+-        "comment_rollout_version": "comments-production-ready-v3",
++        "comment_include_replies": true,
++        "comment_rollout_version": "comments-production-ready-v1",
+         "comment_last_live_success_at": null,
+         "page_actor_id": "apify/facebook-posts-scraper",
+         "page_input_field": "startUrls",
+-        "page_price_per_1000_hint": 2,
++        "page_price_per_1000_hint": 2.0,
+         "page_kind": "page_url",
+         "page_enabled": true,
+         "page_max_posts": 60
+       }
+     },
+     {
+-      "saved_at": "2026-09-25T00:32:08.905726+00:00",
++      "saved_at": "2026-09-23T06:33:15.432148+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -844,19 +844,19 @@
+         "comment_price_per_1000_hint": 0.4,
+         "comment_max_per_parent": 40,
+         "comment_max_parents": 12,
+-        "comment_include_replies": false,
+-        "comment_rollout_version": "comments-production-ready-v3",
++        "comment_include_replies": true,
++        "comment_rollout_version": "comments-production-ready-v1",
+         "comment_last_live_success_at": null,
+         "page_actor_id": "apify/facebook-posts-scraper",
+         "page_input_field": "startUrls",
+-        "page_price_per_1000_hint": 2,
++        "page_price_per_1000_hint": 2.0,
+         "page_kind": "page_url",
+         "page_enabled": true,
+         "page_max_posts": 60
+       }
+     },
+     {
+-      "saved_at": "2026-09-25T00:32:08.912564+00:00",
++      "saved_at": "2026-09-23T06:33:15.439290+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -889,12 +889,12 @@
+         "comment_price_per_1000_hint": 0.4,
+         "comment_max_per_parent": 40,
+         "comment_max_parents": 12,
+-        "comment_include_replies": false,
+-        "comment_rollout_version": "comments-production-ready-v3",
++        "comment_include_replies": true,
++        "comment_rollout_version": "comments-production-ready-v1",
+         "comment_last_live_success_at": null,
+         "page_actor_id": "apify/facebook-posts-scraper",
+         "page_input_field": "startUrls",
+-        "page_price_per_1000_hint": 2,
++        "page_price_per_1000_hint": 2.0,
+         "page_kind": "page_url",
+         "page_enabled": true,
+         "page_max_posts": 60
+diff --git a/tests/test_comment_deepening.py b/tests/test_comment_deepening.py
+index f2ae957..096c094 100644
+--- a/tests/test_comment_deepening.py
++++ b/tests/test_comment_deepening.py
+@@ -12,8 +12,8 @@ def test_comment_input_shapes_are_actor_specific():
+     x = build_comment_deepening_input(
+         "x", ["https://x.com/u/status/123"], 7, max_per_parent=7,
+     )
+-    assert x["mode"] == "thread"
+-    assert x["threadTweetIds"] == ["123"]
++    assert x["mode"] == "replies"
++    assert x["replyTweetIds"] == ["123"]
+     assert x["maxItemsPerTarget"] == 7
+     assert build_comment_deepening_input("tiktok", ["https://www.tiktok.com/@u/video/123"], 9)["includeReplies"] is True
+     ig = build_comment_deepening_input("instagram", ["https://www.instagram.com/p/ABC/"], 12, max_per_parent=5)
+diff --git a/tests/test_owned_pages_flow_v19.py b/tests/test_owned_pages_flow_v19.py
+index ee8d4d5..f13ed1b 100644
+--- a/tests/test_owned_pages_flow_v19.py
++++ b/tests/test_owned_pages_flow_v19.py
+@@ -44,17 +44,11 @@ class FakeRunner:
+     def run(self, actor_id, run_input, *, max_items, max_charge_usd):
+         self.calls.append((actor_id, dict(run_input), max_items))
+         meta = {"usageTotalUsd": min(0.01, max_charge_usd), "defaultDatasetId": "fake"}
+-        if run_input.get("mode") == "profile":
++        if run_input.get("mode") == "profileTweets":
+             return meta, self.profile_posts[:max_items]
+-        if run_input.get("mode") == "thread":
++        if run_input.get("mode") == "replies":
+             out = []
+-            for parent in run_input.get("threadTweetIds") or []:
+-                # Real thread mode includes the root; SIGNALYTH intentionally
+-                # removes it before counting audience evidence.
+-                root = _tweet(int(parent), f"{TOPIC} root", "root", day=16)
+-                root["conversationId"] = str(parent)
+-                if len(out) < max_items:
+-                    out.append(root)
++            for parent in run_input.get("replyTweetIds") or []:
+                 for _ in range(int(self.replies_per_parent.get(str(parent), 0))):
+                     if len(out) >= max_items:
+                         break
+@@ -120,12 +114,12 @@ class TestTheOperatorsPagesComeFirst:
+         assert page.get("posts_found") == len(OWNED_POSTS), audit.get("warnings")
+ 
+         modes = [c[1].get("mode") for c in runner.calls]
+-        assert "profile" in modes, "the page must be asked for its posts"
+-        assert modes.index("profile") < modes.index("thread"), "posts before comments"
++        assert "profileTweets" in modes, "the page must be asked for its posts"
++        assert modes.index("profileTweets") < modes.index("replies"), "posts before comments"
+ 
+-        first_reply_call = next(c for c in runner.calls if c[1].get("mode") == "thread")
++        first_reply_call = next(c for c in runner.calls if c[1].get("mode") == "replies")
+         owned_ids = {str(p["id"]) for p in OWNED_POSTS}
+-        assert set(map(str, first_reply_call[1]["threadTweetIds"])) & owned_ids, \
++        assert set(map(str, first_reply_call[1]["replyTweetIds"])) & owned_ids, \
+             "the operator's own posts must be asked first"
+ 
+     def test_the_reserved_share_is_respected(self, tmp_path):
+@@ -170,7 +164,7 @@ class TestTheBucketIsNeverLeftHalfEmpty:
+         out = adaptive_expand_after_cleaning(tmp_path, plan, report, runner=runner)
+         buckets = (out["audit"].get("comment_buckets") or {}).get("x") or {}
+ 
+-        assert not [c for c in runner.calls if c[1].get("mode") == "profile"], \
++        assert not [c for c in runner.calls if c[1].get("mode") == "profileTweets"], \
+             "no pages given means no page call and no page cost"
+         assert buckets["owned"] == 0
+         assert buckets["open"] > 0, buckets
+diff --git a/tests/test_relevance_expansion_v2.py b/tests/test_relevance_expansion_v2.py
+index df54579..bdebd08 100644
+--- a/tests/test_relevance_expansion_v2.py
++++ b/tests/test_relevance_expansion_v2.py
+@@ -17,7 +17,7 @@ class FakeRunner:
+ 
+     def run(self, actor_id, run_input, *, max_items, max_charge_usd):
+         self.calls.append((actor_id, dict(run_input), max_items, max_charge_usd))
+-        items = self.reply_items if run_input.get("mode") == "thread" else self.search_items
++        items = self.reply_items if run_input.get("mode") == "replies" else self.search_items
+         return {"usageTotalUsd": min(0.01, max_charge_usd), "defaultDatasetId": "fake"}, items[:max_items]
+ 
+ 
+@@ -95,15 +95,15 @@ def test_reply_deepening_runs_when_comments_on_and_no_collision(tmp_path):
+     # v30: with a measured analyzable shortfall the bounded semantic refill
+     # legitimately runs BEFORE comment deepening, so the replies call is no
+     # longer necessarily first. Any search call before it must stay bounded.
+-    reply_calls = [c for c in runner.calls if c[1].get("mode") == "thread"]
+-    assert reply_calls, f"no thread call at all: {[c[1].get('mode') for c in runner.calls]}"
++    reply_calls = [c for c in runner.calls if c[1].get("mode") == "replies"]
++    assert reply_calls, f"no replies call at all: {[c[1].get('mode') for c in runner.calls]}"
+     for c in runner.calls:
+         if c[1].get("mode") == "search":
+             assert int(c[1].get("maxItems", 0)) <= 2 * report["trusted_sample_shortfall"], \
+                 f"semantic refill call is not bounded: {c[1]}"
+     # A reported zero is a ranking signal, not a verdict: 401 may be topped up
+     # as an extra parent, but 400 — the one that REPORTED replies — comes first.
+-    reply_ids = [str(x) for x in reply_calls[0][1]["threadTweetIds"]]
++    reply_ids = [str(x) for x in reply_calls[0][1]["replyTweetIds"]]
+     assert reply_ids[0] == "400"
+     assert set(reply_ids) <= {"400", "401"}
+     assert result["report"]["trusted_sample_shortfall"] == 0
+@@ -132,8 +132,8 @@ def test_reply_deepening_runs_from_configured_production_contract_without_separa
+     }])
+     result = adaptive_expand_after_cleaning(tmp_path, plan, report, runner=runner)
+     # v30: the semantic refill may run first (see above); find the replies call.
+-    reply_calls = [c for c in runner.calls if c[1].get("mode") == "thread"]
+-    assert reply_calls, f"no thread call at all: {[c[1].get('mode') for c in runner.calls]}"
+-    assert reply_calls[0][1]["threadTweetIds"] == ["800"]
++    reply_calls = [c for c in runner.calls if c[1].get("mode") == "replies"]
++    assert reply_calls, f"no replies call at all: {[c[1].get('mode') for c in runner.calls]}"
++    assert reply_calls[0][1]["replyTweetIds"] == ["800"]
+     assert "x:comment_deepening_not_operational" not in result["audit"]["warnings"]
+     assert result["report"]["trusted_sample_shortfall"] == 0
+diff --git a/tests/test_v184_hardening.py b/tests/test_v184_hardening.py
+index c7fc8c1..c474c1d 100644
+--- a/tests/test_v184_hardening.py
++++ b/tests/test_v184_hardening.py
+@@ -49,7 +49,7 @@ def test_facebook_rebalance_resize_does_not_reintroduce_200_cap():
+ 
+ def test_comment_smoke_inputs_are_fail_closed_and_source_specific():
+     x = build_comment_smoke_input("x", ["12345"], 3)
+-    assert x == {"threadTweetIds":["12345"], "mode":"thread", "maxItems":3, "maxItemsPerTarget":3}
++    assert x == {"replyTweetIds":["12345"], "mode":"replies", "maxItems":3, "maxItemsPerTarget":3}
+     fb = build_comment_smoke_input("facebook", ["https://www.facebook.com/page/posts/1"], 3)
+     assert fb["postUrls"] == ["https://www.facebook.com/page/posts/1"]
+     assert "mode" not in fb
+diff --git a/tests/test_v31_1_schema_conformance.py b/tests/test_v31_1_schema_conformance.py
+index 4a02139..b006e08 100644
+--- a/tests/test_v31_1_schema_conformance.py
++++ b/tests/test_v31_1_schema_conformance.py
+@@ -170,3 +170,36 @@ class TestRefillNeverReBuysAPaidSearch:
+         assert _route_signature(sp["actor_id"], {**inp, "resultsCount": 30}) in paid
+         # A route the collector skipped never ran, so the refill may use it.
+         assert _route_signature(sp["actor_id"], {**inp, "query": "Eurojackpot Greece"}) not in paid
++
++
++class TestPageDiscoveryInputsUseOnlyDocumentedFields:
++    """The operator's own pages/accounts are turned into post URLs first."""
++
++    def test_x_page_discovery_uses_a_documented_mode(self):
++        from app.services.source_capabilities import build_page_discovery_input
++        inp = build_page_discovery_input("x", ["@opap_gr", "https://x.com/eurojackpot"], 20)
++        assert inp["mode"] in {"legacy", "tweet", "tweets", "search", "profileTweets", "profileReplies",
++                               "profileMedia", "profileLikes", "listTweets", "article", "replies",
++                               "quotes", "thread", "retweeters", "favoriters"}
++        assert inp["mode"] == "profileTweets"          # the Posts tab of a handle
++        assert inp["twitterHandles"] == ["opap_gr", "eurojackpot"]
++        assert set(inp) <= {"twitterHandles", "mode", "maxItems", "maxItemsPerTarget"}
++
++    def test_instagram_page_discovery_sends_only_documented_fields(self):
++        from app.services.source_capabilities import build_page_discovery_input
++        inp = build_page_discovery_input("instagram", ["opap_gr"], 20, date_from="2026-08-25")
++        assert set(inp) <= {"directUrls", "resultsType", "resultsLimit", "onlyPostsNewerThan",
++                            "search", "searchType", "searchLimit", "addParentData"}
++        assert inp["directUrls"] == ["https://www.instagram.com/opap_gr"]
++
++    def test_facebook_and_tiktok_page_discovery_match_their_schemas(self):
++        from app.services.source_capabilities import build_page_discovery_input
++        fb = build_page_discovery_input("facebook", ["facebook.com/OPAP.gr"], 20,
++                                        date_from="2026-08-25", date_to="2026-09-24")
++        assert set(fb) <= {"startUrls", "resultsLimit", "captionText", "onlyPostsNewerThan", "onlyPostsOlderThan"}
++        assert fb["startUrls"] == [{"url": "https://facebook.com/OPAP.gr"}]
++        tt = build_page_discovery_input("tiktok", ["@opap.gr"], 20, date_from="2026-08-25", date_to="2026-09-24")
++        assert set(tt) <= {"profiles", "resultsPerPage", "profileSorting", "excludePinnedPosts",
++                           "oldestPostDateUnified", "newestPostDate"}
++        assert tt["profileSorting"] in {"latest", "popular", "oldest"}
++        assert tt["profiles"] == ["opap.gr"]
+diff --git a/tests/test_v31_2_continuation_guard.py b/tests/test_v31_2_continuation_guard.py
+new file mode 100644
+index 0000000..7aa1cfb
+--- /dev/null
++++ b/tests/test_v31_2_continuation_guard.py
+@@ -0,0 +1,134 @@
++"""A step that never progresses must not be resumed forever.
++
++Run 20260925T002306Z-65236947 (production, 2026-09-25) sat in "running" for
++eight hours: the X comment pass hit the worker deadline, the run was requeued,
++a fresh worker resumed at exactly the same durable state, hit the deadline
++again, and so on every ~25 minutes. Nothing was spent, nothing finished, and
++nothing in the code bounded the loop.
++
++Contract: after MAX_ADAPTIVE_CONTINUATIONS_WITHOUT_PROGRESS consecutive
++continuations whose durable fingerprint did not change, the adaptive step is
++closed honestly (each unfinished comment pass becomes a shortfall with an
++explicit reason) and the run proceeds to analysis on the evidence it has.
++"""
++from __future__ import annotations
++
++import tempfile
++import unittest
++from datetime import date
++from pathlib import Path
++from unittest.mock import patch
++
++from app.config import settings
++from app.models import AnalysisDraft
++from app.services.query_planner import build_collection_plan
++from app.services.run_manager import (
++    MAX_ADAPTIVE_CONTINUATIONS_WITHOUT_PROGRESS,
++    RunManager,
++    resume_at_analysis,
++    update_adaptive_continuation_guard,
++)
++from app.services.storage import RunStore
++
++from tests.test_whole_pipeline_v19 import FakeApify, FakeModel, _wait_terminal
++
++
++class TestTheGuardItself(unittest.TestCase):
++    def test_identical_states_count_up_and_trip_at_the_limit(self):
++        status: dict = {}
++        for i in range(1, MAX_ADAPTIVE_CONTINUATIONS_WITHOUT_PROGRESS + 1):
++            guard = update_adaptive_continuation_guard(status, "same")
++            self.assertEqual(guard["count"], i)
++        self.assertTrue(guard.get("tripped"))
++        self.assertEqual(guard["reason"], "no_progress_after_repeated_continuations")
++
++    def test_any_progress_resets_the_count(self):
++        status: dict = {}
++        update_adaptive_continuation_guard(status, "a")
++        update_adaptive_continuation_guard(status, "a")
++        guard = update_adaptive_continuation_guard(status, "b")   # something changed
++        self.assertEqual(guard["count"], 1)
++        self.assertFalse(guard.get("tripped"))
++
++
++class StuckAdaptiveStepTest(unittest.TestCase):
++    """The whole loop, driven by the real RunManager and a step that never finishes."""
++
++    def setUp(self):
++        self.tmp = tempfile.TemporaryDirectory()
++        self.store = RunStore()
++        self.store.root = Path(self.tmp.name)
++        self.manager = RunManager(store=self.store, max_workers=1)
++        FakeApify.calls = []
++        self._ai, self._key = settings.signalyth_ai_enabled, settings.openai_api_key
++        settings.signalyth_ai_enabled = True
++        settings.openai_api_key = "test-key"
++
++    def tearDown(self):
++        settings.signalyth_ai_enabled, settings.openai_api_key = self._ai, self._key
++        self.manager.shutdown(wait=True)
++        self.tmp.cleanup()
++
++    def _plan(self):
++        draft = AnalysisDraft(
++            client="ΟΠΑΠ", topic="Eurojackpot", market="Greece",
++            date_from=date(2026, 8, 23), date_to=date(2026, 9, 21),
++            keywords=["κλήρωση"], sources=["facebook"], sample_mode="perSource",
++            per_source={"facebook": 12}, per_source_comments={"facebook": 40},
++            comments=True, max_budget_usd=5.0, smart_search=True, report_language="Ελληνικά",
++        )
++        plan = build_collection_plan(draft).model_dump(mode="json")
++        for row in (plan.get("preflight_forecast") or {}).get("sources", []):
++            if row.get("source") == "facebook":
++                row.setdefault("comments", {})["status"] = "verified_available"
++                row["comments"]["live_verified"] = True
++        return plan
++
++    def test_a_step_that_never_progresses_is_closed_after_the_limit(self):
++        run_id = self.store.create(self._plan())[0]
++        calls = []
++
++        def stuck_adaptive(folder, *, plan, initial_report, **kwargs):
++            # Behaves like the live X pass: writes "running", never finishes,
++            # reports the worker deadline every single time.
++            calls.append(1)
++            status = self.store.read_status(run_id)
++            status.setdefault("comment_deepening", {})["facebook"] = {
++                "status": "running", "bucket": "open", "buckets_done": ["owned"],
++                "requested": 40, "collected": 0, "parents": 2,
++            }
++            self.store.write_status(run_id, status)
++            return {"report": initial_report, "audit": {"deadline_reached": True, "warnings": []}}
++
++        with patch("app.services.collector.ApifyRunner", FakeApify), \
++             patch("app.services.relevance_expansion.ApifyRunner", FakeApify), \
++             patch("app.services.ai_analysis.OpenAIResponsesProvider", FakeModel), \
++             patch("app.services.run_manager.adaptive_expand_after_cleaning", stuck_adaptive):
++            self.manager.enqueue(run_id)
++            done = _wait_terminal(self.store, run_id, timeout=240.0)
++
++        self.assertNotIn(done.get("status"), {"running", "queued"},
++                         f"the run is still looping: {done.get('current')}")
++        self.assertNotEqual(done.get("status"), "failed", msg=f"fatal_error={done.get('fatal_error')}")
++        self.assertEqual(len(calls), MAX_ADAPTIVE_CONTINUATIONS_WITHOUT_PROGRESS,
++                         f"the stuck step was resumed {len(calls)} times")
++
++        guard = done.get("adaptive_continuation_guard") or {}
++        self.assertTrue(guard.get("tripped"), guard)
++        self.assertEqual((done.get("adaptive_collection") or {}).get("status"), "completed_no_progress")
++
++        row = (done.get("comment_deepening") or {}).get("facebook") or {}
++        self.assertEqual(row.get("status"), "shortfall", row)
++        self.assertEqual(row.get("reason"), "no_progress_after_repeated_continuations")
++        self.assertEqual(row.get("shortfall"), 40)
++
++        # And a fresh worker would now go straight to analysis instead of resuming.
++        self.assertTrue(resume_at_analysis(done, self.store.folder_for(run_id), self.store.read_plan(run_id)))
++
++        # The report was still produced from the evidence that existed.
++        folder = self.store.folder_for(run_id)
++        self.assertIsInstance(self.store.read(folder / "intelligence" / "summary.json", None), dict)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tests/test_v31_acquisition_contracts.py b/tests/test_v31_acquisition_contracts.py
+index 1117d01..2afaf6e 100644
+--- a/tests/test_v31_acquisition_contracts.py
++++ b/tests/test_v31_acquisition_contracts.py
+@@ -105,13 +105,13 @@ def test_x_primary_search_allocates_capacity_per_target(monkeypatch):
+         assert inp["maxItems"] >= inp["maxItemsPerTarget"]
+ 
+ 
+-@pytest.mark.parametrize("field", ["postUrls", "threadTweetIds", "startUrls", "directUrls"])
++@pytest.mark.parametrize("field", ["postUrls", "replyTweetIds", "threadTweetIds", "startUrls", "directUrls"])
+ def test_resilience_knows_comment_and_parent_multi_target_fields(field):
+     assert field in MULTI_TARGET_FIELDS
+ 
+ 
+ def test_comment_contracts_are_explicit_for_every_production_social():
+-    assert comment_actor_contract("x")["reply_depth"] == "thread"
++    assert comment_actor_contract("x")["reply_depth"] == "direct"
+     assert comment_actor_contract("tiktok")["parent_batch_limit"] == 1
+     assert comment_actor_contract("instagram")["sort"] == "recent_activity"
+     assert comment_actor_contract("facebook")["sort"] == "newest"
+@@ -127,8 +127,8 @@ def test_x_comment_contract_is_threaded_per_target_and_exact_dated():
+         date_from=date(2026, 9, 14),
+         date_to=date(2026, 9, 23),
+     )
+-    assert inp["mode"] == "thread"
+-    assert inp["threadTweetIds"] == ["123"]
++    assert inp["mode"] == "replies"
++    assert inp["replyTweetIds"] == ["123"]
+     assert inp["maxItemsPerTarget"] == 11
+     assert inp["since"] == "2026-09-14_00:00:00_UTC"
+     assert inp["until"] == "2026-09-24_00:00:00_UTC"
+-- 
+2.43.0
+

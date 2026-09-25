@@ -1,0 +1,707 @@
+From fd0ed7cf2dd8b1482e331f31322bf67af68cf9e8 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 25 Sep 2026 03:36:20 +0300
+Subject: [PATCH 1/2] =?UTF-8?q?v31.1:=20schema=20conformance=20=E2=80=94?=
+ =?UTF-8?q?=20only=20documented=20Actor=20fields/enums,=20bounded=20probe,?=
+ =?UTF-8?q?=20no=20re-bought=20searches?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- apify/instagram-scraper: remove invented skipPinnedPosts (not in schema)
+- scrapesmith/instagram-comments-scraper: sortOrder 'recent' is not an enum
+  value; use documented recent_activity
+- semantic_broad_probe_target: minority route again (<= half target, cap 20)
+  instead of 1.5x/60 which made the global probe outweigh the sample
+- post-cleaning refill and post-AI refill skip any search the collector
+  already paid for (same actor + input minus count knobs)
+- tests/test_v31_1_schema_conformance.py locks every planned discovery and
+  comment input to the verbatim public schemas (10 tests)
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FM9VfoHhfyZmxPfBDYfQjP
+---
+ app/services/query_planner.py           |  14 +-
+ app/services/relevance_expansion.py     |  44 ++++++
+ app/services/semantic_refill.py         |   7 +-
+ app/services/source_capabilities.py     |   5 +-
+ config/source_registry_history.json     |  76 +++++------
+ tests/test_comment_deepening.py         |   2 +-
+ tests/test_conversation_context_v29.py  |   8 +-
+ tests/test_v31_1_schema_conformance.py  | 172 ++++++++++++++++++++++++
+ tests/test_v31_acquisition_contracts.py |  10 +-
+ 9 files changed, 281 insertions(+), 57 deletions(-)
+ create mode 100644 tests/test_v31_1_schema_conformance.py
+
+diff --git a/app/services/query_planner.py b/app/services/query_planner.py
+index 2026984..152ee47 100644
+--- a/app/services/query_planner.py
++++ b/app/services/query_planner.py
+@@ -394,16 +394,15 @@ def semantic_broad_probe_target(target: int) -> int:
+     cleaning and only against a measured analyzable shortfall. It may over-fetch
+     raw candidates to measure low market yield, but every returned row still
+     passes the normal subject + market cleaner before becoming evidence. The
+-    probe itself stays hard-capped at 60 raw rows.
++    probe itself stays a minority route: <= half the target, hard cap 20.
+     """
+     target = max(0, int(target or 0))
+     if target <= 0:
+         return 0
+-    # Broad recall is post-cleaning and therefore may safely over-fetch:
+-    # final evidence still has to pass subject + market cleaning. A tiny 25%
+-    # probe starved topic-only Facebook/Instagram briefs before Greece rows had
+-    # a chance to appear. Keep it bounded, but large enough to measure yield.
+-    return min(60, max(12, int(math.ceil(target * 1.5))))
++    # Bounded means bounded: at most half the target and never more than 20
++    # rows. A 1.5x/60-row probe made the global firehose the majority of a
++    # 20-post sample; the cleaner then had to throw most of it away — paid.
++    return min(20, max(5, int(math.ceil(target * 0.5))))
+ 
+ 
+ def instagram_discovery_tags(draft: AnalysisDraft) -> list[str]:
+@@ -682,7 +681,7 @@ def make_source_plan(source: str, target: int, draft: AnalysisDraft, queries: li
+             inp = {"directUrls": [f"https://www.instagram.com/explore/tags/{primary_tag.lower()}/"],
+                    "resultsType": "posts", "resultsLimit": target,
+                    "onlyPostsNewerThan": draft.date_from.isoformat(),
+-                   "skipPinnedPosts": True, "addParentData": True}
++                   "addParentData": True}
+             subruns = [_sub(actor, inp, target, primary_budget, "primary_hashtag_posts", draft)]
+             extra_tags = tags[1:4]
+             for i, tag in enumerate(extra_tags):
+@@ -757,7 +756,6 @@ def make_source_plan(source: str, target: int, draft: AnalysisDraft, queries: li
+                 probe_inp = {"directUrls": [f"https://www.instagram.com/explore/tags/{hashtag(routes['topic']).lower()}/"],
+                              "resultsType": "posts", "resultsLimit": cap_items,
+                              "onlyPostsNewerThan": draft.date_from.isoformat(),
+-                             "skipPinnedPosts": True,
+                              "addParentData": True}
+             semantic_subruns.append(
+                 _sub(actor, probe_inp, cap_items, probe_budget,
+diff --git a/app/services/relevance_expansion.py b/app/services/relevance_expansion.py
+index e1f8de9..aa72280 100644
+--- a/app/services/relevance_expansion.py
++++ b/app/services/relevance_expansion.py
+@@ -2,6 +2,7 @@ from __future__ import annotations
+ 
+ from datetime import date, datetime, timedelta, timezone
+ import copy
++import json
+ import math
+ from pathlib import Path
+ from typing import Callable
+@@ -1108,6 +1109,40 @@ def _discover_conversation_parent_candidates(
+     return list(cached_by_id.values())
+ 
+ 
++
++#: Input keys that only say HOW MANY rows a route asks for. Two routes that
++#: differ only in these are the same paid search.
++_ROUTE_COUNT_KEYS = frozenset({"maxItems", "maxItemsPerTarget", "resultsCount", "resultsLimit",
++                               "maxArticles", "searchLimit", "endPage"})
++
++
++def _route_signature(actor_id: str, actor_input: dict) -> str:
++    """One string per distinct paid search: actor + input minus the count knobs."""
++    body = {k: v for k, v in (actor_input or {}).items() if k not in _ROUTE_COUNT_KEYS}
++    return f"{actor_id}|{json.dumps(body, sort_keys=True, ensure_ascii=False, default=str)}"
++
++
++def _already_paid_route_signatures(status: dict, source_plan: dict) -> set[str]:
++    """Signatures of every discovery route the collector has ALREADY run.
++
++    For several sources the plan's semantic routes are copies of the primary
++    routes. Without this, the post-cleaning refill re-bought the very same
++    search (same actor, query and dates) whose rows it already held. Routes
++    the collector skipped (target met, pending) never ran and remain usable.
++    """
++    source = str(source_plan.get("source") or "")
++    rows = ((status.get("sources") or {}).get(source) or {}).get("subruns") or []
++    planned = [*(source_plan.get("subruns") or []), *(source_plan.get("topup_subruns") or [])]
++    paid: set[str] = set()
++    for i, sr in enumerate(planned):
++        row = rows[i] if i < len(rows) and isinstance(rows[i], dict) else {}
++        st = str(row.get("status") or "pending")
++        if st == "pending" or st.startswith("skipped"):
++            continue
++        paid.add(_route_signature(str(sr.get("actor_id") or source_plan.get("actor_id") or ""),
++                                  dict(sr.get("input") or {})))
++    return paid
++
+ def adaptive_expand_after_cleaning(
+     folder: Path,
+     plan: dict,
+@@ -1343,9 +1378,18 @@ def adaptive_expand_after_cleaning(
+             routes,
+             key=lambda sr: 0 if str(sr.get("purpose") or "") == "semantic_broad_probe" else 1,
+         )
++        paid_signatures = _already_paid_route_signatures(
++            store.read(folder / "status.json", {}) or {}, semantic_sp)
+         for idx, sr in enumerate(routes[:6]):
+             if missing <= 0 or cancel_check():
+                 break
++            if _route_signature(str(sr.get("actor_id") or semantic_sp.get("actor_id") or ""),
++                                dict(sr.get("input") or {})) in paid_signatures:
++                audit.setdefault("semantic_refill", {}).setdefault(source, []).append({
++                    "route": str(sr.get("purpose") or "semantic_refill"),
++                    "status": "skipped_already_paid_by_collector",
++                })
++                continue
+             if deadline_check():
+                 audit["deadline_reached"] = True
+                 audit["warnings"].append(f"{source}:semantic_refill_deferred_worker_deadline")
+diff --git a/app/services/semantic_refill.py b/app/services/semantic_refill.py
+index 52404a7..f8bc54f 100644
+--- a/app/services/semantic_refill.py
++++ b/app/services/semantic_refill.py
+@@ -39,7 +39,12 @@ def semantic_refill(folder: Path, plan: dict, cancel_check: Callable[[], bool] |
+         source=str(sp.get("source") or ""); target=int(sp.get("target_items",0) or 0); short=max(0,target-int(counts.get(source,0)))
+         if short<=0: continue
+         routes=sp.get("semantic_topup_subruns") or sp.get("topup_subruns") or []
+-        if not routes: audit["steps"].append({"source":source,"shortfall":short,"status":"no_verified_topup_route"}); continue
++        # Never re-buy a search already paid for by the collector; prefer the probe.
++        from app.services.relevance_expansion import _already_paid_route_signatures, _route_signature
++        paid=_already_paid_route_signatures(status, sp)
++        routes=sorted(routes,key=lambda r: 0 if str(r.get("purpose") or "")=="semantic_broad_probe" else 1)
++        routes=[r for r in routes if _route_signature(str(r.get("actor_id") or sp.get("actor_id") or ""),dict(r.get("input") or {})) not in paid]
++        if not routes: audit["steps"].append({"source":source,"shortfall":short,"status":"no_unpaid_topup_route"}); continue
+         # One route per source in this bounded refill round; ask for headroom because
+         # some newly collected candidates may still be semantically irrelevant.
+         sr=copy.deepcopy(routes[0]); old=max(1,int(sr.get("target_items",short) or short)); wanted=min(max(short*2,short),max(target,short))
+diff --git a/app/services/source_capabilities.py b/app/services/source_capabilities.py
+index 1bbe50c..fa05ec6 100644
+--- a/app/services/source_capabilities.py
++++ b/app/services/source_capabilities.py
+@@ -115,7 +115,7 @@ COMMENT_ACTOR_CONTRACTS = {
+         "parent_batch_limit": 5,
+         "limit_scope": "per_parent",
+         "reply_depth": "nested",
+-        "sort": "recent",
++        "sort": "recent_activity",
+     },
+     # Scraper One uses a per-post resultsLimit and newest-first ordering. Keep
+     # the five-parent cap from the production hotfix; do not leak that limit to
+@@ -446,7 +446,8 @@ def build_comment_deepening_input(
+         return {"startUrls": refs, "includeReplies": bool(include_replies), "maxItems": max_items}
+     if source == "instagram":
+         # ScrapeSmith's schema uses a per-parent limit rather than maxItems.
+-        return {"postUrls": refs, "maxCommentsPerPost": per_parent, "sortOrder": "recent"}
++        # Documented enum: popular | recent_activity ("recent" alone is not a value).
++        return {"postUrls": refs, "maxCommentsPerPost": per_parent, "sortOrder": "recent_activity"}
+     if source == "facebook":
+         # scraper_one/facebook-comments-scraper: resultsLimit is PER POST and
+         # newest-first is essential for bounded windows. The actor has no native
+diff --git a/config/source_registry_history.json b/config/source_registry_history.json
+index 46f1be4..5826a5b 100644
+--- a/config/source_registry_history.json
++++ b/config/source_registry_history.json
+@@ -1,7 +1,7 @@
+ {
+   "facebook": [
+     {
+-      "saved_at": "2026-09-22T15:51:30.900370+00:00",
++      "saved_at": "2026-09-22T17:39:19.922383+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -46,7 +46,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T15:51:30.908524+00:00",
++      "saved_at": "2026-09-22T17:39:19.929120+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -91,7 +91,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T16:49:08.028328+00:00",
++      "saved_at": "2026-09-22T18:48:07.578364+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -136,7 +136,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T16:49:08.035626+00:00",
++      "saved_at": "2026-09-22T18:48:07.584767+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -181,7 +181,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T17:01:21.584194+00:00",
++      "saved_at": "2026-09-22T20:02:17.644172+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -226,7 +226,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T17:01:21.590931+00:00",
++      "saved_at": "2026-09-22T20:02:17.651287+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -271,7 +271,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T17:35:28.057613+00:00",
++      "saved_at": "2026-09-22T20:08:13.787149+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -316,7 +316,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T17:35:28.064830+00:00",
++      "saved_at": "2026-09-22T20:08:13.793515+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -361,7 +361,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T17:39:19.922383+00:00",
++      "saved_at": "2026-09-22T20:13:01.113715+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -406,7 +406,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T17:39:19.929120+00:00",
++      "saved_at": "2026-09-22T20:13:01.119841+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -451,7 +451,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T18:48:07.578364+00:00",
++      "saved_at": "2026-09-23T06:33:15.432148+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -496,7 +496,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T18:48:07.584767+00:00",
++      "saved_at": "2026-09-23T06:33:15.439290+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -541,7 +541,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T20:02:17.644172+00:00",
++      "saved_at": "2026-09-24T23:58:52.816519+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -586,7 +586,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T20:02:17.651287+00:00",
++      "saved_at": "2026-09-24T23:58:52.822632+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -631,7 +631,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T20:08:13.787149+00:00",
++      "saved_at": "2026-09-25T00:21:52.711317+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -664,19 +664,19 @@
+         "comment_price_per_1000_hint": 0.4,
+         "comment_max_per_parent": 40,
+         "comment_max_parents": 12,
+-        "comment_include_replies": true,
+-        "comment_rollout_version": "comments-production-ready-v1",
++        "comment_include_replies": false,
++        "comment_rollout_version": "comments-production-ready-v3",
+         "comment_last_live_success_at": null,
+         "page_actor_id": "apify/facebook-posts-scraper",
+         "page_input_field": "startUrls",
+-        "page_price_per_1000_hint": 2.0,
++        "page_price_per_1000_hint": 2,
+         "page_kind": "page_url",
+         "page_enabled": true,
+         "page_max_posts": 60
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T20:08:13.793515+00:00",
++      "saved_at": "2026-09-25T00:21:52.717025+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -709,19 +709,19 @@
+         "comment_price_per_1000_hint": 0.4,
+         "comment_max_per_parent": 40,
+         "comment_max_parents": 12,
+-        "comment_include_replies": true,
+-        "comment_rollout_version": "comments-production-ready-v1",
++        "comment_include_replies": false,
++        "comment_rollout_version": "comments-production-ready-v3",
+         "comment_last_live_success_at": null,
+         "page_actor_id": "apify/facebook-posts-scraper",
+         "page_input_field": "startUrls",
+-        "page_price_per_1000_hint": 2.0,
++        "page_price_per_1000_hint": 2,
+         "page_kind": "page_url",
+         "page_enabled": true,
+         "page_max_posts": 60
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T20:13:01.113715+00:00",
++      "saved_at": "2026-09-25T00:27:44.480100+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -754,19 +754,19 @@
+         "comment_price_per_1000_hint": 0.4,
+         "comment_max_per_parent": 40,
+         "comment_max_parents": 12,
+-        "comment_include_replies": true,
+-        "comment_rollout_version": "comments-production-ready-v1",
++        "comment_include_replies": false,
++        "comment_rollout_version": "comments-production-ready-v3",
+         "comment_last_live_success_at": null,
+         "page_actor_id": "apify/facebook-posts-scraper",
+         "page_input_field": "startUrls",
+-        "page_price_per_1000_hint": 2.0,
++        "page_price_per_1000_hint": 2,
+         "page_kind": "page_url",
+         "page_enabled": true,
+         "page_max_posts": 60
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T20:13:01.119841+00:00",
++      "saved_at": "2026-09-25T00:27:44.486735+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -799,19 +799,19 @@
+         "comment_price_per_1000_hint": 0.4,
+         "comment_max_per_parent": 40,
+         "comment_max_parents": 12,
+-        "comment_include_replies": true,
+-        "comment_rollout_version": "comments-production-ready-v1",
++        "comment_include_replies": false,
++        "comment_rollout_version": "comments-production-ready-v3",
+         "comment_last_live_success_at": null,
+         "page_actor_id": "apify/facebook-posts-scraper",
+         "page_input_field": "startUrls",
+-        "page_price_per_1000_hint": 2.0,
++        "page_price_per_1000_hint": 2,
+         "page_kind": "page_url",
+         "page_enabled": true,
+         "page_max_posts": 60
+       }
+     },
+     {
+-      "saved_at": "2026-09-23T06:33:15.432148+00:00",
++      "saved_at": "2026-09-25T00:32:08.905726+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -844,19 +844,19 @@
+         "comment_price_per_1000_hint": 0.4,
+         "comment_max_per_parent": 40,
+         "comment_max_parents": 12,
+-        "comment_include_replies": true,
+-        "comment_rollout_version": "comments-production-ready-v1",
++        "comment_include_replies": false,
++        "comment_rollout_version": "comments-production-ready-v3",
+         "comment_last_live_success_at": null,
+         "page_actor_id": "apify/facebook-posts-scraper",
+         "page_input_field": "startUrls",
+-        "page_price_per_1000_hint": 2.0,
++        "page_price_per_1000_hint": 2,
+         "page_kind": "page_url",
+         "page_enabled": true,
+         "page_max_posts": 60
+       }
+     },
+     {
+-      "saved_at": "2026-09-23T06:33:15.439290+00:00",
++      "saved_at": "2026-09-25T00:32:08.912564+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -889,12 +889,12 @@
+         "comment_price_per_1000_hint": 0.4,
+         "comment_max_per_parent": 40,
+         "comment_max_parents": 12,
+-        "comment_include_replies": true,
+-        "comment_rollout_version": "comments-production-ready-v1",
++        "comment_include_replies": false,
++        "comment_rollout_version": "comments-production-ready-v3",
+         "comment_last_live_success_at": null,
+         "page_actor_id": "apify/facebook-posts-scraper",
+         "page_input_field": "startUrls",
+-        "page_price_per_1000_hint": 2.0,
++        "page_price_per_1000_hint": 2,
+         "page_kind": "page_url",
+         "page_enabled": true,
+         "page_max_posts": 60
+diff --git a/tests/test_comment_deepening.py b/tests/test_comment_deepening.py
+index 5bd861e..f2ae957 100644
+--- a/tests/test_comment_deepening.py
++++ b/tests/test_comment_deepening.py
+@@ -17,7 +17,7 @@ def test_comment_input_shapes_are_actor_specific():
+     assert x["maxItemsPerTarget"] == 7
+     assert build_comment_deepening_input("tiktok", ["https://www.tiktok.com/@u/video/123"], 9)["includeReplies"] is True
+     ig = build_comment_deepening_input("instagram", ["https://www.instagram.com/p/ABC/"], 12, max_per_parent=5)
+-    assert ig == {"postUrls": ["https://www.instagram.com/p/ABC/"], "maxCommentsPerPost": 5, "sortOrder": "recent"}
++    assert ig == {"postUrls": ["https://www.instagram.com/p/ABC/"], "maxCommentsPerPost": 5, "sortOrder": "recent_activity"}
+     fb = build_comment_deepening_input(
+         "facebook", ["https://www.facebook.com/x/posts/1"], 12,
+         max_per_parent=6, include_replies=True,
+diff --git a/tests/test_conversation_context_v29.py b/tests/test_conversation_context_v29.py
+index 80b2b30..ed6535a 100644
+--- a/tests/test_conversation_context_v29.py
++++ b/tests/test_conversation_context_v29.py
+@@ -204,9 +204,11 @@ class TestInstagramAndTheProbe:
+         assert "Eurojackpot" in blob or "eurojackpot" in blob
+ 
+     def test_the_probe_is_large_enough_to_measure_market_yield_but_bounded(self):
+-        assert semantic_broad_probe_target(40) == 60
+-        assert semantic_broad_probe_target(200) == 60
+-        assert semantic_broad_probe_target(8) == 12
++        # Audited contract: a minority route — <= half the target, hard cap 20.
++        assert semantic_broad_probe_target(40) == 20
++        assert semantic_broad_probe_target(200) == 20
++        assert semantic_broad_probe_target(20) == 10
++        assert semantic_broad_probe_target(8) == 5
+         assert semantic_broad_probe_target(0) == 0
+ 
+     def test_native_filter_sources_need_no_probe(self):
+diff --git a/tests/test_v31_1_schema_conformance.py b/tests/test_v31_1_schema_conformance.py
+new file mode 100644
+index 0000000..4a02139
+--- /dev/null
++++ b/tests/test_v31_1_schema_conformance.py
+@@ -0,0 +1,172 @@
++"""Every paid Actor input must use only DOCUMENTED fields and enum values.
++
++The values below were read verbatim from each Actor's public input schema on
++apify.com (2026-09-25). A field that is not in the schema is either ignored
++or rejected by the Actor — in both cases we pay for a request that does not
++do what the code believes it does. Two such cases reached main during the
++v31 work: an invented `skipPinnedPosts` on apify/instagram-scraper and
++`sortOrder: "recent"` on scrapesmith/instagram-comments-scraper (the enum is
++popular | recent_activity).
++
++When an Actor's schema changes, update the allow-lists here from the schema
++page — never from memory.
++"""
++from __future__ import annotations
++
++from datetime import date
++
++import pytest
++
++from app.models import AnalysisDraft
++from app.services.query_planner import build_collection_plan, semantic_broad_probe_target
++from app.services.source_capabilities import build_comment_deepening_input
++
++# Documented input fields per discovery Actor (verbatim from apify.com).
++DISCOVERY_FIELDS = {
++    "xquik/x-tweet-scraper": {
++        "mode", "searchTerms", "searchQuery", "startUrls", "twitterHandles", "tweetIds",
++        "listIds", "conversationIds", "maxItems", "maxItemsPerTarget", "includeSearchTerms",
++        "queryType", "since", "until", "sinceTime", "untilTime", "withinTime",
++        "min_faves", "max_faves", "min_retweets", "max_retweets", "min_replies", "max_replies",
++        "outputVariant", "fieldStyle", "outputPreset",
++    },
++    "epctex/tiktok-search-scraper": {
++        "search", "startUrls", "maxItems", "endPage", "dateRange", "location", "sortType",
++        "customMapFunction", "proxy",
++    },
++    "apify/instagram-scraper": {
++        "directUrls", "resultsType", "resultsLimit", "onlyPostsNewerThan", "search",
++        "searchType", "searchLimit", "addParentData",
++    },
++    "scraper_one/facebook-posts-search": {
++        "query", "resultsCount", "searchType", "location", "startDate", "endDate",
++    },
++    "apidojo/youtube-scraper": {
++        "startUrls", "keywords", "youtubeHandles", "gl", "hl", "uploadDate", "duration",
++        "sort", "maxItems", "customMapFunction",
++    },
++    "logiover/google-news-scraper": {
++        "queries", "topic", "geoLocation", "topHeadlines", "language", "country",
++        "timeWindow", "fromDate", "toDate", "includeSources", "excludeSources",
++        "maxArticles", "resolveUrls", "extractThumbnails", "proxyConfiguration",
++    },
++}
++
++# Documented enum values that the planner emits.
++ENUMS = {
++    ("epctex/tiktok-search-scraper", "dateRange"): {
++        "DEFAULT", "ALL_TIME", "YESTERDAY", "THIS_WEEK", "THIS_MONTH",
++        "LAST_THREE_MONTHS", "LAST_SIX_MONTHS"},
++    ("epctex/tiktok-search-scraper", "sortType"): {"RELEVANCE", "MOST_LIKED", "DATE_POSTED"},
++    ("scraper_one/facebook-posts-search", "searchType"): {"top", "latest"},
++    ("apidojo/youtube-scraper", "uploadDate"): {"all", "l", "t", "w", "m", "y"},
++    ("apidojo/youtube-scraper", "sort"): {"r", "v"},
++}
++
++SOURCES = ["x", "tiktok", "instagram", "facebook", "youtube", "news"]
++
++
++def _draft(sources=SOURCES, **kw):
++    base = dict(
++        client="ΟΠΑΠ", topic="Eurojackpot", market="Greece",
++        date_from=date(2026, 9, 17), date_to=date(2026, 9, 23),
++        keywords=["κλήρωση"], sources=list(sources), sample_mode="perSource",
++        per_source={s: 20 for s in sources},
++        per_source_comments={s: 50 for s in sources if s not in ("news", "youtube")},
++        comments=True, max_budget_usd=5.0, smart_search=True, report_language="Ελληνικά",
++    )
++    base.update(kw)
++    return AnalysisDraft(**base)
++
++
++def _all_subruns(plan: dict):
++    for sp in plan["sources"]:
++        for kind in ("subruns", "topup_subruns", "semantic_topup_subruns"):
++            for sr in sp.get(kind) or []:
++                yield sp["source"], sr
++
++
++class TestDiscoveryInputsUseOnlyDocumentedFields:
++    @pytest.mark.parametrize("keywords", [["κλήρωση"], []])
++    def test_no_invented_fields_reach_a_paid_actor(self, monkeypatch, keywords):
++        monkeypatch.setattr("app.services.query_planner.suggest_public_names", lambda _d: [])
++        plan = build_collection_plan(_draft(keywords=keywords)).model_dump(mode="json")
++        seen = set()
++        for source, sr in _all_subruns(plan):
++            allowed = DISCOVERY_FIELDS.get(sr["actor_id"])
++            if allowed is None:
++                continue  # a generic/unknown actor is covered by its own registry test
++            extra = set(sr["input"]) - allowed
++            assert not extra, f"{source}/{sr['purpose']} sends undocumented field(s) {sorted(extra)}"
++            seen.add(sr["actor_id"])
++        assert seen, "no planned actor was checked"
++
++    def test_enum_values_are_the_documented_ones(self, monkeypatch):
++        monkeypatch.setattr("app.services.query_planner.suggest_public_names", lambda _d: [])
++        plan = build_collection_plan(_draft()).model_dump(mode="json")
++        for source, sr in _all_subruns(plan):
++            for (actor, field), values in ENUMS.items():
++                if sr["actor_id"] == actor and field in sr["input"]:
++                    assert sr["input"][field] in values, f"{source}: {field}={sr['input'][field]!r}"
++
++    def test_youtube_country_and_language_codes_are_lowercase_as_documented(self, monkeypatch):
++        monkeypatch.setattr("app.services.query_planner.suggest_public_names", lambda _d: [])
++        plan = build_collection_plan(_draft(["youtube"])).model_dump(mode="json")
++        for _, sr in _all_subruns(plan):
++            assert sr["input"]["gl"] == "gr" and sr["input"]["hl"] == "el", sr["input"]
++
++
++class TestCommentInputsUseOnlyDocumentedFields:
++    def test_instagram_sort_order_is_a_documented_enum_value(self):
++        inp = build_comment_deepening_input("instagram", ["https://www.instagram.com/p/ABC/"], 40,
++                                            max_per_parent=40)
++        assert set(inp) <= {"postUrls", "maxCommentsPerPost", "sortOrder"}
++        assert inp["sortOrder"] in {"popular", "recent_activity"}
++        # Dated research wants the newest activity, not all-time favourites.
++        assert inp["sortOrder"] == "recent_activity"
++
++    def test_tiktok_comment_input_is_documented(self):
++        inp = build_comment_deepening_input("tiktok", ["https://www.tiktok.com/@u/video/7"], 40,
++                                            max_per_parent=40)
++        assert set(inp) <= {"startUrls", "includeReplies", "endPage", "maxItems", "customMapFunction"}
++
++    def test_facebook_comment_input_is_documented_for_the_registered_actor(self):
++        inp = build_comment_deepening_input(
++            "facebook", ["https://www.facebook.com/page/posts/1"], 40, max_per_parent=40)
++        # scraper_one/facebook-comments-scraper: postUrls, resultsLimit, commentsSortType
++        assert set(inp) <= {"postUrls", "resultsLimit", "commentsSortType"}, inp
++        assert inp.get("commentsSortType") in {None, "relevant", "newest", "all"}
++
++    def test_x_comment_input_fields_are_documented(self):
++        inp = build_comment_deepening_input("x", ["123"], 40, max_per_parent=40)
++        documented = {"mode", "replyTweetIds", "threadTweetIds", "tweetIds", "conversationIds",
++                      "maxItems", "maxItemsPerTarget", "since", "until"}
++        assert set(inp) <= documented, inp
++        assert inp["mode"] in {"replies", "thread", "search"}
++
++
++class TestTheProbeStaysAMinorityRoute:
++    def test_probe_never_exceeds_half_the_target_or_twenty(self):
++        for target in (8, 20, 40, 100, 500):
++            cap = semantic_broad_probe_target(target)
++            assert cap <= 20
++            assert cap <= max(5, -(-target // 2))
++
++
++class TestRefillNeverReBuysAPaidSearch:
++    def test_identical_routes_already_run_by_the_collector_are_recognised(self):
++        from app.services.relevance_expansion import _already_paid_route_signatures, _route_signature
++        inp = {"query": "Eurojackpot Ελλάδα", "resultsCount": 7, "searchType": "latest",
++               "startDate": "2026-09-17", "endDate": "2026-09-23"}
++        sp = {"source": "facebook", "actor_id": "scraper_one/facebook-posts-search",
++              "subruns": [{"actor_id": "scraper_one/facebook-posts-search", "input": inp},
++                          {"actor_id": "scraper_one/facebook-posts-search",
++                           "input": {**inp, "query": "Eurojackpot Greece"}}],
++              "topup_subruns": []}
++        status = {"sources": {"facebook": {"subruns": [
++            {"status": "succeeded"}, {"status": "skipped_target_met"}]}}}
++        paid = _already_paid_route_signatures(status, sp)
++        # The same search with a different COUNT is still the same paid search.
++        assert _route_signature(sp["actor_id"], {**inp, "resultsCount": 30}) in paid
++        # A route the collector skipped never ran, so the refill may use it.
++        assert _route_signature(sp["actor_id"], {**inp, "query": "Eurojackpot Greece"}) not in paid
+diff --git a/tests/test_v31_acquisition_contracts.py b/tests/test_v31_acquisition_contracts.py
+index 6cd3666..1117d01 100644
+--- a/tests/test_v31_acquisition_contracts.py
++++ b/tests/test_v31_acquisition_contracts.py
+@@ -73,9 +73,11 @@ def test_instagram_topic_only_uses_bare_subject_only_as_semantic_probe(monkeypat
+ 
+ 
+ def test_broad_probe_can_measure_low_market_yield_without_becoming_unbounded():
+-    assert semantic_broad_probe_target(20) == 30
+-    assert semantic_broad_probe_target(40) == 60
+-    assert semantic_broad_probe_target(500) == 60
++    # 1.5x was not "bounded": at target 20 it bought 30 global rows, i.e. the
++    # probe outweighed the anchored sample. Minority route, hard cap 20.
++    assert semantic_broad_probe_target(20) == 10
++    assert semantic_broad_probe_target(40) == 20
++    assert semantic_broad_probe_target(500) == 20
+ 
+ 
+ def test_native_market_post_actors_keep_their_market_controls(monkeypatch):
+@@ -111,7 +113,7 @@ def test_resilience_knows_comment_and_parent_multi_target_fields(field):
+ def test_comment_contracts_are_explicit_for_every_production_social():
+     assert comment_actor_contract("x")["reply_depth"] == "thread"
+     assert comment_actor_contract("tiktok")["parent_batch_limit"] == 1
+-    assert comment_actor_contract("instagram")["sort"] == "recent"
++    assert comment_actor_contract("instagram")["sort"] == "recent_activity"
+     assert comment_actor_contract("facebook")["sort"] == "newest"
+     assert comment_actor_contract("facebook")["reply_depth"] == "top_level"
+ 
+-- 
+2.43.0
+
