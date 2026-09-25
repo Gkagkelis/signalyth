@@ -713,13 +713,13 @@ def make_source_plan(source: str, target: int, draft: AnalysisDraft, queries: li
         batches = batched(primary, safe)
         shares = split_target(target, len(batches)); caps = caps_for(shares, primary_budget)
         for i, (batch, share) in enumerate(zip(batches, shares)):
-            inp = {"keywords": batch, "gl": "GR" if draft.market.casefold() == "greece" else "US",
+            inp = {"keywords": batch, "gl": "gr" if draft.market.casefold() == "greece" else "us",
                    "hl": "el" if draft.market.casefold() == "greece" else "en",
                    "uploadDate": _youtube_upload_date(draft), "sort": "r", "maxItems": share}
             subruns.append(_sub(actor, inp, share, caps[i], f"primary_route_{i+1}", draft))
         tbatches = batched(topups, safe)[:4]
         for i, batch in enumerate(tbatches):
-            tin = {"keywords": batch, "gl": "GR" if draft.market.casefold() == "greece" else "US",
+            tin = {"keywords": batch, "gl": "gr" if draft.market.casefold() == "greece" else "us",
                    "hl": "el" if draft.market.casefold() == "greece" else "en",
                    "uploadDate": _youtube_upload_date(draft), "sort": "r", "maxItems": target}
             topup_subruns.append(_sub(actor, tin, target, topup_budget / max(1, len(tbatches)), f"topup_{i+1}", draft))
