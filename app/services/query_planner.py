@@ -387,13 +387,14 @@ def budget_for_subrun(source_budget: float, shares: list[int], idx: int) -> floa
 
 
 def semantic_broad_probe_target(target: int) -> int:
-    """How many items the bare-subject probe may buy, ever.
+    """How many rows a bounded bare-subject probe may inspect.
 
     The broad/global route exists to recover natural mixed-language and
-    Greeklish mentions that every anchored route misses. It runs only AFTER
-    cleaning, only against a measured shortfall, and this cap means it can
-    never refill the sample with another country's conversation: at most a
-    quarter of the source target, and never more than 12 items.
+    Greeklish mentions that anchored routes can miss. It runs only AFTER
+    cleaning and only against a measured analyzable shortfall. It may over-fetch
+    raw candidates to measure low market yield, but every returned row still
+    passes the normal subject + market cleaner before becoming evidence. The
+    probe itself stays hard-capped at 60 raw rows.
     """
     target = max(0, int(target or 0))
     if target <= 0:
