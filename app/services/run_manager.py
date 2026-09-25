@@ -469,6 +469,16 @@ class RunManager:
         try:
             status = self.store.read_status(run_id)
             previous = dict(status.get("worker_lease") or {})
+            # Observable from the API for the whole invocation: when THIS worker
+            # started, what it last did and how long it has been alive. A worker
+            # that dies without writing anything else still leaves this behind.
+            status["worker"] = {
+                "worker_started_at": _utcnow(),
+                "invocation": token[:8],
+                "last_step": "worker_started",
+                "last_step_at": _utcnow(),
+                "elapsed_seconds": 0.0,
+            }
             status["worker_lease"] = {
                 "token": token,
                 "claimed_at": _utcnow(),
@@ -486,6 +496,38 @@ class RunManager:
             # had never actually taken.
             return ""
         return token
+
+    def _note_worker_step(self, folder: Path, step: str) -> dict | None:
+        """Record in status.json what this worker last did and for how long.
+
+        Written on every heartbeat and every per-call checkpoint, so when a
+        worker dies abruptly the API shows exactly where it stopped and how far
+        into the invocation it was — instead of a status frozen minutes back.
+        A failed write is dropped: observability must never break collection.
+        """
+        try:
+            status = self.store.read(folder / "status.json", {}) or {}
+            worker = dict(status.get("worker") or {})
+            elapsed = None
+            started = worker.get("worker_started_at")
+            if started:
+                try:
+                    begun = datetime.fromisoformat(str(started))
+                    if begun.tzinfo is None:
+                        begun = begun.replace(tzinfo=timezone.utc)
+                    elapsed = round((datetime.now(timezone.utc) - begun).total_seconds(), 1)
+                except Exception:
+                    elapsed = None
+            worker.update({
+                "last_step": str(step),
+                "last_step_at": _utcnow(),
+            })
+            if elapsed is not None:
+                worker["elapsed_seconds"] = elapsed
+            status["worker"] = worker
+            return self.store.write_status_folder(folder, status)
+        except Exception:
+            return None
 
     def _owns_lease(self, run_id: str, token: str) -> bool:
         """Does this invocation still own the run?
@@ -1052,19 +1094,37 @@ class RunManager:
                 adaptive_status.setdefault("progress", {})["percent"] = 89
                 self.store.write_status(run_id, adaptive_status)
                 def _adaptive_heartbeat(source: str) -> None:
-                    # A status write every call keeps the run visibly alive, so the
-                    # stale-worker recovery never resumes it in parallel.
+                    # A status write keeps the run visibly alive — now also every
+                    # ≤20s WHILE an Actor call blocks (resilience heartbeat
+                    # thread), so a hard-killed worker shows up as a stale
+                    # updated_at within seconds instead of after a silent
+                    # multi-minute Apify wait. Local status is the source of
+                    # truth for this invocation; reading it back from the cloud
+                    # on every beat is wasted IO on a hot path.
                     try:
-                        beat = self.store.read_status(run_id)
+                        beat = self.store.read(folder / "status.json", {}) or {}
                         beat["current"] = {
                             "source": source,
                             "code": "adaptive_collection",
                             "message": "Diversifying relevant evidence and deepening useful conversations",
                         }
                         beat.setdefault("progress", {})["percent"] = 89
-                        self.store.write_status(run_id, beat)
+                        self.store.write_status_folder(folder, beat)
                     except Exception:
                         pass
+                    self._note_worker_step(folder, f"apify_call:{source}")
+
+                def _adaptive_checkpoint(step: str) -> None:
+                    # Durability boundary after EVERY paid comment/parent-
+                    # discovery call: normalized comments, attempted refs and
+                    # status are already on local disk — persist the workspace
+                    # so a worker hard-killed during the NEXT call hands the
+                    # continuation everything that was paid for. Failures
+                    # propagate to the caller, which records them and goes on.
+                    self._note_worker_step(folder, f"checkpoint:{step}")
+                    if not self._lease_ok(run_id):
+                        raise RunStateError("a newer worker owns this run; checkpoint skipped")
+                    self.store.checkpoint_run(run_id)
 
                 expanded = adaptive_expand_after_cleaning(
                     folder,
@@ -1078,6 +1138,7 @@ class RunManager:
                         margin_seconds=float(settings.signalyth_collection_deadline_margin_seconds)
                     ),
                     heartbeat=_adaptive_heartbeat,
+                    checkpoint=_adaptive_checkpoint,
                 )
                 report = expanded.get("report") or report
                 adaptive_status = self.store.read_status(run_id)

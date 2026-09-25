@@ -734,7 +734,8 @@ def _probe_items(folder, plan, source, actor_id, actor_input, wanted, rate,
 
 
 def _owned_parent_refs(source, plan, cfg, max_parents, *, date_from, date_to,
-                       run_page_actor, audit, cache_path=None) -> tuple[list[str], list[dict]]:
+                       run_page_actor, audit, cache_path=None,
+                       checkpoint=None) -> tuple[list[str], list[dict]]:
     """Parent posts the operator vouched for: their pages, plus any direct links.
 
     The pages are turned into posts here — no comment Actor accepts a page — and
@@ -824,6 +825,10 @@ def _owned_parent_refs(source, plan, cfg, max_parents, *, date_from, date_to,
                 "complete": True,
                 "outcome": page_outcome,
             })
+        if probe_attempted and checkpoint is not None:
+            # A page lookup is a PAID call; its cached answer must survive a
+            # hard-killed worker or the next invocation buys it again.
+            checkpoint(f"{source}:page_discovery")
 
     return refs[:max_parents], meta[:max_parents]
 
@@ -978,6 +983,7 @@ def _discover_conversation_parent_candidates(
     deadline_check,
     time_left,
     heartbeat,
+    checkpoint=None,
 ) -> list[dict]:
     """Discover extra parent posts without adding them to analysis evidence.
 
@@ -1101,6 +1107,10 @@ def _discover_conversation_parent_candidates(
             "qualified_candidates_total": len(cached_by_id),
             "target_candidates": probe_target,
         })
+        if probe_attempted and checkpoint is not None:
+            # Paid parent discovery: the route state and candidate cache are on
+            # disk; make them durable before the next paid call can start.
+            checkpoint(f"{source}:parent_discovery:{purpose}")
         if len(cached_by_id) >= probe_target:
             break
 
@@ -1150,6 +1160,7 @@ def adaptive_expand_after_cleaning(
     deadline_check: Callable[[], bool] | None = None,
     time_left: Callable[[], float] | None = None,
     heartbeat: Callable[[str], None] | None = None,
+    checkpoint: Callable[[str], None] | None = None,
 ) -> dict:
     """Bounded adaptive discovery plus configured comment/reply deepening.
 
@@ -1164,11 +1175,12 @@ def adaptive_expand_after_cleaning(
     time_left = time_left or (lambda: float("inf"))
     heartbeat = heartbeat or (lambda _msg: None)
     cancel_check = cancel_check or (lambda: False)
+    checkpoint = checkpoint or (lambda _step: None)
     store = RunStore()
     shortfall = int(initial_report.get("trusted_sample_shortfall", 0) or 0)
     comments_requested = bool(plan.get("comments_requested"))
     audit = {
-        "strategy_version": "smart-collection-v2.2-comment-layer",
+        "strategy_version": "smart-collection-v2.3-durable-comment-layer",
         "status": "not_needed",
         "initial_trusted_shortfall": shortfall,
         "comments_requested": comments_requested,
@@ -1197,6 +1209,20 @@ def adaptive_expand_after_cleaning(
     report = initial_report
     audit["status"] = "attempted"
     registry = load_registry()
+
+    def durable_checkpoint(step: str) -> None:
+        """Make everything a paid call produced durable BEFORE the next paid call.
+
+        Evidence files were only written to local scratch until the next stage
+        milestone; a worker hard-killed inside the comment layer (run
+        20260925T130636Z-c55323ad, dead ~5 minutes in) lost every comment it
+        had paid for. A failed checkpoint must not kill the layer — the files
+        are still local and the next milestone retries — but it is recorded.
+        """
+        try:
+            checkpoint(step)
+        except Exception as exc:
+            audit["warnings"].append(f"durable_checkpoint_failed:{step}:{exc}")
 
     #: Set when the last Actor acquisition stopped because the worker ran out of
     #: time rather than because it finished. Without this, a call that returned
@@ -1411,6 +1437,7 @@ def adaptive_expand_after_cleaning(
                 semantic_done.add(route_key)
                 semantic_state["done_routes"] = sorted(semantic_done)
                 store.write(semantic_state_path, semantic_state)
+            durable_checkpoint(f"{source}:semantic_refill:{purpose}")
             missing = _source_semantic_shortfall(report, source, source_target)
             audit.setdefault("semantic_refill", {}).setdefault(source, []).append({
                 "route": purpose,
@@ -1669,6 +1696,9 @@ def adaptive_expand_after_cleaning(
 
                     if last_call_hit_deadline:
                         all_batches_finished = False
+                        # The comments this interrupted call did return are on
+                        # disk; make them durable before handing off.
+                        durable_checkpoint(f"{source}:{bucket}:comment_batch_deadline")
                         break
 
                     # The Actor call ended normally (success, empty or a bounded
@@ -1678,6 +1708,10 @@ def adaptive_expand_after_cleaning(
                     source_state["attempted_refs_by_bucket"] = attempted_by_bucket
                     harvest_state[source] = source_state
                     store.write(harvest_state_path, harvest_state)
+                    # Normalized comments, attempted refs and status are now on
+                    # disk for this PAID call; a worker killed during the next
+                    # call must find all three durable, or it re-pays this one.
+                    durable_checkpoint(f"{source}:{bucket}:comment_batch")
 
                     if source_comment_target > 0 and collected_count() >= source_comment_target:
                         break
@@ -1699,6 +1733,7 @@ def adaptive_expand_after_cleaning(
                 ),
                 audit=audit,
                 cache_path=folder / f"page-parents-{source}.json",
+                checkpoint=durable_checkpoint,
             )
             if audit.get("deadline_reached"):
                 # `time_left` may refuse page discovery while the coarser boolean
@@ -1775,6 +1810,7 @@ def adaptive_expand_after_cleaning(
                     deadline_check=deadline_check,
                     time_left=time_left,
                     heartbeat=heartbeat,
+                    checkpoint=durable_checkpoint,
                 )
                 merged_rows = {
                     str(row.get("id")): row

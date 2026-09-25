@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import threading
 import time
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
@@ -18,6 +19,42 @@ from app.services.source_capabilities import DISCOVERY_ACTOR_CONTRACTS
 #: ApifyRunner read the SAME helper so they cannot drift apart.
 ACTOR_RUN_TIMEOUT_SECONDS = 180.0
 FACEBOOK_COMMENT_RUN_TIMEOUT_SECONDS = 420.0
+
+
+#: How often the heartbeat fires WHILE a blocking Actor call is in flight.
+#: Staleness is judged from the run's last status write; an Actor call blocks
+#: for up to its run timeout plus the wait margin (3-8 minutes), and a worker
+#: hard-killed inside that silence was indistinguishable from one still
+#: working. 15s keeps every silent stretch under the required 20s.
+HEARTBEAT_INTERVAL_SECONDS = 15.0
+
+
+def _run_with_heartbeat(runner, actor_id, run_input, *, max_items, max_charge_usd,
+                        heartbeat, note, interval_seconds):
+    """Execute one blocking Actor call while a thread keeps the run visibly alive.
+
+    ``runner.run`` blocks the worker for the whole provider wait, and the
+    heartbeat callback fired only BETWEEN attempts — so the longest silence was
+    exactly the window in which a dying worker mattered most. The thread stops
+    the moment the call returns or raises; a failing heartbeat never fails the
+    paid call.
+    """
+    stop = threading.Event()
+
+    def _beat():
+        while not stop.wait(max(0.05, float(interval_seconds))):
+            try:
+                heartbeat(note)
+            except Exception:
+                pass
+
+    thread = threading.Thread(target=_beat, name="signalyth-apify-heartbeat", daemon=True)
+    thread.start()
+    try:
+        return runner.run(actor_id, run_input, max_items=max_items, max_charge_usd=max_charge_usd)
+    finally:
+        stop.set()
+        thread.join(timeout=2.0)
 
 
 def actor_run_timeout_seconds(actor_id: str) -> float:
@@ -284,6 +321,7 @@ def run_actor_resilient(
     expected_call_seconds: float | None = None,
     minimum_attempt_charge_usd: float = 0.0,
     heartbeat: Callable[[str], None] | None = None,
+    heartbeat_interval_seconds: float = HEARTBEAT_INTERVAL_SECONDS,
 ) -> ResilientCallResult:
     """Run one logical Actor acquisition inside a hard cost envelope.
 
@@ -302,15 +340,19 @@ def run_actor_resilient(
     whole acquisition is over. ``deadline_check`` remains as a coarser signal
     for callers that only know "stop now".
 
-    ``heartbeat`` fires on every attempt. Staleness is judged from the run's
-    last status write, and a worker sitting inside a slow Actor writes nothing;
-    that silence is what made the recovery path declare a live worker dead and
-    start a second one on the same run.
+    ``heartbeat`` fires on every attempt AND, on its own thread, every
+    ``heartbeat_interval_seconds`` while a blocking Actor call is in flight.
+    Staleness is judged from the run's last status write, and a worker sitting
+    inside a slow Actor writes nothing; that silence is what made the recovery
+    path declare a live worker dead and start a second one on the same run —
+    and, conversely, what hid a genuinely dead worker from the API for the
+    whole Actor wait window.
     """
     max_items = max(1, int(max_items))
     envelope = max(0.0, float(max_charge_usd))
     sleep_fn = sleep_fn or (lambda seconds: None if settings.signalyth_dry_run else time.sleep(seconds))
     deadline_check = deadline_check or (lambda: False)
+    caller_heartbeat = heartbeat is not None
     heartbeat = heartbeat or (lambda _note: None)
     if expected_call_seconds is None:
         expected_call_seconds = actor_run_timeout_seconds(actor_id)
@@ -364,12 +406,20 @@ def run_actor_resilient(
         }
         result.attempts.append(attempt)
         try:
-            meta, raw_items = runner.run(
-                actor_id,
-                task["input"],
-                max_items=target,
-                max_charge_usd=attempt_cap,
-            )
+            if caller_heartbeat:
+                meta, raw_items = _run_with_heartbeat(
+                    runner, actor_id, task["input"],
+                    max_items=target, max_charge_usd=attempt_cap,
+                    heartbeat=heartbeat, note=f"{actor_id}:call{calls}:in_flight",
+                    interval_seconds=heartbeat_interval_seconds,
+                )
+            else:
+                meta, raw_items = runner.run(
+                    actor_id,
+                    task["input"],
+                    max_items=target,
+                    max_charge_usd=attempt_cap,
+                )
             meta = dict(meta or {})
             data_items, diagnostics = split_diagnostic_rows(raw_items or [])
             outcome = classify_actor_outcome(meta, data_items, diagnostics)
