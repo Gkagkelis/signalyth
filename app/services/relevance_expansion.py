@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 import copy
+import json
 import math
 from pathlib import Path
 from typing import Callable
@@ -1108,6 +1109,40 @@ def _discover_conversation_parent_candidates(
     return list(cached_by_id.values())
 
 
+
+#: Input keys that only say HOW MANY rows a route asks for. Two routes that
+#: differ only in these are the same paid search.
+_ROUTE_COUNT_KEYS = frozenset({"maxItems", "maxItemsPerTarget", "resultsCount", "resultsLimit",
+                               "maxArticles", "searchLimit", "endPage"})
+
+
+def _route_signature(actor_id: str, actor_input: dict) -> str:
+    """One string per distinct paid search: actor + input minus the count knobs."""
+    body = {k: v for k, v in (actor_input or {}).items() if k not in _ROUTE_COUNT_KEYS}
+    return f"{actor_id}|{json.dumps(body, sort_keys=True, ensure_ascii=False, default=str)}"
+
+
+def _already_paid_route_signatures(status: dict, source_plan: dict) -> set[str]:
+    """Signatures of every discovery route the collector has ALREADY run.
+
+    For several sources the plan's semantic routes are copies of the primary
+    routes. Without this, the post-cleaning refill re-bought the very same
+    search (same actor, query and dates) whose rows it already held. Routes
+    the collector skipped (target met, pending) never ran and remain usable.
+    """
+    source = str(source_plan.get("source") or "")
+    rows = ((status.get("sources") or {}).get(source) or {}).get("subruns") or []
+    planned = [*(source_plan.get("subruns") or []), *(source_plan.get("topup_subruns") or [])]
+    paid: set[str] = set()
+    for i, sr in enumerate(planned):
+        row = rows[i] if i < len(rows) and isinstance(rows[i], dict) else {}
+        st = str(row.get("status") or "pending")
+        if st == "pending" or st.startswith("skipped"):
+            continue
+        paid.add(_route_signature(str(sr.get("actor_id") or source_plan.get("actor_id") or ""),
+                                  dict(sr.get("input") or {})))
+    return paid
+
 def adaptive_expand_after_cleaning(
     folder: Path,
     plan: dict,
@@ -1343,9 +1378,18 @@ def adaptive_expand_after_cleaning(
             routes,
             key=lambda sr: 0 if str(sr.get("purpose") or "") == "semantic_broad_probe" else 1,
         )
+        paid_signatures = _already_paid_route_signatures(
+            store.read(folder / "status.json", {}) or {}, semantic_sp)
         for idx, sr in enumerate(routes[:6]):
             if missing <= 0 or cancel_check():
                 break
+            if _route_signature(str(sr.get("actor_id") or semantic_sp.get("actor_id") or ""),
+                                dict(sr.get("input") or {})) in paid_signatures:
+                audit.setdefault("semantic_refill", {}).setdefault(source, []).append({
+                    "route": str(sr.get("purpose") or "semantic_refill"),
+                    "status": "skipped_already_paid_by_collector",
+                })
+                continue
             if deadline_check():
                 audit["deadline_reached"] = True
                 audit["warnings"].append(f"{source}:semantic_refill_deferred_worker_deadline")

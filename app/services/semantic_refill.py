@@ -39,7 +39,12 @@ def semantic_refill(folder: Path, plan: dict, cancel_check: Callable[[], bool] |
         source=str(sp.get("source") or ""); target=int(sp.get("target_items",0) or 0); short=max(0,target-int(counts.get(source,0)))
         if short<=0: continue
         routes=sp.get("semantic_topup_subruns") or sp.get("topup_subruns") or []
-        if not routes: audit["steps"].append({"source":source,"shortfall":short,"status":"no_verified_topup_route"}); continue
+        # Never re-buy a search already paid for by the collector; prefer the probe.
+        from app.services.relevance_expansion import _already_paid_route_signatures, _route_signature
+        paid=_already_paid_route_signatures(status, sp)
+        routes=sorted(routes,key=lambda r: 0 if str(r.get("purpose") or "")=="semantic_broad_probe" else 1)
+        routes=[r for r in routes if _route_signature(str(r.get("actor_id") or sp.get("actor_id") or ""),dict(r.get("input") or {})) not in paid]
+        if not routes: audit["steps"].append({"source":source,"shortfall":short,"status":"no_unpaid_topup_route"}); continue
         # One route per source in this bounded refill round; ask for headroom because
         # some newly collected candidates may still be semantically irrelevant.
         sr=copy.deepcopy(routes[0]); old=max(1,int(sr.get("target_items",short) or short)); wanted=min(max(short*2,short),max(target,short))

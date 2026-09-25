@@ -394,16 +394,15 @@ def semantic_broad_probe_target(target: int) -> int:
     cleaning and only against a measured analyzable shortfall. It may over-fetch
     raw candidates to measure low market yield, but every returned row still
     passes the normal subject + market cleaner before becoming evidence. The
-    probe itself stays hard-capped at 60 raw rows.
+    probe itself stays a minority route: <= half the target, hard cap 20.
     """
     target = max(0, int(target or 0))
     if target <= 0:
         return 0
-    # Broad recall is post-cleaning and therefore may safely over-fetch:
-    # final evidence still has to pass subject + market cleaning. A tiny 25%
-    # probe starved topic-only Facebook/Instagram briefs before Greece rows had
-    # a chance to appear. Keep it bounded, but large enough to measure yield.
-    return min(60, max(12, int(math.ceil(target * 1.5))))
+    # Bounded means bounded: at most half the target and never more than 20
+    # rows. A 1.5x/60-row probe made the global firehose the majority of a
+    # 20-post sample; the cleaner then had to throw most of it away — paid.
+    return min(20, max(5, int(math.ceil(target * 0.5))))
 
 
 def instagram_discovery_tags(draft: AnalysisDraft) -> list[str]:
@@ -682,7 +681,7 @@ def make_source_plan(source: str, target: int, draft: AnalysisDraft, queries: li
             inp = {"directUrls": [f"https://www.instagram.com/explore/tags/{primary_tag.lower()}/"],
                    "resultsType": "posts", "resultsLimit": target,
                    "onlyPostsNewerThan": draft.date_from.isoformat(),
-                   "skipPinnedPosts": True, "addParentData": True}
+                   "addParentData": True}
             subruns = [_sub(actor, inp, target, primary_budget, "primary_hashtag_posts", draft)]
             extra_tags = tags[1:4]
             for i, tag in enumerate(extra_tags):
@@ -757,7 +756,6 @@ def make_source_plan(source: str, target: int, draft: AnalysisDraft, queries: li
                 probe_inp = {"directUrls": [f"https://www.instagram.com/explore/tags/{hashtag(routes['topic']).lower()}/"],
                              "resultsType": "posts", "resultsLimit": cap_items,
                              "onlyPostsNewerThan": draft.date_from.isoformat(),
-                             "skipPinnedPosts": True,
                              "addParentData": True}
             semantic_subruns.append(
                 _sub(actor, probe_inp, cap_items, probe_budget,

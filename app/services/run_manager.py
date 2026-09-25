@@ -90,6 +90,98 @@ def resume_at_analysis(prior_status: dict, folder: Path, plan: dict | None = Non
             or (folder / "cleaning" / "trusted.json").exists())
 
 
+#: How many times a fresh worker may resume the adaptive/comment step at the
+#: SAME durable state before the run stops waiting for it. Run
+#: 20260925T002306Z-65236947 resumed the X comment pass every ~25 minutes for
+#: eight hours: the pass never finished inside one worker, never recorded any
+#: progress, and nothing bounded the loop.
+MAX_ADAPTIVE_CONTINUATIONS_WITHOUT_PROGRESS = 3
+
+
+def adaptive_progress_fingerprint(store: RunStore, folder: Path, status: dict) -> str:
+    """A stable digest of everything the adaptive step has durably achieved.
+
+    Two consecutive continuations with the same fingerprint did no work.
+    """
+    import hashlib
+    import json as _json
+    parts = []
+    deepening = status.get("comment_deepening") if isinstance(status.get("comment_deepening"), dict) else {}
+    for source in sorted(COMMENT_CAPABLE_SOURCES):
+        rows = store.read(folder / f"normalized-comments-{source}.json", []) or []
+        row = deepening.get(source) if isinstance(deepening.get(source), dict) else {}
+        parts.append([source, len(rows), sorted(str(b) for b in (row.get("buckets_done") or [])),
+                      str(row.get("status") or ""), int(row.get("collected") or 0),
+                      len(row.get("attempted_refs") or [])])
+    parts.append(len(store.read(folder / "analysis" / "analysis-ready.json", []) or []))
+    parts.append(sorted((store.read(folder / "semantic-refill-state.json", {}) or {}).get("done_routes") or []))
+    parts.append(store.read(folder / "conversation-parent-discovery-state.json", {}) or {})
+    blob = _json.dumps(parts, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha1(blob.encode("utf-8")).hexdigest()
+
+
+def update_adaptive_continuation_guard(status: dict, fingerprint: str) -> dict:
+    """Count consecutive continuations that left the adaptive step where it was.
+
+    Returns the guard block (also written into ``status``). ``tripped`` becomes
+    true once the limit is reached; the caller then closes the step honestly
+    instead of resuming it again.
+    """
+    guard = dict(status.get("adaptive_continuation_guard") or {})
+    count = int(guard.get("count") or 0) + 1 if guard.get("fingerprint") == fingerprint else 1
+    guard.update({
+        "fingerprint": fingerprint,
+        "count": count,
+        "updated_at": _utcnow(),
+        "limit": MAX_ADAPTIVE_CONTINUATIONS_WITHOUT_PROGRESS,
+    })
+    if count >= MAX_ADAPTIVE_CONTINUATIONS_WITHOUT_PROGRESS:
+        guard["tripped"] = True
+        guard["reason"] = "no_progress_after_repeated_continuations"
+    status["adaptive_continuation_guard"] = guard
+    return guard
+
+
+def close_adaptive_step_without_progress(store: RunStore, run_id: str, guard: dict) -> None:
+    """Write an honest terminal state for every comment pass still 'owed'.
+
+    Every source still marked unfinished becomes a shortfall with an explicit
+    reason, so the operator sees WHY, and ``resume_at_analysis`` lets the next
+    worker analyse the evidence that exists instead of resuming forever.
+    """
+    status = store.read_status(run_id)
+    deepening = dict(status.get("comment_deepening") or {})
+    for source, row in list(deepening.items()):
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("status") or "") in UNFINISHED_STEP_STATES or not comment_source_is_complete(row):
+            collected = int(row.get("collected") or 0)
+            requested = int(row.get("requested") or row.get("target") or 0)
+            row.update({
+                "status": "shortfall",
+                "reason": "no_progress_after_repeated_continuations",
+                "collected": collected,
+                "shortfall": max(0, requested - collected) if requested else 0,
+                "buckets_done": ["owned", "open", "backfill"],
+                "updated_at": _utcnow(),
+            })
+            deepening[source] = row
+    status["comment_deepening"] = deepening
+    status["adaptive_collection"] = {
+        **(status.get("adaptive_collection") or {}),
+        "status": "completed_no_progress",
+        "completed_at": _utcnow(),
+        "guard": guard,
+    }
+    status["current"] = {
+        "source": None,
+        "code": "adaptive_closed_no_progress",
+        "message": (f"The comment/adaptive pass made no progress across "
+                    f"{guard.get('count')} worker continuations; analysing the evidence collected so far"),
+    }
+    store.write_status(run_id, status)
+
+
 class RunManager:
     """Background lifecycle manager for collection runs.
 
@@ -933,6 +1025,12 @@ class RunManager:
                 int(report.get("trusted_sample_shortfall", 0) or 0) > 0
                 or bool(plan.get("comments_requested"))
             )
+            guard_before = dict((self.store.read_status(run_id).get("adaptive_continuation_guard") or {}))
+            if guard_before.get("tripped"):
+                # A previous continuation already decided this step cannot
+                # progress. Close it honestly (idempotent) and move on.
+                close_adaptive_step_without_progress(self.store, run_id, guard_before)
+                needs_adaptive = False
             if needs_adaptive and plan.get("search_strategy_version") in {"smart-collection-v2", "master30-search-v1"}:
                 adaptive_status = self.store.read_status(run_id)
                 adaptive_status.update({
@@ -983,8 +1081,30 @@ class RunManager:
                 self.store.write_status(run_id, adaptive_status)
                 if (expanded.get("audit") or {}).get("deadline_reached"):
                     # Collected evidence is already durable; hand the rest of the
-                    # pipeline to a fresh invocation instead of dying at the wall.
+                    # pipeline to a fresh invocation instead of dying at the wall —
+                    # but only a bounded number of times at the SAME state.
                     cont = self.store.read_status(run_id)
+                    guard = update_adaptive_continuation_guard(
+                        cont, adaptive_progress_fingerprint(self.store, folder, cont))
+                    self.store.write_status(run_id, cont)
+                    if guard.get("tripped"):
+                        close_adaptive_step_without_progress(self.store, run_id, guard)
+                        cont = self.store.read_status(run_id)
+                        cont.update({
+                            "status": "queued",
+                            "phase": "cleaning",
+                            "fatal_error": None,
+                        })
+                        self.store.write_status(run_id, cont)
+                        try:
+                            self.store.checkpoint_run(run_id)
+                        except Exception:
+                            pass
+                        try:
+                            self._requeue_continuation(run_id)
+                        except Exception:
+                            pass
+                        return
                     cont.update({
                         "status": "queued",
                         "phase": "cleaning",

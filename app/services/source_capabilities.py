@@ -93,13 +93,13 @@ def discovery_actor_contract(source: str) -> dict:
 # coverage and resumability matter more than minimizing Actor call count.
 COMMENT_ACTOR_CONTRACTS = {
     # Xquik's maxItems is global across a run; maxItemsPerTarget prevents one
-    # thread from consuming the whole quota. mode=thread is used so nested
-    # conversation replies are not silently lost (mode=replies is direct-only).
+    # parent from consuming the whole quota. mode=replies is the documented
+    # audience-reply route (direct replies).
     "x": {
         "parent_batch_limit": 2,
         "limit_scope": "global",
-        "reply_depth": "thread",
-        "sort": "actor_thread",
+        "reply_depth": "direct",
+        "sort": "actor_default",
     },
     # epctex maxItems is a run-level cap across startUrls. One parent per call
     # guarantees every selected video receives an attempt.
@@ -115,7 +115,7 @@ COMMENT_ACTOR_CONTRACTS = {
         "parent_batch_limit": 5,
         "limit_scope": "per_parent",
         "reply_depth": "nested",
-        "sort": "recent",
+        "sort": "recent_activity",
     },
     # Scraper One uses a per-post resultsLimit and newest-first ordering. Keep
     # the five-parent cap from the production hotfix; do not leak that limit to
@@ -428,11 +428,16 @@ def build_comment_deepening_input(
     per_parent = max(1, int(max_per_parent or math.ceil(max_items / max(1, len(refs)))))
 
     if source == "x":
-        # "replies" is direct-only in Xquik. Thread mode preserves replies to
-        # replies; the normalizer drops the root tweet and keeps its descendants.
+        # `mode: replies` + `replyTweetIds` is the DOCUMENTED audience-reply
+        # route ("every row has inReplyToId equal to the requested tweet").
+        # `mode: thread` exists in the schema but its semantics are not
+        # documented, and the Actor's own examples use "thread" for an author's
+        # chained posts. The one production run on thread mode
+        # (20260925T002306Z-65236947) never finished the X comment pass.
+        # Nested replies have a documented route of their own (conversationIds).
         out = {
-            "mode": "thread",
-            "threadTweetIds": [_x_id(x) for x in refs],
+            "mode": "replies",
+            "replyTweetIds": [_x_id(x) for x in refs],
             "maxItems": max_items,
             "maxItemsPerTarget": max(1, per_parent),
         }
@@ -446,7 +451,8 @@ def build_comment_deepening_input(
         return {"startUrls": refs, "includeReplies": bool(include_replies), "maxItems": max_items}
     if source == "instagram":
         # ScrapeSmith's schema uses a per-parent limit rather than maxItems.
-        return {"postUrls": refs, "maxCommentsPerPost": per_parent, "sortOrder": "recent"}
+        # Documented enum: popular | recent_activity ("recent" alone is not a value).
+        return {"postUrls": refs, "maxCommentsPerPost": per_parent, "sortOrder": "recent_activity"}
     if source == "facebook":
         # scraper_one/facebook-comments-scraper: resultsLimit is PER POST and
         # newest-first is essential for bounded windows. The actor has no native
@@ -528,8 +534,10 @@ def build_page_discovery_input(
             out["onlyPostsOlderThan"] = date_to
         return out
     if source == "instagram":
+        # (`skipPinnedPosts` is not a documented apify/instagram-scraper field;
+        # pinned posts are handled by SIGNALYTH's exact date post-filter.)
         out = {"directUrls": refs, "resultsType": "posts", "resultsLimit": limit,
-               "skipPinnedPosts": True, "addParentData": True}
+               "addParentData": True}
         if date_from:
             out["onlyPostsNewerThan"] = date_from
         return out
@@ -542,7 +550,10 @@ def build_page_discovery_input(
             out["newestPostDate"] = date_to
         return out
     if source == "x":
-        return {"twitterHandles": refs, "mode": "profile", "maxItems": limit}
+        # Documented mode for a handle's own timeline is `profileTweets`
+        # ("matches the Posts tab on X"). `profile` is not a mode value.
+        return {"twitterHandles": refs, "mode": "profileTweets", "maxItems": limit,
+                "maxItemsPerTarget": max(1, limit // max(1, len(refs)))}
     raise ValueError(f"Page discovery is not configured for source {source}.")
 
 
