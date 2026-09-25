@@ -20,13 +20,11 @@ def test_comment_input_shapes_are_actor_specific():
     assert ig == {"postUrls": ["https://www.instagram.com/p/ABC/"], "maxCommentsPerPost": 5, "sortOrder": "recent"}
     fb = build_comment_deepening_input(
         "facebook", ["https://www.facebook.com/x/posts/1"], 12,
-        max_per_parent=6, include_replies=True, date_from="2026-09-14",
+        max_per_parent=6, include_replies=True,
     )
-    assert fb["startUrls"] == [{"url": "https://www.facebook.com/x/posts/1"}]
-    assert fb["resultsLimit"] == 12
-    assert fb["includeNestedComments"] is True
-    assert fb["viewOption"] == "RECENT_ACTIVITY"
-    assert fb["onlyCommentsNewerThan"] == "2026-09-14"
+    assert fb["postUrls"] == ["https://www.facebook.com/x/posts/1"]
+    assert fb["resultsLimit"] == 6
+    assert fb["commentsSortType"] == "newest"
 
 
 def test_instagram_comments_and_nested_replies_become_separate_evidence():
@@ -74,7 +72,7 @@ def test_x_reply_normalization_is_reply_layer():
 
 
 def test_forecast_allows_curated_configured_actor_when_enabled():
-    cfg = {"comment_actor_id": "apify/facebook-comments-scraper", "comment_deepening_status": "configured", "comment_enabled": False}
+    cfg = {"comment_actor_id": "scraper_one/facebook-comments-scraper", "comment_deepening_status": "configured", "comment_enabled": False}
     assert comments_forecast("facebook", True, cfg)["status"] == "configured_disabled"
     cfg["comment_enabled"] = True
     assert comments_forecast("facebook", True, cfg)["status"] == "configured_available"
