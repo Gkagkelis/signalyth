@@ -1,0 +1,460 @@
+From db5ecd6b1947cd6026b1b89d725bd1986cc5f65f Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 25 Sep 2026 13:21:16 +0300
+Subject: [PATCH 1/2] v31.3: bounded Apify wait + hard-killed re-entries count
+ against the guard
+
+- apify_service: call() waits at most actor_run_timeout + 90s (wait_duration);
+  a run still READY/RUNNING afterwards is aborted and reported as a timeout.
+  run_timeout only bounds a RUNNING Actor; a run parked in READY never
+  reaches it and our worker blocked forever (runs 20260925T094032Z, ...065236947).
+- run_manager: a worker that re-enters the adaptive step after a previous
+  worker died inside it (stale-run resume, no graceful deadline hand-off)
+  now counts as a continuation for MAX_ADAPTIVE_CONTINUATIONS_WITHOUT_PROGRESS.
+- tests: test_v31_3_actor_wait_bound.py (4), HardKilledWorkerTest (1)
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FM9VfoHhfyZmxPfBDYfQjP
+---
+ app/services/apify_service.py          | 28 ++++++++-
+ app/services/run_manager.py            | 12 +++-
+ config/source_registry_history.json    | 52 ++++++++---------
+ tests/test_v31_2_continuation_guard.py | 47 +++++++++++++++
+ tests/test_v31_3_actor_wait_bound.py   | 81 ++++++++++++++++++++++++++
+ 5 files changed, 192 insertions(+), 28 deletions(-)
+ create mode 100644 tests/test_v31_3_actor_wait_bound.py
+
+diff --git a/app/services/apify_service.py b/app/services/apify_service.py
+index e31c8fa..60d4ceb 100644
+--- a/app/services/apify_service.py
++++ b/app/services/apify_service.py
+@@ -38,7 +38,16 @@ class ApifyRunner:
+             raise CollectionNotConfigured("apify-client is not installed.") from exc
+         self.client = ApifyClient(settings.apify_token)
+ 
++    #: Extra seconds we wait for the Actor to be SCHEDULED and finish on top
++    #: of its own run timeout. The run timeout only starts once the Actor is
++    #: running; a run parked in READY (no free memory on the account because
++    #: other Actors of ours are still running) never reaches it, and without a
++    #: client-side wait our worker blocked forever — run 20260925T094032Z
++    #: stopped writing status at 09:45 UTC inside exactly such a call.
++    WAIT_MARGIN_SECONDS = 90.0
++
+     def run(self, actor_id: str, run_input: dict, *, max_items: int, max_charge_usd: float) -> tuple[dict, list[dict]]:
++        timeout_s = float(actor_run_timeout_seconds(actor_id))
+         run = self.client.actor(actor_id).call(
+             run_input=run_input,
+             max_items=max_items,
+@@ -46,11 +55,28 @@ class ApifyRunner:
+             # A single slow provider must not hold the whole SIGNALYTH pipeline forever.
+             # Apify terminates the Actor run itself at this limit; resilience logic can
+             # then isolate the failure and continue with later batches/sources.
+-            run_timeout=timedelta(seconds=actor_run_timeout_seconds(actor_id)),
++            run_timeout=timedelta(seconds=timeout_s),
++            # ...and WE stop waiting shortly after that limit, whatever state
++            # the run is in. call() otherwise waits indefinitely.
++            wait_duration=timedelta(seconds=timeout_s + self.WAIT_MARGIN_SECONDS),
+         )
+         if not run:
+             raise RuntimeError(f"Actor {actor_id} returned no run object")
+         meta = _run_to_dict(run)
++        state = str(meta.get("status") or "").upper()
++        if state and state not in {"SUCCEEDED", "FAILED", "ABORTED", "TIMED-OUT", "TIMING-OUT", "ABORTING"}:
++            # Still READY/RUNNING after our wait window: give the slot back and
++            # report it as a provider timeout so the pipeline isolates it.
++            run_id = meta.get("id")
++            if run_id:
++                try:
++                    self.client.run(str(run_id)).abort()
++                except Exception:
++                    pass
++            raise RuntimeError(
++                f"Actor {actor_id} run did not finish within {int(timeout_s + self.WAIT_MARGIN_SECONDS)}s "
++                f"(status={state or 'unknown'}) — timed out and aborted"
++            )
+         dataset_id = meta.get("defaultDatasetId") or meta.get("default_dataset_id")
+         if not dataset_id:
+             raise RuntimeError(f"Actor {actor_id} returned no dataset")
+diff --git a/app/services/run_manager.py b/app/services/run_manager.py
+index 9eeea2d..1282411 100644
+--- a/app/services/run_manager.py
++++ b/app/services/run_manager.py
+@@ -1025,7 +1025,17 @@ class RunManager:
+                 int(report.get("trusted_sample_shortfall", 0) or 0) > 0
+                 or bool(plan.get("comments_requested"))
+             )
+-            guard_before = dict((self.store.read_status(run_id).get("adaptive_continuation_guard") or {}))
++            entry_status = self.store.read_status(run_id)
++            if str((entry_status.get("adaptive_collection") or {}).get("status") or "") in UNFINISHED_STEP_STATES:
++                # A previous worker died INSIDE this step (hard kill, no graceful
++                # deadline hand-off) and the stale-run resume brought us here.
++                # That is a continuation too, and it must count against the same
++                # limit — otherwise a call that never returns loops forever.
++                guard_before = update_adaptive_continuation_guard(
++                    entry_status, adaptive_progress_fingerprint(self.store, folder, entry_status))
++                self.store.write_status(run_id, entry_status)
++            else:
++                guard_before = dict(entry_status.get("adaptive_continuation_guard") or {})
+             if guard_before.get("tripped"):
+                 # A previous continuation already decided this step cannot
+                 # progress. Close it honestly (idempotent) and move on.
+diff --git a/config/source_registry_history.json b/config/source_registry_history.json
+index 46f1be4..659add1 100644
+--- a/config/source_registry_history.json
++++ b/config/source_registry_history.json
+@@ -1,7 +1,7 @@
+ {
+   "facebook": [
+     {
+-      "saved_at": "2026-09-22T15:51:30.900370+00:00",
++      "saved_at": "2026-09-22T16:49:08.028328+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -46,7 +46,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T15:51:30.908524+00:00",
++      "saved_at": "2026-09-22T16:49:08.035626+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -91,7 +91,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T16:49:08.028328+00:00",
++      "saved_at": "2026-09-22T17:01:21.584194+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -136,7 +136,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T16:49:08.035626+00:00",
++      "saved_at": "2026-09-22T17:01:21.590931+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -181,7 +181,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T17:01:21.584194+00:00",
++      "saved_at": "2026-09-22T17:35:28.057613+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -226,7 +226,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T17:01:21.590931+00:00",
++      "saved_at": "2026-09-22T17:35:28.064830+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -271,7 +271,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T17:35:28.057613+00:00",
++      "saved_at": "2026-09-22T17:39:19.922383+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -316,7 +316,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T17:35:28.064830+00:00",
++      "saved_at": "2026-09-22T17:39:19.929120+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -361,7 +361,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T17:39:19.922383+00:00",
++      "saved_at": "2026-09-22T18:48:07.578364+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -406,7 +406,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T17:39:19.929120+00:00",
++      "saved_at": "2026-09-22T18:48:07.584767+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -451,7 +451,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T18:48:07.578364+00:00",
++      "saved_at": "2026-09-22T20:02:17.644172+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -496,7 +496,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T18:48:07.584767+00:00",
++      "saved_at": "2026-09-22T20:02:17.651287+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -541,7 +541,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T20:02:17.644172+00:00",
++      "saved_at": "2026-09-22T20:08:13.787149+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -586,7 +586,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T20:02:17.651287+00:00",
++      "saved_at": "2026-09-22T20:08:13.793515+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -631,7 +631,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T20:08:13.787149+00:00",
++      "saved_at": "2026-09-22T20:13:01.113715+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -676,7 +676,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T20:08:13.793515+00:00",
++      "saved_at": "2026-09-22T20:13:01.119841+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -721,7 +721,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T20:13:01.113715+00:00",
++      "saved_at": "2026-09-23T06:33:15.432148+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -766,7 +766,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T20:13:01.119841+00:00",
++      "saved_at": "2026-09-23T06:33:15.439290+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -811,7 +811,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-23T06:33:15.432148+00:00",
++      "saved_at": "2026-09-25T10:08:19.799470+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -844,19 +844,19 @@
+         "comment_price_per_1000_hint": 0.4,
+         "comment_max_per_parent": 40,
+         "comment_max_parents": 12,
+-        "comment_include_replies": true,
+-        "comment_rollout_version": "comments-production-ready-v1",
++        "comment_include_replies": false,
++        "comment_rollout_version": "comments-production-ready-v4",
+         "comment_last_live_success_at": null,
+         "page_actor_id": "apify/facebook-posts-scraper",
+         "page_input_field": "startUrls",
+-        "page_price_per_1000_hint": 2.0,
++        "page_price_per_1000_hint": 2,
+         "page_kind": "page_url",
+         "page_enabled": true,
+         "page_max_posts": 60
+       }
+     },
+     {
+-      "saved_at": "2026-09-23T06:33:15.439290+00:00",
++      "saved_at": "2026-09-25T10:08:19.806967+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -889,12 +889,12 @@
+         "comment_price_per_1000_hint": 0.4,
+         "comment_max_per_parent": 40,
+         "comment_max_parents": 12,
+-        "comment_include_replies": true,
+-        "comment_rollout_version": "comments-production-ready-v1",
++        "comment_include_replies": false,
++        "comment_rollout_version": "comments-production-ready-v4",
+         "comment_last_live_success_at": null,
+         "page_actor_id": "apify/facebook-posts-scraper",
+         "page_input_field": "startUrls",
+-        "page_price_per_1000_hint": 2.0,
++        "page_price_per_1000_hint": 2,
+         "page_kind": "page_url",
+         "page_enabled": true,
+         "page_max_posts": 60
+diff --git a/tests/test_v31_2_continuation_guard.py b/tests/test_v31_2_continuation_guard.py
+index 7aa1cfb..026bb62 100644
+--- a/tests/test_v31_2_continuation_guard.py
++++ b/tests/test_v31_2_continuation_guard.py
+@@ -132,3 +132,50 @@ class StuckAdaptiveStepTest(unittest.TestCase):
+ 
+ if __name__ == "__main__":
+     unittest.main()
++
++
++class HardKilledWorkerTest(StuckAdaptiveStepTest):
++    """The worker dies INSIDE the step (no graceful hand-off) and stale-run
++    recovery resumes it. That path never reached the guard before."""
++
++    def test_a_step_a_dead_worker_left_running_counts_as_a_continuation(self):
++        run_id = self.store.create(self._plan())[0]
++        calls = []
++
++        def adaptive_that_finishes(folder, *, plan, initial_report, **kwargs):
++            calls.append(1)
++            status = self.store.read_status(run_id)
++            status.setdefault("comment_deepening", {})["facebook"] = {
++                "status": "running", "bucket": "open", "requested": 40, "collected": 0, "parents": 2}
++            self.store.write_status(run_id, status)
++            return {"report": initial_report, "audit": {"deadline_reached": False, "warnings": []}}
++
++        # Pretend two earlier workers already died inside this step at this exact state.
++        with patch("app.services.collector.ApifyRunner", FakeApify), \
++             patch("app.services.relevance_expansion.ApifyRunner", FakeApify), \
++             patch("app.services.ai_analysis.OpenAIResponsesProvider", FakeModel), \
++             patch("app.services.run_manager.adaptive_expand_after_cleaning", adaptive_that_finishes):
++            # First worker: runs collection + cleaning, enters adaptive, "dies" — we
++            # emulate the death by writing the state a dead worker leaves behind.
++            self.manager.enqueue(run_id)
++            done = _wait_terminal(self.store, run_id, timeout=240.0)
++        self.assertEqual(len(calls), 1)
++
++        # Now emulate stale-run recovery re-entering twice more at the same state.
++        from app.services.run_manager import adaptive_progress_fingerprint, update_adaptive_continuation_guard
++        status = self.store.read_status(run_id)
++        fp = adaptive_progress_fingerprint(self.store, self.store.folder_for(run_id), status)
++        status["adaptive_collection"] = {**(status.get("adaptive_collection") or {}), "status": "running"}
++        update_adaptive_continuation_guard(status, fp)
++        update_adaptive_continuation_guard(status, fp)
++        self.assertEqual(status["adaptive_continuation_guard"]["count"], 2)
++        self.assertFalse(status["adaptive_continuation_guard"].get("tripped"))
++        self.store.write_status(run_id, status)
++
++        # The third re-entry at the same state must trip the guard on ENTRY,
++        # before the step is resumed yet again.
++        from app.services.run_manager import close_adaptive_step_without_progress
++        entry = self.store.read_status(run_id)
++        guard = update_adaptive_continuation_guard(
++            entry, adaptive_progress_fingerprint(self.store, self.store.folder_for(run_id), entry))
++        self.assertTrue(guard.get("tripped"))
+diff --git a/tests/test_v31_3_actor_wait_bound.py b/tests/test_v31_3_actor_wait_bound.py
+new file mode 100644
+index 0000000..93bbaa4
+--- /dev/null
++++ b/tests/test_v31_3_actor_wait_bound.py
+@@ -0,0 +1,81 @@
++"""An Actor run that never starts must not hold our worker forever.
++
++Run 20260925T094032Z-0e94d435 stopped writing status at 09:45:35 UTC inside
++an X comment call and was still silent 25 minutes later. `run_timeout` only
++bounds an Actor that is RUNNING; a run parked in READY (no free account
++memory while other Actors of ours run) never reaches it, and `call()` waits
++indefinitely unless a client-side wait is given.
++"""
++from __future__ import annotations
++
++from datetime import timedelta
++
++import pytest
++
++from app.services.apify_service import ApifyRunner
++from app.services.resilience import actor_run_timeout_seconds
++
++
++def _runner(run_status: str, captured: dict, aborted: list):
++    class FakeRun(dict):
++        pass
++
++    class FakeActor:
++        def call(self, **kwargs):
++            captured.update(kwargs)
++            return FakeRun(id="r1", defaultDatasetId="d1", status=run_status)
++
++    class FakeDataset:
++        class Result:
++            items = [{"id": "c1"}]
++
++        def list_items(self):
++            return self.Result()
++
++    class FakeRunClient:
++        def abort(self):
++            aborted.append("r1")
++
++    class FakeClient:
++        def actor(self, actor_id):
++            return FakeActor()
++
++        def dataset(self, dataset_id):
++            return FakeDataset()
++
++        def run(self, run_id):
++            return FakeRunClient()
++
++    runner = object.__new__(ApifyRunner)
++    runner.client = FakeClient()
++    return runner
++
++
++def test_we_stop_waiting_shortly_after_the_actor_timeout():
++    captured, aborted = {}, []
++    runner = _runner("SUCCEEDED", captured, aborted)
++    runner.run("xquik/x-tweet-scraper", {"mode": "replies", "replyTweetIds": ["1"]},
++               max_items=10, max_charge_usd=0.1)
++    expected = actor_run_timeout_seconds("xquik/x-tweet-scraper") + ApifyRunner.WAIT_MARGIN_SECONDS
++    assert captured["wait_duration"] == timedelta(seconds=expected)
++    assert captured["run_timeout"] == timedelta(seconds=actor_run_timeout_seconds("xquik/x-tweet-scraper"))
++    assert not aborted
++
++
++@pytest.mark.parametrize("state", ["READY", "RUNNING"])
++def test_a_run_still_not_finished_after_the_wait_is_aborted_and_reported(state):
++    captured, aborted = {}, []
++    runner = _runner(state, captured, aborted)
++    with pytest.raises(RuntimeError) as exc:
++        runner.run("xquik/x-tweet-scraper", {"mode": "replies", "replyTweetIds": ["1"]},
++                   max_items=10, max_charge_usd=0.1)
++    assert "timed out" in str(exc.value)
++    assert aborted == ["r1"], "the parked run must be aborted so it cannot bill later"
++
++
++def test_a_finished_run_is_read_normally():
++    captured, aborted = {}, []
++    runner = _runner("TIMED-OUT", captured, aborted)
++    meta, items = runner.run("xquik/x-tweet-scraper", {"mode": "replies", "replyTweetIds": ["1"]},
++                             max_items=10, max_charge_usd=0.1)
++    assert items == [{"id": "c1"}] and not aborted
+-- 
+2.43.0
+

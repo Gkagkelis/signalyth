@@ -1,0 +1,473 @@
+From 6edf383af6da31a5be1c7a21f90fea6b5757c940 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 25 Sep 2026 15:56:50 +0300
+Subject: [PATCH 2/2] v31.4: no paid parents from search provenance;
+ engagement-ranked parent discovery; analysis rebuild
+
+- relevance_expansion: the 'provenance' parent tier is gone. Search Actors
+  return off-query rows when real matches are scarce (run 20260925T094032Z:
+  a Tsipras interview and a pastitsio video became paid Eurojackpot comment
+  parents, 99 comments bought about nothing). An open parent must name the
+  subject itself; operator pages keep their explicit tier.
+- conversation-parent probe asks for engagement-ranked results (facebook
+  searchType=top, tiktok sortType=MOST_LIKED, x queryType=Top) instead of
+  newest, which surfaced syndicated bulletins with 0-1 comments.
+- run_manager: analysis files missing at the intelligence stage (worker
+  hand-off lost the workspace) -> rebuild the analysis once from the saved
+  evidence instead of failing the run.
+- tests: provenance reversal pins, LostAnalysisFilesTest, lifecycle fake
+  writes the analysis file it claims to have produced.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FM9VfoHhfyZmxPfBDYfQjP
+---
+ app/services/relevance_expansion.py     | 50 ++++++++++++------------
+ app/services/run_manager.py             | 26 +++++++++++++
+ config/source_registry_history.json     | 52 ++++++++++++-------------
+ tests/test_lifecycle.py                 |  9 ++++-
+ tests/test_v31_2_continuation_guard.py  | 32 +++++++++++++++
+ tests/test_v31_acquisition_contracts.py | 27 ++++++++-----
+ 6 files changed, 133 insertions(+), 63 deletions(-)
+
+diff --git a/app/services/relevance_expansion.py b/app/services/relevance_expansion.py
+index aa72280..bdf5708 100644
+--- a/app/services/relevance_expansion.py
++++ b/app/services/relevance_expansion.py
+@@ -517,34 +517,21 @@ def _comment_parent_candidate_allowed(source: str, row: dict) -> bool:
+ 
+ 
+ def _comment_parent_candidate_tier(source: str, row: dict) -> str | None:
+-    """Return direct or provenance for a safe conversation parent."""
++    """Which qualification a PAID open comment parent holds: "direct" or none.
++
++    v31 briefly added a "provenance" tier: a post could become a paid comment
++    parent merely because a subject-anchored search route returned it, even
++    when its own text never mentioned the subject. Run 20260925T094032Z showed
++    why that cannot work: the X and TikTok search Actors return off-query rows
++    when real matches are scarce (a Tsipras interview, a pastitsio video), so
++    "came from the Eurojackpot search" proved nothing — and 99 comments were
++    bought under those posts. Search provenance is a routing fact, not subject
++    evidence. An open parent must carry the subject itself (core term/alias);
++    the operator's own pages keep their separate, explicit "operator" tier.
++    """
+     if _comment_parent_candidate_allowed(source, row):
+         return "direct"
+-    if str(row.get("platform") or "") != source or str(row.get("evidence_layer") or "primary") != "primary":
+-        return None
+-    if not _seed_ref(source, row) or not bool(row.get("subject_search_provenance")):
+-        return None
+-    cleaning = row.get("cleaning") if isinstance(row.get("cleaning"), dict) else {}
+-    flags = {str(x) for x in (cleaning.get("flags") or [])}
+-    reasons = {str(x) for x in (cleaning.get("reasons") or [])}
+-    if flags & {"exact_duplicate","near_duplicate_same_author","syndicated_duplicate_content","explicit_exclusion_context","likely_automated"}:
+-        return None
+-    if reasons & {"duplicate_not_independent_evidence","explicit_exclusion_context","high_spam_risk","high_automation_or_manipulation_risk","outside_target_market"}:
+-        return None
+-    try:
+-        # Provenance parents still need positive Greek-market evidence, but
+-        # 0.45 was too high for legitimate Greeklish prose: two independent
+-        # Greeklish markers score 0.30 by design. Keep a stronger-than-review
+-        # floor without silently deleting that audience.
+-        if float(cleaning.get("market_score", 0) or 0) < max(0.30, float(RULESET_CONFIG["market_review_below"])):
+-            return None
+-        if float(cleaning.get("spam_score", 0) or 0) >= float(RULESET_CONFIG["spam_exclude_at"]):
+-            return None
+-    except Exception:
+-        return None
+-    if str(cleaning.get("authenticity_status") or "") == "likely_automated":
+-        return None
+-    return "provenance"
++    return None
+ 
+ 
+ def _collect_seeds(source: str, rows: list[dict], max_seeds: int, skip_reported_zero: bool) -> tuple[list[str], list[dict]]:
+@@ -944,11 +931,20 @@ def _conversation_probe_input(
+     date_from: date,
+     date_to: date,
+ ) -> dict:
++    """The parent probe looks for CONVERSATION, so it asks each Actor for its
++    engagement-ranked results, not its newest. Newest-first discovery (what
++    the evidence sample rightly uses) surfaced syndicated draw bulletins with
++    0-1 comments each (run 20260925T094032Z: seven Facebook parents, two
++    comments). Every value below is a documented enum of that Actor:
++    scraper_one searchType top|latest, epctex sortType MOST_LIKED, xquik
++    queryType Top. The research window still applies.
++    """
+     inp = _limit_adaptive_input(source, actor_input, wanted)
+     parent_from = date_from - timedelta(days=PARENT_LOOKBACK_DAYS)
+     until_exclusive = date_to + timedelta(days=1)
+     if source == "facebook":
+         inp["resultsCount"] = wanted
++        inp["searchType"] = "top"
+         inp["startDate"] = parent_from.isoformat()
+         inp["endDate"] = date_to.isoformat()
+     elif source == "instagram":
+@@ -956,10 +952,12 @@ def _conversation_probe_input(
+         inp["onlyPostsNewerThan"] = parent_from.isoformat()
+     elif source == "x":
+         inp["maxItems"] = wanted
++        inp["queryType"] = "Top"
+         inp["since"] = f"{parent_from.isoformat()}_00:00:00_UTC"
+         inp["until"] = f"{until_exclusive.isoformat()}_00:00:00_UTC"
+     elif source == "tiktok":
+         inp["maxItems"] = wanted
++        inp["sortType"] = "MOST_LIKED"
+     return inp
+ 
+ 
+diff --git a/app/services/run_manager.py b/app/services/run_manager.py
+index 1282411..d15bc9a 100644
+--- a/app/services/run_manager.py
++++ b/app/services/run_manager.py
+@@ -1350,6 +1350,32 @@ class RunManager:
+             return  # superseded by a newer worker invocation
+         status.setdefault("progress", {})["percent"] = 96
+         self.store.write_status(run_id, status)
++        if not (folder / "analysis" / "analysis-ready.json").exists():
++            # The analysis finished on a worker that was replaced before its
++            # files reached the archive (run 20260925T094032Z-0e94d435). The
++            # OpenAI batch cache is durable, so re-running the analysis is
++            # cheap; failing the run here threw away a complete collection.
++            rebuilds = int(status.get("analysis_rebuild_attempts") or 0)
++            if rebuilds < 1:
++                status = self.store.read_status(run_id)
++                status.update({
++                    "status": "queued",
++                    "phase": "cleaning",
++                    "fatal_error": None,
++                    "analysis_rebuild_attempts": rebuilds + 1,
++                    "current": {"source": None, "code": "analysis_rebuild",
++                                "message": "Analysis files were lost in a worker hand-off; rebuilding the analysis from the saved evidence"},
++                })
++                self.store.write_status(run_id, status)
++                try:
++                    self.store.checkpoint_run(run_id)
++                except Exception:
++                    pass
++                try:
++                    self._requeue_continuation(run_id)
++                except Exception:
++                    pass
++                return
+         try:
+             intelligence = build_intelligence(folder, plan=plan)
+         except Exception as exc:
+diff --git a/config/source_registry_history.json b/config/source_registry_history.json
+index 659add1..46f1be4 100644
+--- a/config/source_registry_history.json
++++ b/config/source_registry_history.json
+@@ -1,7 +1,7 @@
+ {
+   "facebook": [
+     {
+-      "saved_at": "2026-09-22T16:49:08.028328+00:00",
++      "saved_at": "2026-09-22T15:51:30.900370+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -46,7 +46,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T16:49:08.035626+00:00",
++      "saved_at": "2026-09-22T15:51:30.908524+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -91,7 +91,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T17:01:21.584194+00:00",
++      "saved_at": "2026-09-22T16:49:08.028328+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -136,7 +136,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T17:01:21.590931+00:00",
++      "saved_at": "2026-09-22T16:49:08.035626+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -181,7 +181,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T17:35:28.057613+00:00",
++      "saved_at": "2026-09-22T17:01:21.584194+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -226,7 +226,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T17:35:28.064830+00:00",
++      "saved_at": "2026-09-22T17:01:21.590931+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -271,7 +271,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T17:39:19.922383+00:00",
++      "saved_at": "2026-09-22T17:35:28.057613+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -316,7 +316,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T17:39:19.929120+00:00",
++      "saved_at": "2026-09-22T17:35:28.064830+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -361,7 +361,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T18:48:07.578364+00:00",
++      "saved_at": "2026-09-22T17:39:19.922383+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -406,7 +406,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T18:48:07.584767+00:00",
++      "saved_at": "2026-09-22T17:39:19.929120+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -451,7 +451,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T20:02:17.644172+00:00",
++      "saved_at": "2026-09-22T18:48:07.578364+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -496,7 +496,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T20:02:17.651287+00:00",
++      "saved_at": "2026-09-22T18:48:07.584767+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -541,7 +541,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T20:08:13.787149+00:00",
++      "saved_at": "2026-09-22T20:02:17.644172+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -586,7 +586,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T20:08:13.793515+00:00",
++      "saved_at": "2026-09-22T20:02:17.651287+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -631,7 +631,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T20:13:01.113715+00:00",
++      "saved_at": "2026-09-22T20:08:13.787149+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -676,7 +676,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-22T20:13:01.119841+00:00",
++      "saved_at": "2026-09-22T20:08:13.793515+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -721,7 +721,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-23T06:33:15.432148+00:00",
++      "saved_at": "2026-09-22T20:13:01.113715+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -766,7 +766,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-23T06:33:15.439290+00:00",
++      "saved_at": "2026-09-22T20:13:01.119841+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -811,7 +811,7 @@
+       }
+     },
+     {
+-      "saved_at": "2026-09-25T10:08:19.799470+00:00",
++      "saved_at": "2026-09-23T06:33:15.432148+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -844,19 +844,19 @@
+         "comment_price_per_1000_hint": 0.4,
+         "comment_max_per_parent": 40,
+         "comment_max_parents": 12,
+-        "comment_include_replies": false,
+-        "comment_rollout_version": "comments-production-ready-v4",
++        "comment_include_replies": true,
++        "comment_rollout_version": "comments-production-ready-v1",
+         "comment_last_live_success_at": null,
+         "page_actor_id": "apify/facebook-posts-scraper",
+         "page_input_field": "startUrls",
+-        "page_price_per_1000_hint": 2,
++        "page_price_per_1000_hint": 2.0,
+         "page_kind": "page_url",
+         "page_enabled": true,
+         "page_max_posts": 60
+       }
+     },
+     {
+-      "saved_at": "2026-09-25T10:08:19.806967+00:00",
++      "saved_at": "2026-09-23T06:33:15.439290+00:00",
+       "reason": "manual_actor_change",
+       "config": {
+         "label": "Facebook",
+@@ -889,12 +889,12 @@
+         "comment_price_per_1000_hint": 0.4,
+         "comment_max_per_parent": 40,
+         "comment_max_parents": 12,
+-        "comment_include_replies": false,
+-        "comment_rollout_version": "comments-production-ready-v4",
++        "comment_include_replies": true,
++        "comment_rollout_version": "comments-production-ready-v1",
+         "comment_last_live_success_at": null,
+         "page_actor_id": "apify/facebook-posts-scraper",
+         "page_input_field": "startUrls",
+-        "page_price_per_1000_hint": 2,
++        "page_price_per_1000_hint": 2.0,
+         "page_kind": "page_url",
+         "page_enabled": true,
+         "page_max_posts": 60
+diff --git a/tests/test_lifecycle.py b/tests/test_lifecycle.py
+index 1d1480b..b3fdd3e 100644
+--- a/tests/test_lifecycle.py
++++ b/tests/test_lifecycle.py
+@@ -248,7 +248,14 @@ class LifecycleTests(unittest.TestCase):
+         ai_report = {"ruleset_version":"0.9.0", "prompt_version":"signalyth-semantic-v0.9", "generated_at":"2026-09-03T11:00:00+00:00", "analysis_ready_records":1, "review_records":0}
+         intelligence_report = {"ruleset_version":"1.0.0", "methodology_version":"signalyth-intelligence-v1", "generated_at":"2026-09-03T11:01:00+00:00", "brand_reputation":{"index":60.0}}
+         investigation_report = {"ruleset_version":"1.1.0", "methodology_version":"signalyth-investigations-v1", "evidence_contract_version":"signalyth-evidence-pack-v1.1", "generated_at":"2026-09-03T11:02:00+00:00", "investigation_count":1, "indicator_contract":{"required":25,"examined":25,"available":10,"omitted":0,"complete":True}}
+-        with patch("app.services.collector.ApifyRunner", FastRunner), patch("app.services.run_manager.clean_run", return_value=clean_report), patch("app.services.run_manager.analyze_run", return_value=ai_report) as ai_call, patch("app.services.run_manager.build_intelligence", return_value=intelligence_report) as intel_call, patch("app.services.run_manager.build_investigations", return_value=investigation_report) as inv_call, patch("app.services.run_manager.build_visualizations", return_value={"ruleset_version":"1.2.0", "methodology_version":"signalyth-visual-intelligence-v1", "visual_contract_version":"signalyth-visual-pack-v1.2", "generated_at":"2026-09-03T11:03:00+00:00", "chart_count":8, "indicator_contract":{"required":25,"examined":25,"complete":True}}) as viz_call:
++        # v31.4: a real analysis leaves analysis/analysis-ready.json behind; the
++        # worker now rebuilds the analysis once if that file is missing at the
++        # intelligence stage, so the fake must produce it like the real one.
++        def fake_analyze(folder, **kwargs):
++            (folder / "analysis").mkdir(parents=True, exist_ok=True)
++            (folder / "analysis" / "analysis-ready.json").write_text('[{"id": "r1"}]', encoding="utf-8")
++            return ai_report
++        with patch("app.services.collector.ApifyRunner", FastRunner), patch("app.services.run_manager.clean_run", return_value=clean_report), patch("app.services.run_manager.analyze_run", side_effect=fake_analyze) as ai_call, patch("app.services.run_manager.build_intelligence", return_value=intelligence_report) as intel_call, patch("app.services.run_manager.build_investigations", return_value=investigation_report) as inv_call, patch("app.services.run_manager.build_visualizations", return_value={"ruleset_version":"1.2.0", "methodology_version":"signalyth-visual-intelligence-v1", "visual_contract_version":"signalyth-visual-pack-v1.2", "generated_at":"2026-09-03T11:03:00+00:00", "chart_count":8, "indicator_contract":{"required":25,"examined":25,"complete":True}}) as viz_call:
+             self.manager.enqueue(run_id)
+             done = wait_terminal(self.store, run_id)
+         self.assertEqual(done['status'], 'succeeded')
+diff --git a/tests/test_v31_2_continuation_guard.py b/tests/test_v31_2_continuation_guard.py
+index 026bb62..1570a1b 100644
+--- a/tests/test_v31_2_continuation_guard.py
++++ b/tests/test_v31_2_continuation_guard.py
+@@ -179,3 +179,35 @@ class HardKilledWorkerTest(StuckAdaptiveStepTest):
+         guard = update_adaptive_continuation_guard(
+             entry, adaptive_progress_fingerprint(self.store, self.store.folder_for(run_id), entry))
+         self.assertTrue(guard.get("tripped"))
++
++
++class LostAnalysisFilesTest(StuckAdaptiveStepTest):
++    """Run 20260925T094032Z-0e94d435: the analysis finished on a worker that was
++    replaced before its files reached the archive, and the run FAILED at the
++    intelligence stage although the whole collection was intact."""
++
++    def test_the_run_rebuilds_the_analysis_once_instead_of_failing(self):
++        import app.services.run_manager as rm
++        run_id = self.store.create(self._plan())[0]
++        real_analyze = rm.analyze_run
++        wiped = []
++
++        def analyze_then_lose_files(folder, **kwargs):
++            report = real_analyze(folder, **kwargs)
++            if not wiped:      # emulate the hand-off that lost the workspace
++                (folder / "analysis" / "analysis-ready.json").unlink(missing_ok=True)
++                wiped.append(1)
++            return report
++
++        with patch("app.services.collector.ApifyRunner", FakeApify), \
++             patch("app.services.relevance_expansion.ApifyRunner", FakeApify), \
++             patch("app.services.ai_analysis.OpenAIResponsesProvider", FakeModel), \
++             patch("app.services.run_manager.analyze_run", analyze_then_lose_files):
++            self.manager.enqueue(run_id)
++            done = _wait_terminal(self.store, run_id, timeout=240.0)
++
++        self.assertNotEqual(done.get("status"), "failed", msg=f"fatal_error={done.get('fatal_error')}")
++        self.assertEqual(int(done.get("analysis_rebuild_attempts") or 0), 1)
++        folder = self.store.folder_for(run_id)
++        self.assertTrue((folder / "analysis" / "analysis-ready.json").exists())
++        self.assertIsInstance(self.store.read(folder / "intelligence" / "summary.json", None), dict)
+diff --git a/tests/test_v31_acquisition_contracts.py b/tests/test_v31_acquisition_contracts.py
+index 2afaf6e..e25bd56 100644
+--- a/tests/test_v31_acquisition_contracts.py
++++ b/tests/test_v31_acquisition_contracts.py
+@@ -163,19 +163,26 @@ def _provenance_parent(*, market_score=0.72, provenance=True, comments=12) -> di
+     }
+ 
+ 
+-def test_subject_search_provenance_can_open_a_strong_greek_conversation_parent():
++def test_search_provenance_alone_never_opens_a_paid_conversation_parent():
++    """v31.4 reversal, from run 20260925T094032Z-0e94d435.
++
++    The X/TikTok search Actors returned off-query rows (a Tsipras interview, a
++    pastitsio video) for the Eurojackpot routes; those rows carried
++    subject_search_provenance=True and a strong Greek market score, so the
++    provenance tier made them PAID comment parents — 99 comments about nothing.
++    Provenance is a routing fact, not subject evidence.
++    """
+     row = _provenance_parent()
+-    assert _comment_parent_candidate_tier("facebook", row) == "provenance"
+-    refs, meta, _ = _comment_seed_refs("facebook", [row], max_seeds=5)
+-    assert refs == ["https://www.facebook.com/example/posts/123"]
+-    assert meta[0]["qualification_tier"] == "provenance"
+-    assert meta[0]["market_score"] == pytest.approx(0.72)
++    assert _comment_parent_candidate_tier("facebook", row) is None
++    refs, _, mode = _comment_seed_refs("facebook", [row], max_seeds=5)
++    assert refs == [] and mode == "no_relevant_parent_rows"
+ 
+ 
+-def test_provenance_keeps_real_greeklish_market_signal():
+-    assert _comment_parent_candidate_tier(
+-        "facebook", _provenance_parent(market_score=0.30)
+-    ) == "provenance"
++def test_a_parent_that_names_the_subject_is_still_direct():
++    row = _provenance_parent()
++    row["cleaning"]["reasons"] = ["core_term:eurojackpot", "greek_script"]
++    row["cleaning"]["flags"] = []
++    assert _comment_parent_candidate_tier("facebook", row) == "direct"
+ 
+ 
+ def test_provenance_never_overrides_market_or_random_post_guards():
+-- 
+2.43.0
+
