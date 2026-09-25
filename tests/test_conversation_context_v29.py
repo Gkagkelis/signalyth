@@ -204,9 +204,11 @@ class TestInstagramAndTheProbe:
         assert "Eurojackpot" in blob or "eurojackpot" in blob
 
     def test_the_probe_is_large_enough_to_measure_market_yield_but_bounded(self):
-        assert semantic_broad_probe_target(40) == 60
-        assert semantic_broad_probe_target(200) == 60
-        assert semantic_broad_probe_target(8) == 12
+        # Audited contract: a minority route — <= half the target, hard cap 20.
+        assert semantic_broad_probe_target(40) == 20
+        assert semantic_broad_probe_target(200) == 20
+        assert semantic_broad_probe_target(20) == 10
+        assert semantic_broad_probe_target(8) == 5
         assert semantic_broad_probe_target(0) == 0
 
     def test_native_filter_sources_need_no_probe(self):

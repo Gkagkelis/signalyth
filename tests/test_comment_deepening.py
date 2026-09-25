@@ -12,12 +12,12 @@ def test_comment_input_shapes_are_actor_specific():
     x = build_comment_deepening_input(
         "x", ["https://x.com/u/status/123"], 7, max_per_parent=7,
     )
-    assert x["mode"] == "thread"
-    assert x["threadTweetIds"] == ["123"]
+    assert x["mode"] == "replies"
+    assert x["replyTweetIds"] == ["123"]
     assert x["maxItemsPerTarget"] == 7
     assert build_comment_deepening_input("tiktok", ["https://www.tiktok.com/@u/video/123"], 9)["includeReplies"] is True
     ig = build_comment_deepening_input("instagram", ["https://www.instagram.com/p/ABC/"], 12, max_per_parent=5)
-    assert ig == {"postUrls": ["https://www.instagram.com/p/ABC/"], "maxCommentsPerPost": 5, "sortOrder": "recent"}
+    assert ig == {"postUrls": ["https://www.instagram.com/p/ABC/"], "maxCommentsPerPost": 5, "sortOrder": "recent_activity"}
     fb = build_comment_deepening_input(
         "facebook", ["https://www.facebook.com/x/posts/1"], 12,
         max_per_parent=6, include_replies=True,

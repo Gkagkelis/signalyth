@@ -73,9 +73,11 @@ def test_instagram_topic_only_uses_bare_subject_only_as_semantic_probe(monkeypat
 
 
 def test_broad_probe_can_measure_low_market_yield_without_becoming_unbounded():
-    assert semantic_broad_probe_target(20) == 30
-    assert semantic_broad_probe_target(40) == 60
-    assert semantic_broad_probe_target(500) == 60
+    # 1.5x was not "bounded": at target 20 it bought 30 global rows, i.e. the
+    # probe outweighed the anchored sample. Minority route, hard cap 20.
+    assert semantic_broad_probe_target(20) == 10
+    assert semantic_broad_probe_target(40) == 20
+    assert semantic_broad_probe_target(500) == 20
 
 
 def test_native_market_post_actors_keep_their_market_controls(monkeypatch):
@@ -103,15 +105,15 @@ def test_x_primary_search_allocates_capacity_per_target(monkeypatch):
         assert inp["maxItems"] >= inp["maxItemsPerTarget"]
 
 
-@pytest.mark.parametrize("field", ["postUrls", "threadTweetIds", "startUrls", "directUrls"])
+@pytest.mark.parametrize("field", ["postUrls", "replyTweetIds", "threadTweetIds", "startUrls", "directUrls"])
 def test_resilience_knows_comment_and_parent_multi_target_fields(field):
     assert field in MULTI_TARGET_FIELDS
 
 
 def test_comment_contracts_are_explicit_for_every_production_social():
-    assert comment_actor_contract("x")["reply_depth"] == "thread"
+    assert comment_actor_contract("x")["reply_depth"] == "direct"
     assert comment_actor_contract("tiktok")["parent_batch_limit"] == 1
-    assert comment_actor_contract("instagram")["sort"] == "recent"
+    assert comment_actor_contract("instagram")["sort"] == "recent_activity"
     assert comment_actor_contract("facebook")["sort"] == "newest"
     assert comment_actor_contract("facebook")["reply_depth"] == "top_level"
 
@@ -125,8 +127,8 @@ def test_x_comment_contract_is_threaded_per_target_and_exact_dated():
         date_from=date(2026, 9, 14),
         date_to=date(2026, 9, 23),
     )
-    assert inp["mode"] == "thread"
-    assert inp["threadTweetIds"] == ["123"]
+    assert inp["mode"] == "replies"
+    assert inp["replyTweetIds"] == ["123"]
     assert inp["maxItemsPerTarget"] == 11
     assert inp["since"] == "2026-09-14_00:00:00_UTC"
     assert inp["until"] == "2026-09-24_00:00:00_UTC"
