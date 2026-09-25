@@ -658,6 +658,13 @@ def execute_plan(
                         max_charge_usd=float(sr["max_charge_usd"]),
                         rate_per_1000=sp.get("price_per_1000_hint"),
                         max_calls=int(sr.get("max_attempt_calls", 6) or 6),
+                        # A blocking Actor call is minutes of silence; the ≤20s
+                        # heartbeat thread keeps status.json fresh so a worker
+                        # death is visible from the API. sync() is lock-guarded.
+                        heartbeat=lambda _note, _s=source, _p=purpose: sync(
+                            f"{_s}: collecting {_p}", _s,
+                            code="collecting_purpose", purpose=_p,
+                        ),
                     )
                     charged = guard.settle(reservation, resilient.accounted_cost_usd)
                 except Exception as exc:
