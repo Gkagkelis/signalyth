@@ -270,7 +270,10 @@ class MidSourceCutTest(unittest.TestCase):
                         f"the source never finished: {row_after}")
 
         buckets = {str(b) for b in (row_after.get("buckets_done") or [])}
-        self.assertEqual(buckets, {"owned", "open", "backfill"}, row_after)
+        # v31.7's per-author parent cap makes same-page parents flow 2 at a
+        # time through the bounded extra waves, so open_extra_* buckets may
+        # legitimately appear; the three core passes must still all be done.
+        self.assertLessEqual({"owned", "open", "backfill"}, buckets, row_after)
 
         final = len(self.store.read(folder / "normalized-comments-facebook.json", []) or [])
         self.assertGreaterEqual(final, owned_now,
