@@ -625,6 +625,31 @@ class RunStore:
             )
         return True, "the saved copy matches the run's progress"
 
+    def reconcile_normalized_total(self, folder: Path) -> int | None:
+        """Make the status sample counter match the evidence actually on disk.
+
+        A pre-v31.6 semantic refill could rewrite normalized-all smaller while
+        the counter kept the larger number; ``evidence_intact`` then read an
+        honest workspace as data loss and failed the run at the finish line.
+        This is called ONLY where the operator explicitly rebuilds from the
+        evidence that exists (full reprocess) — never before the evidence
+        guard on an ordinary resume, where a shrunken workspace may be REAL
+        loss that must keep stopping the run.
+        """
+        rows = self.read(folder / "normalized-all.json", None)
+        if not isinstance(rows, list):
+            return None
+        try:
+            status = self.read(folder / "status.json", {}) or {}
+            if not isinstance(status, dict):
+                return len(rows)
+            if int(status.get("normalized_total") or 0) != len(rows):
+                status["normalized_total"] = len(rows)
+                self.write_status_folder(folder, status)
+        except Exception:
+            pass
+        return len(rows)
+
     def _record_durability(self, run_id: str, **fields) -> None:
         """Write down whether this run's evidence is actually saved.
 
