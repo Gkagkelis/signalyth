@@ -65,6 +65,8 @@ jobs:
           tests/test_v30_conversation_acquisition.py
           tests/test_market_routes_v26.py
           tests/test_page_never_reaches_comments_v23.py
+          tests/test_comment_deepening.py
+          tests/test_comment_parent_routing_v23.py
           tests/test_cold_handoff_v21.py
       - name: Full regression suite
         run: pytest -q --tb=short
