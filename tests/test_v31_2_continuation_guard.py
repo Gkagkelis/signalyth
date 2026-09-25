@@ -132,3 +132,82 @@ class StuckAdaptiveStepTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HardKilledWorkerTest(StuckAdaptiveStepTest):
+    """The worker dies INSIDE the step (no graceful hand-off) and stale-run
+    recovery resumes it. That path never reached the guard before."""
+
+    def test_a_step_a_dead_worker_left_running_counts_as_a_continuation(self):
+        run_id = self.store.create(self._plan())[0]
+        calls = []
+
+        def adaptive_that_finishes(folder, *, plan, initial_report, **kwargs):
+            calls.append(1)
+            status = self.store.read_status(run_id)
+            status.setdefault("comment_deepening", {})["facebook"] = {
+                "status": "running", "bucket": "open", "requested": 40, "collected": 0, "parents": 2}
+            self.store.write_status(run_id, status)
+            return {"report": initial_report, "audit": {"deadline_reached": False, "warnings": []}}
+
+        # Pretend two earlier workers already died inside this step at this exact state.
+        with patch("app.services.collector.ApifyRunner", FakeApify), \
+             patch("app.services.relevance_expansion.ApifyRunner", FakeApify), \
+             patch("app.services.ai_analysis.OpenAIResponsesProvider", FakeModel), \
+             patch("app.services.run_manager.adaptive_expand_after_cleaning", adaptive_that_finishes):
+            # First worker: runs collection + cleaning, enters adaptive, "dies" — we
+            # emulate the death by writing the state a dead worker leaves behind.
+            self.manager.enqueue(run_id)
+            done = _wait_terminal(self.store, run_id, timeout=240.0)
+        self.assertEqual(len(calls), 1)
+
+        # Now emulate stale-run recovery re-entering twice more at the same state.
+        from app.services.run_manager import adaptive_progress_fingerprint, update_adaptive_continuation_guard
+        status = self.store.read_status(run_id)
+        fp = adaptive_progress_fingerprint(self.store, self.store.folder_for(run_id), status)
+        status["adaptive_collection"] = {**(status.get("adaptive_collection") or {}), "status": "running"}
+        update_adaptive_continuation_guard(status, fp)
+        update_adaptive_continuation_guard(status, fp)
+        self.assertEqual(status["adaptive_continuation_guard"]["count"], 2)
+        self.assertFalse(status["adaptive_continuation_guard"].get("tripped"))
+        self.store.write_status(run_id, status)
+
+        # The third re-entry at the same state must trip the guard on ENTRY,
+        # before the step is resumed yet again.
+        from app.services.run_manager import close_adaptive_step_without_progress
+        entry = self.store.read_status(run_id)
+        guard = update_adaptive_continuation_guard(
+            entry, adaptive_progress_fingerprint(self.store, self.store.folder_for(run_id), entry))
+        self.assertTrue(guard.get("tripped"))
+
+
+class LostAnalysisFilesTest(StuckAdaptiveStepTest):
+    """Run 20260925T094032Z-0e94d435: the analysis finished on a worker that was
+    replaced before its files reached the archive, and the run FAILED at the
+    intelligence stage although the whole collection was intact."""
+
+    def test_the_run_rebuilds_the_analysis_once_instead_of_failing(self):
+        import app.services.run_manager as rm
+        run_id = self.store.create(self._plan())[0]
+        real_analyze = rm.analyze_run
+        wiped = []
+
+        def analyze_then_lose_files(folder, **kwargs):
+            report = real_analyze(folder, **kwargs)
+            if not wiped:      # emulate the hand-off that lost the workspace
+                (folder / "analysis" / "analysis-ready.json").unlink(missing_ok=True)
+                wiped.append(1)
+            return report
+
+        with patch("app.services.collector.ApifyRunner", FakeApify), \
+             patch("app.services.relevance_expansion.ApifyRunner", FakeApify), \
+             patch("app.services.ai_analysis.OpenAIResponsesProvider", FakeModel), \
+             patch("app.services.run_manager.analyze_run", analyze_then_lose_files):
+            self.manager.enqueue(run_id)
+            done = _wait_terminal(self.store, run_id, timeout=240.0)
+
+        self.assertNotEqual(done.get("status"), "failed", msg=f"fatal_error={done.get('fatal_error')}")
+        self.assertEqual(int(done.get("analysis_rebuild_attempts") or 0), 1)
+        folder = self.store.folder_for(run_id)
+        self.assertTrue((folder / "analysis" / "analysis-ready.json").exists())
+        self.assertIsInstance(self.store.read(folder / "intelligence" / "summary.json", None), dict)

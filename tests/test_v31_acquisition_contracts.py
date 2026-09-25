@@ -163,19 +163,26 @@ def _provenance_parent(*, market_score=0.72, provenance=True, comments=12) -> di
     }
 
 
-def test_subject_search_provenance_can_open_a_strong_greek_conversation_parent():
+def test_search_provenance_alone_never_opens_a_paid_conversation_parent():
+    """v31.4 reversal, from run 20260925T094032Z-0e94d435.
+
+    The X/TikTok search Actors returned off-query rows (a Tsipras interview, a
+    pastitsio video) for the Eurojackpot routes; those rows carried
+    subject_search_provenance=True and a strong Greek market score, so the
+    provenance tier made them PAID comment parents — 99 comments about nothing.
+    Provenance is a routing fact, not subject evidence.
+    """
     row = _provenance_parent()
-    assert _comment_parent_candidate_tier("facebook", row) == "provenance"
-    refs, meta, _ = _comment_seed_refs("facebook", [row], max_seeds=5)
-    assert refs == ["https://www.facebook.com/example/posts/123"]
-    assert meta[0]["qualification_tier"] == "provenance"
-    assert meta[0]["market_score"] == pytest.approx(0.72)
+    assert _comment_parent_candidate_tier("facebook", row) is None
+    refs, _, mode = _comment_seed_refs("facebook", [row], max_seeds=5)
+    assert refs == [] and mode == "no_relevant_parent_rows"
 
 
-def test_provenance_keeps_real_greeklish_market_signal():
-    assert _comment_parent_candidate_tier(
-        "facebook", _provenance_parent(market_score=0.30)
-    ) == "provenance"
+def test_a_parent_that_names_the_subject_is_still_direct():
+    row = _provenance_parent()
+    row["cleaning"]["reasons"] = ["core_term:eurojackpot", "greek_script"]
+    row["cleaning"]["flags"] = []
+    assert _comment_parent_candidate_tier("facebook", row) == "direct"
 
 
 def test_provenance_never_overrides_market_or_random_post_guards():

@@ -248,7 +248,14 @@ class LifecycleTests(unittest.TestCase):
         ai_report = {"ruleset_version":"0.9.0", "prompt_version":"signalyth-semantic-v0.9", "generated_at":"2026-09-03T11:00:00+00:00", "analysis_ready_records":1, "review_records":0}
         intelligence_report = {"ruleset_version":"1.0.0", "methodology_version":"signalyth-intelligence-v1", "generated_at":"2026-09-03T11:01:00+00:00", "brand_reputation":{"index":60.0}}
         investigation_report = {"ruleset_version":"1.1.0", "methodology_version":"signalyth-investigations-v1", "evidence_contract_version":"signalyth-evidence-pack-v1.1", "generated_at":"2026-09-03T11:02:00+00:00", "investigation_count":1, "indicator_contract":{"required":25,"examined":25,"available":10,"omitted":0,"complete":True}}
-        with patch("app.services.collector.ApifyRunner", FastRunner), patch("app.services.run_manager.clean_run", return_value=clean_report), patch("app.services.run_manager.analyze_run", return_value=ai_report) as ai_call, patch("app.services.run_manager.build_intelligence", return_value=intelligence_report) as intel_call, patch("app.services.run_manager.build_investigations", return_value=investigation_report) as inv_call, patch("app.services.run_manager.build_visualizations", return_value={"ruleset_version":"1.2.0", "methodology_version":"signalyth-visual-intelligence-v1", "visual_contract_version":"signalyth-visual-pack-v1.2", "generated_at":"2026-09-03T11:03:00+00:00", "chart_count":8, "indicator_contract":{"required":25,"examined":25,"complete":True}}) as viz_call:
+        # v31.4: a real analysis leaves analysis/analysis-ready.json behind; the
+        # worker now rebuilds the analysis once if that file is missing at the
+        # intelligence stage, so the fake must produce it like the real one.
+        def fake_analyze(folder, **kwargs):
+            (folder / "analysis").mkdir(parents=True, exist_ok=True)
+            (folder / "analysis" / "analysis-ready.json").write_text('[{"id": "r1"}]', encoding="utf-8")
+            return ai_report
+        with patch("app.services.collector.ApifyRunner", FastRunner), patch("app.services.run_manager.clean_run", return_value=clean_report), patch("app.services.run_manager.analyze_run", side_effect=fake_analyze) as ai_call, patch("app.services.run_manager.build_intelligence", return_value=intelligence_report) as intel_call, patch("app.services.run_manager.build_investigations", return_value=investigation_report) as inv_call, patch("app.services.run_manager.build_visualizations", return_value={"ruleset_version":"1.2.0", "methodology_version":"signalyth-visual-intelligence-v1", "visual_contract_version":"signalyth-visual-pack-v1.2", "generated_at":"2026-09-03T11:03:00+00:00", "chart_count":8, "indicator_contract":{"required":25,"examined":25,"complete":True}}) as viz_call:
             self.manager.enqueue(run_id)
             done = wait_terminal(self.store, run_id)
         self.assertEqual(done['status'], 'succeeded')
