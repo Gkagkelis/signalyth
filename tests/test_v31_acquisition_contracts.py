@@ -84,7 +84,7 @@ def test_native_market_post_actors_keep_their_market_controls(monkeypatch):
     news = build_collection_plan(_topic_only_draft("news")).model_dump(mode="json")["sources"][0]
 
     assert all(sr["input"].get("location") == "GR" for sr in tiktok["subruns"])
-    assert all(sr["input"].get("gl") == "GR" and sr["input"].get("hl") == "el" for sr in youtube["subruns"])
+    assert all(sr["input"].get("gl") == "gr" and sr["input"].get("hl") == "el" for sr in youtube["subruns"])
     assert all(sr["input"].get("country") == "GR" and sr["input"].get("language") == "el" for sr in news["subruns"])
 
 
