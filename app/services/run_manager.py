@@ -842,6 +842,10 @@ class RunManager:
                     plan=plan,
                     cancel_check=lambda: self.store.cancel_requested_folder(folder),
                 )
+                # The operator chose to rebuild from the evidence that exists, so
+                # a sample counter a pre-v31.6 refill left stale is reconciled
+                # here — otherwise the healed run keeps failing honest resumes.
+                self.store.reconcile_normalized_total(folder)
                 self._complete_reprocess_stage(run_id, "cleaning", report, "ai_analysis")
                 stage = "ai_analysis"
                 if self._reprocess_deadline_checkpoint(run_id, stage):

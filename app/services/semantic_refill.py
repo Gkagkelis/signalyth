@@ -65,14 +65,19 @@ def semantic_refill(folder: Path, plan: dict, cancel_check: Callable[[], bool] |
                 rec=recover_mapping(source,data_rows,current=mapping)
                 if rec.get("mapping"): normalized=normalize_dataset_with_audit(source,data_rows,mapping=rec["mapping"])["rows"]
             normalized=[r for r in normalized if in_range(r,date_from,date_to)]
-            # Keep enough candidate headroom for semantic filtering; stable ids dedupe.
-            dedup={str(r.get("id")):r for r in normalized if r.get("id")}; normalized=list(dedup.values())[:max(target*2,target)]
+            before=store.read(folder/f"normalized-{source}.json",[]) or []; before_ids={str(r.get("id")) for r in before if r.get("id")}
+            # Already-collected evidence is PAID and is never dropped here. Run
+            # 20260925T130636Z-c55323ad: this rewrite used to truncate the whole
+            # rebuilt file to 2x target (48 -> 40 for facebook), silently deleting
+            # six paid records; the stale sample counter then failed the evidence
+            # guard and the finished run died at exports. The candidate-headroom
+            # cap applies only to the NEW rows this refill call bought.
+            new_rows=[r for r in normalized if r.get("id") and str(r.get("id")) not in before_ids][:max(target*2,target)]
             # Comment/reply evidence is a separate acquired layer and must survive a
             # later primary semantic refill. Merge it back before rewriting the source file.
             comment_rows=store.read(folder/f"normalized-comments-{source}.json",[]) or []
-            normalized_dedup={str(r.get("id")):r for r in [*normalized,*comment_rows] if r.get("id")}
-            normalized=list(normalized_dedup.values())
-            before=store.read(folder/f"normalized-{source}.json",[]) or []; before_ids={str(r.get("id")) for r in before if r.get("id")}
+            merged={str(r.get("id")):r for r in [*before,*new_rows,*comment_rows] if r.get("id")}
+            normalized=list(merged.values())
             store.write(folder/f"normalized-{source}.json",normalized)
             audit["added_normalized"] += sum(1 for r in normalized if str(r.get("id")) not in before_ids)
             audit["steps"].append({"source":source,"shortfall":short,"requested":wanted,"returned":len(result.items),"normalized":len(normalized),"charged_usd":round(charged,6),"status":result.status})
@@ -83,6 +88,10 @@ def semantic_refill(folder: Path, plan: dict, cancel_check: Callable[[], bool] |
     all_rows=[]
     for sp in plan.get("sources",[]) or []: all_rows.extend(store.read(folder/f"normalized-{sp.get('source')}.json",[]) or [])
     all_dedup={str(r.get("id")):r for r in all_rows if r.get("id")}; store.write(folder/"normalized-all.json",list(all_dedup.values()))
-    status=store.read(folder/"status.json",{}) or {}; status["budget"]={**(status.get("budget") or {}),"spent_usd":round(spent,6),"remaining_usd":round(remaining,6)}; store.write_status_folder(folder,status)
+    status=store.read(folder/"status.json",{}) or {}; status["budget"]={**(status.get("budget") or {}),"spent_usd":round(spent,6),"remaining_usd":round(remaining,6)}
+    # The sample counter must always describe the file it claims to count, or the
+    # evidence guard reads an honest workspace as data loss and kills the run.
+    status["normalized_total"]=len(all_dedup)
+    store.write_status_folder(folder,status)
     audit["status"]="attempted" if any_call else (audit.get("status") or "not_needed"); audit["after_candidate_total"]=len(all_dedup); store.write(folder/"semantic-refill.json",audit)
     return audit
