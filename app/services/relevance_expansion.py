@@ -517,34 +517,21 @@ def _comment_parent_candidate_allowed(source: str, row: dict) -> bool:
 
 
 def _comment_parent_candidate_tier(source: str, row: dict) -> str | None:
-    """Return direct or provenance for a safe conversation parent."""
+    """Which qualification a PAID open comment parent holds: "direct" or none.
+
+    v31 briefly added a "provenance" tier: a post could become a paid comment
+    parent merely because a subject-anchored search route returned it, even
+    when its own text never mentioned the subject. Run 20260925T094032Z showed
+    why that cannot work: the X and TikTok search Actors return off-query rows
+    when real matches are scarce (a Tsipras interview, a pastitsio video), so
+    "came from the Eurojackpot search" proved nothing — and 99 comments were
+    bought under those posts. Search provenance is a routing fact, not subject
+    evidence. An open parent must carry the subject itself (core term/alias);
+    the operator's own pages keep their separate, explicit "operator" tier.
+    """
     if _comment_parent_candidate_allowed(source, row):
         return "direct"
-    if str(row.get("platform") or "") != source or str(row.get("evidence_layer") or "primary") != "primary":
-        return None
-    if not _seed_ref(source, row) or not bool(row.get("subject_search_provenance")):
-        return None
-    cleaning = row.get("cleaning") if isinstance(row.get("cleaning"), dict) else {}
-    flags = {str(x) for x in (cleaning.get("flags") or [])}
-    reasons = {str(x) for x in (cleaning.get("reasons") or [])}
-    if flags & {"exact_duplicate","near_duplicate_same_author","syndicated_duplicate_content","explicit_exclusion_context","likely_automated"}:
-        return None
-    if reasons & {"duplicate_not_independent_evidence","explicit_exclusion_context","high_spam_risk","high_automation_or_manipulation_risk","outside_target_market"}:
-        return None
-    try:
-        # Provenance parents still need positive Greek-market evidence, but
-        # 0.45 was too high for legitimate Greeklish prose: two independent
-        # Greeklish markers score 0.30 by design. Keep a stronger-than-review
-        # floor without silently deleting that audience.
-        if float(cleaning.get("market_score", 0) or 0) < max(0.30, float(RULESET_CONFIG["market_review_below"])):
-            return None
-        if float(cleaning.get("spam_score", 0) or 0) >= float(RULESET_CONFIG["spam_exclude_at"]):
-            return None
-    except Exception:
-        return None
-    if str(cleaning.get("authenticity_status") or "") == "likely_automated":
-        return None
-    return "provenance"
+    return None
 
 
 def _collect_seeds(source: str, rows: list[dict], max_seeds: int, skip_reported_zero: bool) -> tuple[list[str], list[dict]]:
@@ -944,11 +931,20 @@ def _conversation_probe_input(
     date_from: date,
     date_to: date,
 ) -> dict:
+    """The parent probe looks for CONVERSATION, so it asks each Actor for its
+    engagement-ranked results, not its newest. Newest-first discovery (what
+    the evidence sample rightly uses) surfaced syndicated draw bulletins with
+    0-1 comments each (run 20260925T094032Z: seven Facebook parents, two
+    comments). Every value below is a documented enum of that Actor:
+    scraper_one searchType top|latest, epctex sortType MOST_LIKED, xquik
+    queryType Top. The research window still applies.
+    """
     inp = _limit_adaptive_input(source, actor_input, wanted)
     parent_from = date_from - timedelta(days=PARENT_LOOKBACK_DAYS)
     until_exclusive = date_to + timedelta(days=1)
     if source == "facebook":
         inp["resultsCount"] = wanted
+        inp["searchType"] = "top"
         inp["startDate"] = parent_from.isoformat()
         inp["endDate"] = date_to.isoformat()
     elif source == "instagram":
@@ -956,10 +952,12 @@ def _conversation_probe_input(
         inp["onlyPostsNewerThan"] = parent_from.isoformat()
     elif source == "x":
         inp["maxItems"] = wanted
+        inp["queryType"] = "Top"
         inp["since"] = f"{parent_from.isoformat()}_00:00:00_UTC"
         inp["until"] = f"{until_exclusive.isoformat()}_00:00:00_UTC"
     elif source == "tiktok":
         inp["maxItems"] = wanted
+        inp["sortType"] = "MOST_LIKED"
     return inp
 
 

@@ -38,7 +38,16 @@ class ApifyRunner:
             raise CollectionNotConfigured("apify-client is not installed.") from exc
         self.client = ApifyClient(settings.apify_token)
 
+    #: Extra seconds we wait for the Actor to be SCHEDULED and finish on top
+    #: of its own run timeout. The run timeout only starts once the Actor is
+    #: running; a run parked in READY (no free memory on the account because
+    #: other Actors of ours are still running) never reaches it, and without a
+    #: client-side wait our worker blocked forever — run 20260925T094032Z
+    #: stopped writing status at 09:45 UTC inside exactly such a call.
+    WAIT_MARGIN_SECONDS = 90.0
+
     def run(self, actor_id: str, run_input: dict, *, max_items: int, max_charge_usd: float) -> tuple[dict, list[dict]]:
+        timeout_s = float(actor_run_timeout_seconds(actor_id))
         run = self.client.actor(actor_id).call(
             run_input=run_input,
             max_items=max_items,
@@ -46,11 +55,28 @@ class ApifyRunner:
             # A single slow provider must not hold the whole SIGNALYTH pipeline forever.
             # Apify terminates the Actor run itself at this limit; resilience logic can
             # then isolate the failure and continue with later batches/sources.
-            run_timeout=timedelta(seconds=actor_run_timeout_seconds(actor_id)),
+            run_timeout=timedelta(seconds=timeout_s),
+            # ...and WE stop waiting shortly after that limit, whatever state
+            # the run is in. call() otherwise waits indefinitely.
+            wait_duration=timedelta(seconds=timeout_s + self.WAIT_MARGIN_SECONDS),
         )
         if not run:
             raise RuntimeError(f"Actor {actor_id} returned no run object")
         meta = _run_to_dict(run)
+        state = str(meta.get("status") or "").upper()
+        if state and state not in {"SUCCEEDED", "FAILED", "ABORTED", "TIMED-OUT", "TIMING-OUT", "ABORTING"}:
+            # Still READY/RUNNING after our wait window: give the slot back and
+            # report it as a provider timeout so the pipeline isolates it.
+            run_id = meta.get("id")
+            if run_id:
+                try:
+                    self.client.run(str(run_id)).abort()
+                except Exception:
+                    pass
+            raise RuntimeError(
+                f"Actor {actor_id} run did not finish within {int(timeout_s + self.WAIT_MARGIN_SECONDS)}s "
+                f"(status={state or 'unknown'}) — timed out and aborted"
+            )
         dataset_id = meta.get("defaultDatasetId") or meta.get("default_dataset_id")
         if not dataset_id:
             raise RuntimeError(f"Actor {actor_id} returned no dataset")

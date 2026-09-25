@@ -1025,7 +1025,17 @@ class RunManager:
                 int(report.get("trusted_sample_shortfall", 0) or 0) > 0
                 or bool(plan.get("comments_requested"))
             )
-            guard_before = dict((self.store.read_status(run_id).get("adaptive_continuation_guard") or {}))
+            entry_status = self.store.read_status(run_id)
+            if str((entry_status.get("adaptive_collection") or {}).get("status") or "") in UNFINISHED_STEP_STATES:
+                # A previous worker died INSIDE this step (hard kill, no graceful
+                # deadline hand-off) and the stale-run resume brought us here.
+                # That is a continuation too, and it must count against the same
+                # limit — otherwise a call that never returns loops forever.
+                guard_before = update_adaptive_continuation_guard(
+                    entry_status, adaptive_progress_fingerprint(self.store, folder, entry_status))
+                self.store.write_status(run_id, entry_status)
+            else:
+                guard_before = dict(entry_status.get("adaptive_continuation_guard") or {})
             if guard_before.get("tripped"):
                 # A previous continuation already decided this step cannot
                 # progress. Close it honestly (idempotent) and move on.
@@ -1340,6 +1350,32 @@ class RunManager:
             return  # superseded by a newer worker invocation
         status.setdefault("progress", {})["percent"] = 96
         self.store.write_status(run_id, status)
+        if not (folder / "analysis" / "analysis-ready.json").exists():
+            # The analysis finished on a worker that was replaced before its
+            # files reached the archive (run 20260925T094032Z-0e94d435). The
+            # OpenAI batch cache is durable, so re-running the analysis is
+            # cheap; failing the run here threw away a complete collection.
+            rebuilds = int(status.get("analysis_rebuild_attempts") or 0)
+            if rebuilds < 1:
+                status = self.store.read_status(run_id)
+                status.update({
+                    "status": "queued",
+                    "phase": "cleaning",
+                    "fatal_error": None,
+                    "analysis_rebuild_attempts": rebuilds + 1,
+                    "current": {"source": None, "code": "analysis_rebuild",
+                                "message": "Analysis files were lost in a worker hand-off; rebuilding the analysis from the saved evidence"},
+                })
+                self.store.write_status(run_id, status)
+                try:
+                    self.store.checkpoint_run(run_id)
+                except Exception:
+                    pass
+                try:
+                    self._requeue_continuation(run_id)
+                except Exception:
+                    pass
+                return
         try:
             intelligence = build_intelligence(folder, plan=plan)
         except Exception as exc:
