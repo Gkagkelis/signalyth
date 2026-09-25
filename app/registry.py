@@ -17,9 +17,9 @@ HISTORY_PATH = RUNTIME_CONFIG_DIR / "source_registry_history.json"
 BASE_REGISTRY_PATH = BASE_DIR / "config" / "source_registry.json"
 BASE_HISTORY_PATH = BASE_DIR / "config" / "source_registry_history.json"
 
-COMMENT_ROLLOUT_VERSION = "comments-production-ready-v3"
+COMMENT_ROLLOUT_VERSION = "comments-production-ready-v4"
 COMMENT_PRODUCTION_ROLLOUT = {
-    "x": {"actor_id": "xquik/x-tweet-scraper", "route": "thread", "input_field": "threadTweetIds", "price": 0.15, "include_replies": True},
+    "x": {"actor_id": "xquik/x-tweet-scraper", "route": "replies", "input_field": "replyTweetIds", "price": 0.15, "include_replies": True},
     "tiktok": {"actor_id": "epctex/tiktok-comment-scraper", "route": "comments", "input_field": "startUrls", "price": 0.30, "include_replies": True},
     "instagram": {"actor_id": "scrapesmith/instagram-comments-scraper", "route": "comments", "input_field": "postUrls", "price": 0.50, "include_replies": True},
     "facebook": {"actor_id": "scraper_one/facebook-comments-scraper", "route": "comments", "input_field": "postUrls", "price": 0.40, "include_replies": False},
