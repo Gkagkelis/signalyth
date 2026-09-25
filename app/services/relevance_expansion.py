@@ -21,6 +21,7 @@ from app.services.smart_collection import (
 from app.services.storage import RunStore
 from app.services.source_capabilities import (
     build_comment_deepening_input,
+    comment_actor_contract,
     comment_parent_batch_limit,
     is_comment_parent_ref,
     build_page_discovery_input,
@@ -87,6 +88,26 @@ def _charge_cap(
 TIKTOK_COMMENT_QUERY_USD = 0.003
 TIKTOK_REPLY_QUERY_USD = 0.003
 
+
+
+def _comment_per_parent_limit(
+    source: str,
+    wanted: int,
+    parent_count: int,
+    configured_max: int,
+) -> int:
+    """Bound per-parent actors to the logical batch shortfall.
+
+    A provider field such as Facebook resultsLimit or Instagram
+    maxCommentsPerPost is multiplied by the number of parents. Passing the
+    configured 40 to five parents for a 20-comment shortfall can ask the Actor
+    to produce up to 200 rows. Global-limit actors keep their own contract.
+    """
+    configured = max(1, int(configured_max or 1))
+    parents = max(1, int(parent_count or 1))
+    if comment_actor_contract(source).get("limit_scope") == "per_parent":
+        return min(configured, max(1, int(math.ceil(max(1, int(wanted or 1)) / parents))))
+    return configured
 
 
 def _comment_minimum_attempt_charge_usd(
@@ -1522,7 +1543,9 @@ def adaptive_expand_after_cleaning(
                     )
 
                     actor_wanted = batch_wanted
-                    actor_per_parent = max_per_parent
+                    actor_per_parent = _comment_per_parent_limit(
+                        source, batch_wanted, len(batch_refs), max_per_parent
+                    )
                     if source == "x":
                         actor_wanted += len(batch_refs)
                         actor_per_parent += 1
