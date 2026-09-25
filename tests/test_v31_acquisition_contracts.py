@@ -9,6 +9,7 @@ from app.models import AnalysisDraft
 from app.services.query_planner import build_collection_plan, semantic_broad_probe_target
 from app.services.relevance_expansion import (
     _comment_parent_candidate_tier,
+    _comment_per_parent_limit,
     _comment_seed_refs,
 )
 from app.services.resilience import DEFAULT_SAFE_BATCH_SIZE, MULTI_TARGET_FIELDS
@@ -187,6 +188,13 @@ def test_open_comment_harvest_advances_through_all_untried_cached_parents():
     assert 'if str(durable_bucket).startswith("open")' in source
     assert 'while (\n                source_comment_target > 0' in source
     assert 'exclude_refs=used_open_refs' in source
+
+
+def test_per_parent_comment_limits_follow_batch_shortfall_without_affecting_global_actors():
+    assert _comment_per_parent_limit("facebook", 20, 5, 40) == 4
+    assert _comment_per_parent_limit("instagram", 17, 5, 40) == 4
+    assert _comment_per_parent_limit("tiktok", 20, 5, 40) == 40
+    assert _comment_per_parent_limit("x", 20, 2, 40) == 40
 
 
 def test_facebook_comment_input_preserves_hotfix_contract_and_post_filters_dates():
