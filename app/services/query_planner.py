@@ -387,18 +387,23 @@ def budget_for_subrun(source_budget: float, shares: list[int], idx: int) -> floa
 
 
 def semantic_broad_probe_target(target: int) -> int:
-    """How many items the bare-subject probe may buy, ever.
+    """How many rows a bounded bare-subject probe may inspect.
 
     The broad/global route exists to recover natural mixed-language and
-    Greeklish mentions that every anchored route misses. It runs only AFTER
-    cleaning, only against a measured shortfall, and this cap means it can
-    never refill the sample with another country's conversation: at most a
-    quarter of the source target, and never more than 12 items.
+    Greeklish mentions that anchored routes can miss. It runs only AFTER
+    cleaning and only against a measured analyzable shortfall. It may over-fetch
+    raw candidates to measure low market yield, but every returned row still
+    passes the normal subject + market cleaner before becoming evidence. The
+    probe itself stays hard-capped at 60 raw rows.
     """
     target = max(0, int(target or 0))
     if target <= 0:
         return 0
-    return min(12, max(3, int(math.ceil(target * 0.25))))
+    # Broad recall is post-cleaning and therefore may safely over-fetch:
+    # final evidence still has to pass subject + market cleaning. A tiny 25%
+    # probe starved topic-only Facebook/Instagram briefs before Greece rows had
+    # a chance to appear. Keep it bounded, but large enough to measure yield.
+    return min(60, max(12, int(math.ceil(target * 1.5))))
 
 
 def instagram_discovery_tags(draft: AnalysisDraft) -> list[str]:
@@ -415,6 +420,10 @@ def instagram_discovery_tags(draft: AnalysisDraft) -> list[str]:
         for alias in routes["aliases"][:2]: tags.append(hashtag(alias))
         for term in [*routes["required"], *routes["contexts"]][:2]: tags.append(hashtag(f"{topic} {term}"))
         tags = uniq([t for t in tags if t])[:4]
+        # A subject-only market brief can legitimately have no safe local
+        # hashtag. Do NOT turn the bare global hashtag into primary evidence on
+        # a source with no country-wide filter; semantic_broad_probe handles the
+        # bounded post-cleaning fallback instead.
         return tags
     tags = [hashtag(topic)]
     for alias in routes["aliases"][:1]: tags.append(hashtag(alias))
@@ -595,10 +604,18 @@ def make_source_plan(source: str, target: int, draft: AnalysisDraft, queries: li
             primary = promoted
             topups = topups[len(promoted):]
     if source == "x" and draft.market.casefold() == "greece":
+        # Always keep one broad subject+Greek-language route. Without it, a
+        # topic-only Latin brand (Nike, Eurojackpot, Vodafone) was narrowed to
+        # literal Greece/Ellada terms and missed ordinary Greek-language speech.
+        lang_topic = f"{routes['topic']} lang:el"
+        if draft.search_strategy == "balanced_smart" and draft.smart_search:
+            lang_topic += " -filter:nativeretweets"
+        primary = uniq([lang_topic, *primary])
         # X is the one source with a native language operator; use it as the
         # single anchor on every route that does not already carry one.
         primary = uniq([greece_x_route_anchor(q) for q in primary])
         topups = uniq([greece_x_route_anchor(q) for q in topups])
+
     safe = max(1, int(get_safe_batch_size(source, actor)))
     source_budget = max(0.0, float(source_budget))
     has_topups = bool(topups) or source == "x"
@@ -617,7 +634,9 @@ def make_source_plan(source: str, target: int, draft: AnalysisDraft, queries: li
         shares = split_target(target, len(batches))
         caps = caps_for(shares, primary_budget)
         for i, (batch, share) in enumerate(zip(batches, shares)):
-            inp = {"mode": "search", "searchTerms": batch, "maxItems": share, "includeSearchTerms": True,
+            inp = {"mode": "search", "searchTerms": batch, "maxItems": share,
+                   "maxItemsPerTarget": max(1, math.ceil(share / max(1, len(batch)))),
+                   "includeSearchTerms": True,
                    "queryType": "Latest", "since": f"{draft.date_from.isoformat()}_00:00:00_UTC",
                    "until": f"{until_exclusive.isoformat()}_00:00:00_UTC"}
             purpose = "primary_global" if len(batches) == 1 else f"primary_route_{i+1}"
@@ -626,7 +645,9 @@ def make_source_plan(source: str, target: int, draft: AnalysisDraft, queries: li
         tbatches = batched(tq, safe)[:4]
         tcaps = [topup_budget / max(1, len(tbatches)) for _ in tbatches]
         for i, batch in enumerate(tbatches):
-            inp = {"mode": "search", "searchTerms": batch, "maxItems": target, "includeSearchTerms": True,
+            inp = {"mode": "search", "searchTerms": batch, "maxItems": target,
+                   "maxItemsPerTarget": max(1, math.ceil(target / max(1, len(batch)))),
+                   "includeSearchTerms": True,
                    "queryType": "Latest + Top", "since": f"{draft.date_from.isoformat()}_00:00:00_UTC",
                    "until": f"{until_exclusive.isoformat()}_00:00:00_UTC"}
             topup_subruns.append(_sub(actor, inp, target, tcaps[i], f"topup_latest_plus_top_{i+1}", draft))
@@ -660,7 +681,8 @@ def make_source_plan(source: str, target: int, draft: AnalysisDraft, queries: li
             primary_tag = tags[0]
             inp = {"directUrls": [f"https://www.instagram.com/explore/tags/{primary_tag.lower()}/"],
                    "resultsType": "posts", "resultsLimit": target,
-                   "onlyPostsNewerThan": draft.date_from.isoformat(), "addParentData": True}
+                   "onlyPostsNewerThan": draft.date_from.isoformat(),
+                   "skipPinnedPosts": True, "addParentData": True}
             subruns = [_sub(actor, inp, target, primary_budget, "primary_hashtag_posts", draft)]
             extra_tags = tags[1:4]
             for i, tag in enumerate(extra_tags):
@@ -735,6 +757,7 @@ def make_source_plan(source: str, target: int, draft: AnalysisDraft, queries: li
                 probe_inp = {"directUrls": [f"https://www.instagram.com/explore/tags/{hashtag(routes['topic']).lower()}/"],
                              "resultsType": "posts", "resultsLimit": cap_items,
                              "onlyPostsNewerThan": draft.date_from.isoformat(),
+                             "skipPinnedPosts": True,
                              "addParentData": True}
             semantic_subruns.append(
                 _sub(actor, probe_inp, cap_items, probe_budget,

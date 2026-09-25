@@ -1,10 +1,11 @@
-name: v30.2 validation
+name: v31 acquisition validation
 
 on:
   push:
     branches:
       - fix/v30-2-comment-conversation
       - fix/facebook-comment-harvest-now
+      - fix/v31-systemic-acquisition-contracts
     paths:
       - 'app/services/relevance_expansion.py'
       - 'app/services/source_capabilities.py'
@@ -13,6 +14,22 @@ on:
       - 'tests/test_v30_2_comment_conversation.py'
       - 'tests/test_comment_deepening.py'
       - 'tests/test_v30_conversation_acquisition.py'
+      - 'app/services/comment_deepening.py'
+      - 'app/services/cleaning.py'
+      - 'app/services/query_planner.py'
+      - 'app/services/resilience.py'
+      - 'app/main.py'
+      - 'tests/test_conversation_context_v29.py'
+      - 'tests/test_v31_acquisition_contracts.py'
+      - 'tests/test_master30_contract.py'
+      - 'tests/test_owned_pages_flow_v19.py'
+      - 'tests/test_relevance_expansion_v2.py'
+      - 'tests/test_smart_collection_v2.py'
+      - 'tests/test_v184_hardening.py'
+      - 'tests/test_worker_handoff_v20.py'
+      - 'tests/test_cold_handoff_v21.py'
+      - 'config/source_registry.json'
+      - 'app/registry.py'
       - '.github/workflows/v30-2-validation.yml'
 
 permissions:
@@ -40,7 +57,16 @@ jobs:
           pip install pytest
       - name: Compile
         run: python -m compileall -q app tests
-      - name: v30.2 focused regression
-        run: pytest -q tests/test_v30_2_comment_conversation.py
+      - name: v31 focused acquisition regression
+        run: >-
+          pytest -q
+          tests/test_v31_acquisition_contracts.py
+          tests/test_v30_2_comment_conversation.py
+          tests/test_v30_conversation_acquisition.py
+          tests/test_market_routes_v26.py
+          tests/test_page_never_reaches_comments_v23.py
+          tests/test_comment_deepening.py
+          tests/test_comment_parent_routing_v23.py
+          tests/test_cold_handoff_v21.py
       - name: Full regression suite
         run: pytest -q --tb=short

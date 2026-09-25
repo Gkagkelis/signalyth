@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from app.config import settings
+from app.services.source_capabilities import DISCOVERY_ACTOR_CONTRACTS
 
 
 #: Default Actor wall time. A small number of known slow production routes
@@ -21,7 +22,7 @@ FACEBOOK_COMMENT_RUN_TIMEOUT_SECONDS = 420.0
 
 def actor_run_timeout_seconds(actor_id: str) -> float:
     actor = str(actor_id or "").strip().casefold()
-    if actor == "scraper_one/facebook-comments-scraper":
+    if actor in {"scraper_one/facebook-comments-scraper", "apify/facebook-comments-scraper"}:
         return FACEBOOK_COMMENT_RUN_TIMEOUT_SECONDS
     return ACTOR_RUN_TIMEOUT_SECONDS
 
@@ -39,16 +40,13 @@ DIAGNOSTIC_STATUSES = {
     "no-input", "invalid-input", "replies-incomplete", "zero-output", "aborted", "unexpected-error",
 }
 MULTI_TARGET_FIELDS = (
-    "searchTerms", "search", "queries", "keywords", "directUrls", "startUrls", "replyTweetIds",
-    "conversationIds", "tweetIds", "urls",
+    "searchTerms", "search", "queries", "keywords", "directUrls", "startUrls",
+    "postUrls", "replyTweetIds", "threadTweetIds", "conversationIds",
+    "twitterHandles", "profiles", "tweetIds", "urls",
 )
 DEFAULT_SAFE_BATCH_SIZE = {
-    "x": 2,
-    "tiktok": 2,
-    "instagram": 1,
-    "facebook": 1,
-    "youtube": 2,
-    "news": 2,
+    source: max(1, int(contract.get("safe_target_batch") or 1))
+    for source, contract in DISCOVERY_ACTOR_CONTRACTS.items()
 }
 
 

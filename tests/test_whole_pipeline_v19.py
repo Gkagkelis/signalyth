@@ -107,11 +107,23 @@ class FakeApify:
                   "instagram" if "instagram" in actor_id else
                   "tiktok" if "tiktok" in actor_id else "x")
 
-        # Comments: the input carries parent references.
+        # Comments: identify the route by its actor/explicit comment controls,
+        # not merely by startUrls (Facebook page discovery also uses startUrls).
         parents = (run_input.get("postUrls") or run_input.get("startUrls")
-                   or run_input.get("replyTweetIds") or [])
-        is_comment_call = bool(run_input.get("postUrls") or run_input.get("replyTweetIds")
-                               or run_input.get("mode") == "replies")
+                   or run_input.get("replyTweetIds") or run_input.get("threadTweetIds") or [])
+        is_comment_call = bool(
+            run_input.get("postUrls")
+            or run_input.get("replyTweetIds")
+            or run_input.get("threadTweetIds")
+            or run_input.get("mode") in {"replies", "thread"}
+            or run_input.get("includeNestedComments")
+            or actor_id in {
+                "apify/facebook-comments-scraper",
+                "scraper_one/facebook-comments-scraper",
+                "epctex/tiktok-comment-scraper",
+                "scrapesmith/instagram-comments-scraper",
+            }
+        )
         if is_comment_call and parents:
             first = parents[0]
             parent = first.get("url") if isinstance(first, dict) else str(first)

@@ -39,7 +39,7 @@ def test_x_v2_uses_balanced_intents_and_current_actor_fields():
         assert inp["includeSearchTerms"] is True
         # Master30 removes permanent per-query quotas. Safe batching remains, but
         # the collector dynamically lets each route attempt the source shortfall.
-        assert "maxItemsPerTarget" not in inp
+        assert inp["maxItemsPerTarget"] >= 1
         assert len(inp["searchTerms"]) <= 2
         queries.extend(inp["searchTerms"])
     assert len(queries) >= 5

@@ -49,7 +49,7 @@ def test_facebook_rebalance_resize_does_not_reintroduce_200_cap():
 
 def test_comment_smoke_inputs_are_fail_closed_and_source_specific():
     x = build_comment_smoke_input("x", ["12345"], 3)
-    assert x == {"replyTweetIds":["12345"], "mode":"replies", "maxItems":3}
+    assert x == {"threadTweetIds":["12345"], "mode":"thread", "maxItems":3, "maxItemsPerTarget":3}
     fb = build_comment_smoke_input("facebook", ["https://www.facebook.com/page/posts/1"], 3)
     assert fb["postUrls"] == ["https://www.facebook.com/page/posts/1"]
     assert "mode" not in fb

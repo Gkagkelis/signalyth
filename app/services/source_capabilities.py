@@ -1,24 +1,147 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import date, timedelta
 import math
 import re
 from urllib.parse import parse_qs, urlparse
 
 # Public-schema capability knowledge. This is NOT a live verification record.
-# Companion Actors remain OFF until explicitly paid-smoke-tested and committed.
-# Provider input caps that must be respected by the orchestration layer.
-# scraper_one/facebook-comments-scraper currently accepts at most 5 postUrls
-# per Actor run. Sending a larger list is outside the published Actor schema and
-# can produce empty/invalid harvests even when the parent posts have comments.
-COMMENT_PARENT_BATCH_LIMITS = {
-    "facebook": 5,
+# Central acquisition contracts. These encode provider-specific semantics that
+# materially affect recall, batching, date/market guarantees and cost. They are
+# intentionally descriptive rather than pretending every provider has the same
+# knobs.
+DISCOVERY_ACTOR_CONTRACTS = {
+    "x": {
+        "actor_id": "xquik/x-tweet-scraper",
+        "target_field": "searchTerms",
+        "safe_target_batch": 2,
+        "limit_field": "maxItems",
+        "limit_scope": "global",
+        "per_target_limit_field": "maxItemsPerTarget",
+        "sort_field": "queryType",
+        "date_support": "native_exact_inclusive_from_exclusive_until",
+        "market_support": "query_language_geo",
+        "broad_recall": "subject_plus_lang_el_or_explicit_market; Greeklish must not be forced through lang:el",
+    },
+    "tiktok": {
+        "actor_id": "epctex/tiktok-search-scraper",
+        "target_field": "search",
+        "safe_target_batch": 1,
+        "limit_field": "maxItems",
+        "limit_scope": "global",
+        "sort_field": "sortType",
+        "date_support": "native_coarse_then_exact_post_filter",
+        "market_support": "location_iso_country",
+        "broad_recall": "bare subject allowed because native location=GR qualifies the market route",
+    },
+    "instagram": {
+        "actor_id": "apify/instagram-scraper",
+        "target_field": "directUrls",
+        "safe_target_batch": 1,
+        "limit_field": "resultsLimit",
+        "limit_scope": "per_source",
+        "sort_field": None,
+        "date_support": "native_lower_bound_then_exact_post_filter",
+        "market_support": "no_country_wide_filter",
+        "broad_recall": "bare subject hashtag only as bounded post-cleaning semantic probe on market runs",
+    },
+    "facebook": {
+        "actor_id": "scraper_one/facebook-posts-search",
+        "target_field": "query",
+        "safe_target_batch": 1,
+        "limit_field": "resultsCount",
+        "limit_scope": "per_query",
+        "query_max_length": 100,
+        "sort_field": "searchType",
+        "date_support": "native_exact",
+        "market_support": "query_context; location is pinned-place only, not country-wide Greece",
+        "broad_recall": "bare subject only as bounded post-cleaning semantic probe on market runs",
+    },
+    "youtube": {
+        "actor_id": "apidojo/youtube-scraper",
+        "target_field": "keywords",
+        "safe_target_batch": 1,
+        "limit_field": "maxItems",
+        "limit_scope": "global",
+        "sort_field": "sort",
+        "date_support": "native_coarse_then_exact_post_filter",
+        "market_support": "gl_country_plus_hl_language",
+        "broad_recall": "bare subject allowed because gl=GR/hl=el qualify the market route",
+    },
+    "news": {
+        "actor_id": "logiover/google-news-scraper",
+        "target_field": "queries",
+        "safe_target_batch": 2,
+        "limit_field": "maxArticles",
+        "limit_scope": "per_query_feed",
+        "limit_max": 500,
+        "sort_field": None,
+        "date_support": "native_exact",
+        "market_support": "country_plus_language",
+        "broad_recall": "bare subject allowed because country=GR/language=el qualify the market route",
+    },
 }
 
 
+def discovery_actor_contract(source: str) -> dict:
+    return deepcopy(DISCOVERY_ACTOR_CONTRACTS.get(str(source or "").casefold(), {}))
+
+
+# Acquisition contracts live here so provider semantics are not scattered across
+# orchestration code. These are deliberately conservative research defaults:
+# coverage and resumability matter more than minimizing Actor call count.
+COMMENT_ACTOR_CONTRACTS = {
+    # Xquik's maxItems is global across a run; maxItemsPerTarget prevents one
+    # thread from consuming the whole quota. mode=thread is used so nested
+    # conversation replies are not silently lost (mode=replies is direct-only).
+    "x": {
+        "parent_batch_limit": 2,
+        "limit_scope": "global",
+        "reply_depth": "thread",
+        "sort": "actor_thread",
+    },
+    # epctex maxItems is a run-level cap across startUrls. One parent per call
+    # guarantees every selected video receives an attempt.
+    "tiktok": {
+        "parent_batch_limit": 1,
+        "limit_scope": "global",
+        "reply_depth": "nested_when_includeReplies",
+        "sort": "actor_default",
+    },
+    # ScrapeSmith exposes a per-post cap. Small batches bound worker wall time;
+    # recent ordering protects exact-date-window research from old popular rows.
+    "instagram": {
+        "parent_batch_limit": 5,
+        "limit_scope": "per_parent",
+        "reply_depth": "nested",
+        "sort": "recent",
+    },
+    # Scraper One uses a per-post resultsLimit and newest-first ordering. Keep
+    # the five-parent cap from the production hotfix; do not leak that limit to
+    # other actors. This actor does not expose a nested-reply control.
+    "facebook": {
+        "parent_batch_limit": 5,
+        "limit_scope": "per_parent",
+        "reply_depth": "top_level",
+        "sort": "newest",
+    },
+}
+
+
+def comment_actor_contract(source: str) -> dict:
+    """Curated orchestration semantics for one comment/reply Actor."""
+    return deepcopy(COMMENT_ACTOR_CONTRACTS.get(str(source or "").casefold(), {
+        "parent_batch_limit": 1,
+        "limit_scope": "global",
+        "reply_depth": "unknown",
+        "sort": "actor_default",
+    }))
+
+
 def comment_parent_batch_limit(source: str) -> int:
-    """Maximum concrete parent refs safe in one comment Actor call."""
-    return max(1, int(COMMENT_PARENT_BATCH_LIMITS.get(str(source or "").casefold(), 40)))
+    """Maximum concrete parent refs sent in one comment Actor call."""
+    return max(1, int(comment_actor_contract(source).get("parent_batch_limit") or 1))
 
 
 SOURCE_CAPABILITIES = {
@@ -58,7 +181,7 @@ SOURCE_CAPABILITIES = {
             "public_schema_known": True,
             "live_verified": False,
             "enabled": False,
-            "note": "Companion Actor accepts Facebook post URLs and returns comment evidence.",
+            "note": "Scraper One accepts concrete Facebook post URLs, a per-post result limit, and newest/relevant/all sorting. Exact date bounds are enforced after normalization.",
         },
     },
     "tiktok": {
@@ -151,6 +274,7 @@ def comments_forecast(source: str, requested: bool, registry_cfg: dict | None = 
         "requested": bool(requested),
         "status": status,
         **cap,
+        "orchestration_contract": comment_actor_contract(source),
         "candidate_actor_id": configured_actor,
         "live_verified": live_verified,
         "contract_ready": contract_ready,
@@ -280,6 +404,8 @@ def build_comment_deepening_input(
     *,
     max_per_parent: int | None = None,
     include_replies: bool = True,
+    date_from: date | None = None,
+    date_to: date | None = None,
 ) -> dict:
     """Build the curated public-schema input shape for a comment/reply route."""
     cap = source_capabilities(source).get("comment_deepening") or {}
@@ -302,18 +428,35 @@ def build_comment_deepening_input(
     per_parent = max(1, int(max_per_parent or math.ceil(max_items / max(1, len(refs)))))
 
     if source == "x":
-        return {"mode": "replies", "replyTweetIds": [_x_id(x) for x in refs], "maxItems": max_items}
+        # "replies" is direct-only in Xquik. Thread mode preserves replies to
+        # replies; the normalizer drops the root tweet and keeps its descendants.
+        out = {
+            "mode": "thread",
+            "threadTweetIds": [_x_id(x) for x in refs],
+            "maxItems": max_items,
+            "maxItemsPerTarget": max(1, per_parent),
+        }
+        if date_from:
+            out["since"] = f"{date_from.isoformat()}_00:00:00_UTC"
+        if date_to:
+            until_exclusive = date_to + timedelta(days=1)
+            out["until"] = f"{until_exclusive.isoformat()}_00:00:00_UTC"
+        return out
     if source == "tiktok":
         return {"startUrls": refs, "includeReplies": bool(include_replies), "maxItems": max_items}
     if source == "instagram":
         # ScrapeSmith's schema uses a per-parent limit rather than maxItems.
-        return {"postUrls": refs, "maxCommentsPerPost": per_parent, "sortOrder": "popular"}
+        return {"postUrls": refs, "maxCommentsPerPost": per_parent, "sortOrder": "recent"}
     if source == "facebook":
-        # Scraper One caps postUrls at 5. Batching is handled by the caller.
-        # For a bounded research window request NEWEST first: "all"/"relevant"
-        # can spend the per-post limit on older comments that are then correctly
-        # dropped by SIGNALYTH's exact date filter, creating a false 0-comment run.
-        return {"postUrls": refs, "resultsLimit": per_parent, "commentsSortType": "newest"}
+        # scraper_one/facebook-comments-scraper: resultsLimit is PER POST and
+        # newest-first is essential for bounded windows. The actor has no native
+        # date input, so SIGNALYTH enforces date_from/date_to after normalization.
+        # Five-parent batching is enforced by comment_parent_batch_limit().
+        return {
+            "postUrls": refs,
+            "resultsLimit": per_parent,
+            "commentsSortType": "newest",
+        }
     if source == "youtube":
         return {"startUrls": refs, "maxItems": max_items}
     field = cap.get("input_field")
@@ -386,7 +529,7 @@ def build_page_discovery_input(
         return out
     if source == "instagram":
         out = {"directUrls": refs, "resultsType": "posts", "resultsLimit": limit,
-               "addParentData": True}
+               "skipPinnedPosts": True, "addParentData": True}
         if date_from:
             out["onlyPostsNewerThan"] = date_from
         return out

@@ -675,7 +675,26 @@ def execute_plan(
 
                 source_status["cost_usd"] = round(float(source_status["cost_usd"]) + charged, 6)
                 source_status["retry_attempts"] = int(source_status.get("retry_attempts", 0) or 0) + max(0, len(resilient.attempts) - 1)
-                source_raw.extend(resilient.items)
+
+                route_input = dict(sr.get("input") or {})
+                route_query = None
+                for query_field in ("query", "searchTerms", "search", "queries", "keywords", "directUrls", "startUrls"):
+                    value = route_input.get(query_field)
+                    if value not in (None, "", []):
+                        route_query = copy.deepcopy(value)
+                        break
+                for raw_item in resilient.items:
+                    if not isinstance(raw_item, dict):
+                        continue
+                    tagged = copy.deepcopy(raw_item)
+                    tagged["__signalyth_collection_purpose"] = purpose
+                    tagged["__signalyth_collection_query"] = route_query
+                    # Every normal collection subrun is generated from the
+                    # research subject/alias plan. This provenance does NOT make
+                    # the row analytical evidence; it is only a bounded fallback
+                    # anchor for conversation-parent discovery after market cleaning.
+                    tagged["__signalyth_subject_search_provenance"] = True
+                    source_raw.append(tagged)
                 source_raw.extend(resilient.diagnostics)
 
                 for meta in resilient.metas:

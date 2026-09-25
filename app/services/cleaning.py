@@ -341,11 +341,23 @@ def _market_score(row: dict, plan: dict, view: TextView) -> tuple[float, list[st
     # Only a genuinely transliterated spelling counts: a "variant" identical to
     # the brand/person name itself proves nothing (a German writes "Eurojackpot"
     # too), so it is excluded exactly like the ambiguous market terms above.
-    if score < 0.35 and str(row.get("evidence_layer") or "primary") in {"comment", "reply"}:
-        inherited = _parent_market_signal(row.get("parent_context"))
-        if inherited > 0:
-            score += min(inherited, 0.45)
-            reasons.append("parent_market_context")
+    if str(row.get("evidence_layer") or "primary") in {"comment", "reply"}:
+        # Prefer the parent's already-computed market qualification when the
+        # comment layer carries it. This preserves market context derived from
+        # page/location/language metadata even when the parent TEXT itself does
+        # not literally say Greece or contain Greek characters.
+        try:
+            structured_parent_market = max(0.0, float(row.get("parent_market_score") or 0.0))
+        except Exception:
+            structured_parent_market = 0.0
+        if structured_parent_market >= float(RULESET_CONFIG["market_review_below"]):
+            score += min(structured_parent_market, 0.55)
+            reasons.append("parent_market_qualification")
+        elif score < 0.35:
+            inherited = _parent_market_signal(row.get("parent_context"))
+            if inherited > 0:
+                score += min(inherited, 0.45)
+                reasons.append("parent_market_context")
 
     subject_greeklish = [x for x in (plan.get("greeklish_variants") or [])
                          if str(x).strip() and _fold(x) not in ambiguous_own_terms]
@@ -391,6 +403,12 @@ def _relevance_score(row: dict, plan: dict, view: TextView, market_score: float)
     layer = str(row.get("evidence_layer") or "primary")
     parent_context = str(row.get("parent_context") or "").strip() if layer in {"comment", "reply"} else ""
     parent_view = _text_view(parent_context) if parent_context else None
+    parent_subject_qualified = bool(row.get("parent_subject_qualified")) if layer in {"comment", "reply"} else False
+    parent_qualification_tier = str(row.get("parent_qualification_tier") or "") if layer in {"comment", "reply"} else ""
+    try:
+        parent_market_score = float(row.get("parent_market_score") or 0.0) if layer in {"comment", "reply"} else 0.0
+    except Exception:
+        parent_market_score = 0.0
 
     direct_core_hits = [x for x in core_terms if _term_present(view.folded, x)]
     parent_core_hits = [x for x in core_terms if parent_view and _term_present(parent_view.folded, x)]
@@ -407,17 +425,26 @@ def _relevance_score(row: dict, plan: dict, view: TextView, market_score: float)
     if direct_core_hits:
         score += min(0.72, 0.58 + 0.07 * (len(direct_core_hits) - 1))
         reasons.extend([f"core_term:{x}" for x in direct_core_hits[:3]])
-    elif parent_core_hits:
+    elif parent_core_hits or parent_subject_qualified:
         # A reply may omit the brand/topic because conversational context supplies it.
-        # Parent context is an anchor, not an automatic keep: the lower weight sends
-        # generic replies to semantic review instead of pretending they are direct matches.
-        score += min(0.42, 0.34 + 0.04 * (len(parent_core_hits) - 1))
+        # Structured qualification is stronger than re-parsing the parent text: the
+        # parent may have been market-qualified by metadata or accepted from a bounded,
+        # subject-anchored search route without repeating the literal subject string.
+        score += min(0.42, 0.34 + 0.04 * max(0, len(parent_core_hits) - 1))
         if len(view.tokens) >= 2:
             score += 0.08
-        reasons.extend([f"parent_core_context:{x}" for x in parent_core_hits[:3]])
+        if parent_core_hits:
+            reasons.extend([f"parent_core_context:{x}" for x in parent_core_hits[:3]])
+        else:
+            reasons.append("parent_subject_qualification")
         flags.append("contextual_parent_match")
-        if _parent_market_signal(str(row.get("parent_context") or "")) > 0:
+        if (
+            parent_market_score >= float(RULESET_CONFIG["market_review_below"])
+            or _parent_market_signal(str(row.get("parent_context") or "")) > 0
+        ):
             flags.append("parent_market_context")
+        if parent_qualification_tier and parent_qualification_tier not in {"direct", "operator"}:
+            flags.append("provenance_parent_context")
 
     if direct_context_hits:
         score += min(0.22, 0.08 + 0.05 * len(direct_context_hits))
@@ -438,14 +465,14 @@ def _relevance_score(row: dict, plan: dict, view: TextView, market_score: float)
         flags.append("ambiguous_short_entity")
         reasons.append("short_entity_without_market_context")
 
-    if not core_hits:
+    if not core_hits and not parent_subject_qualified:
         score -= 0.18
         flags.append("core_term_missing")
         reasons.append("core_term_missing")
         # Subject gate: the research subject is not mentioned at all — no core
-        # term, no context term, and no parent that mentions it. Hashtag- and
-        # location-based discovery returns such off-topic rows in bulk; they are
-        # not evidence about the subject and must not reach paid analysis.
+        # term, no context term, and no qualified parent. Hashtag/location search
+        # provenance alone is never inherited unless the comment layer explicitly
+        # records that the parent passed a bounded parent qualification rule.
         if core_terms and not direct_context_hits and not parent_context_hits:
             flags.append("no_subject_signal")
 
@@ -709,6 +736,11 @@ def _decision(relevance: float, market: float, spam: float, bot_risk: float, bot
         reasons.append("high_impact_suspicious_activity")
     if "ambiguous_short_entity" in flags:
         reasons.append("entity_disambiguation_needed")
+    if "provenance_parent_context" in flags:
+        # A provenance-qualified parent is allowed to OPEN the conversation, but
+        # inherited comments remain review evidence until semantic/AI analysis
+        # confirms them. This protects precision while restoring conversational recall.
+        reasons.append("parent_subject_inherited_from_search_provenance")
     return ("review", list(dict.fromkeys(reasons))) if reasons else ("trusted", [])
 
 def _sampling_origin(cleaned: list[dict]) -> dict:

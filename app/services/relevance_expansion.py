@@ -21,6 +21,7 @@ from app.services.smart_collection import (
 from app.services.storage import RunStore
 from app.services.source_capabilities import (
     build_comment_deepening_input,
+    comment_actor_contract,
     comment_parent_batch_limit,
     is_comment_parent_ref,
     build_page_discovery_input,
@@ -88,6 +89,27 @@ TIKTOK_COMMENT_QUERY_USD = 0.003
 TIKTOK_REPLY_QUERY_USD = 0.003
 
 
+
+def _comment_per_parent_limit(
+    source: str,
+    wanted: int,
+    parent_count: int,
+    configured_max: int,
+) -> int:
+    """Bound per-parent actors to the logical batch shortfall.
+
+    A provider field such as Facebook resultsLimit or Instagram
+    maxCommentsPerPost is multiplied by the number of parents. Passing the
+    configured 40 to five parents for a 20-comment shortfall can ask the Actor
+    to produce up to 200 rows. Global-limit actors keep their own contract.
+    """
+    configured = max(1, int(configured_max or 1))
+    parents = max(1, int(parent_count or 1))
+    if comment_actor_contract(source).get("limit_scope") == "per_parent":
+        return min(configured, max(1, int(math.ceil(max(1, int(wanted or 1)) / parents))))
+    return configured
+
+
 def _comment_minimum_attempt_charge_usd(
     source: str,
     actor_input: dict,
@@ -110,6 +132,8 @@ def _comment_minimum_attempt_charge_usd(
     item_cost = 0.0
     if rate_per_1000 not in (None, 0):
         item_cost = float(rate_per_1000) * wanted / 1000.0
+
+
     query_cost = TIKTOK_COMMENT_QUERY_USD * parent_count
     reply_cost = TIKTOK_REPLY_QUERY_USD * wanted if actor_input.get("includeReplies") else 0.0
     # Small headroom prevents floating-point/event-rounding edge cases.
@@ -151,7 +175,8 @@ def _append_source_items(
     evidence_layer: str = "primary",
     origin: str | None = None,
     seed_refs: list[str] | None = None,
-    seed_context: dict[str, str] | None = None,
+    seed_context: dict[str, str | dict] | None = None,
+    max_new_normalized: int | None = None,
 ) -> dict:
     store = RunStore()
     normalized_source_path = folder / f"normalized-{source}.json"
@@ -167,6 +192,8 @@ def _append_source_items(
         new_norm = normalize_comment_dataset(source, data_items, seed_refs=seed_refs or [], seed_context=seed_context or {}, mapping=mapping)
         # Comments outside the requested research window are not analysis evidence.
         new_norm = [r for r in new_norm if in_range(r, date_from, date_to)]
+        if max_new_normalized is not None:
+            new_norm = new_norm[:max(0, int(max_new_normalized))]
         if origin:
             # Where this evidence came from decides what the report may claim:
             # a comment under the brand's own post is not the same public as a
@@ -488,6 +515,37 @@ def _comment_parent_candidate_allowed(source: str, row: dict) -> bool:
     return True
 
 
+def _comment_parent_candidate_tier(source: str, row: dict) -> str | None:
+    """Return direct or provenance for a safe conversation parent."""
+    if _comment_parent_candidate_allowed(source, row):
+        return "direct"
+    if str(row.get("platform") or "") != source or str(row.get("evidence_layer") or "primary") != "primary":
+        return None
+    if not _seed_ref(source, row) or not bool(row.get("subject_search_provenance")):
+        return None
+    cleaning = row.get("cleaning") if isinstance(row.get("cleaning"), dict) else {}
+    flags = {str(x) for x in (cleaning.get("flags") or [])}
+    reasons = {str(x) for x in (cleaning.get("reasons") or [])}
+    if flags & {"exact_duplicate","near_duplicate_same_author","syndicated_duplicate_content","explicit_exclusion_context","likely_automated"}:
+        return None
+    if reasons & {"duplicate_not_independent_evidence","explicit_exclusion_context","high_spam_risk","high_automation_or_manipulation_risk","outside_target_market"}:
+        return None
+    try:
+        # Provenance parents still need positive Greek-market evidence, but
+        # 0.45 was too high for legitimate Greeklish prose: two independent
+        # Greeklish markers score 0.30 by design. Keep a stronger-than-review
+        # floor without silently deleting that audience.
+        if float(cleaning.get("market_score", 0) or 0) < max(0.30, float(RULESET_CONFIG["market_review_below"])):
+            return None
+        if float(cleaning.get("spam_score", 0) or 0) >= float(RULESET_CONFIG["spam_exclude_at"]):
+            return None
+    except Exception:
+        return None
+    if str(cleaning.get("authenticity_status") or "") == "likely_automated":
+        return None
+    return "provenance"
+
+
 def _collect_seeds(source: str, rows: list[dict], max_seeds: int, skip_reported_zero: bool) -> tuple[list[str], list[dict]]:
     refs: list[str] = []
     meta: list[dict] = []
@@ -503,11 +561,18 @@ def _collect_seeds(source: str, rows: list[dict], max_seeds: int, skip_reported_
             continue
         seen.add(ref)
         refs.append(ref)
+        cleaning = row.get("cleaning") if isinstance(row.get("cleaning"), dict) else {}
+        tier = _comment_parent_candidate_tier(source, row) or "direct"
         meta.append({
             "ref": ref, "comments": comments_n, "url": row.get("url"),
             "text": str(row.get("text") or "")[:220],
             "heat": round(parent_heat_score(row), 3),
             "origin": "ranked",
+            "market_score": float(cleaning.get("market_score", 0) or 0),
+            "subject_qualified": True,
+            "qualification_tier": tier,
+            "collection_route": row.get("collection_route"),
+            "collection_query": row.get("collection_query"),
         })
         if len(refs) >= max_seeds:
             break
@@ -533,14 +598,21 @@ def _comment_seed_refs(
 
     rows: list[dict] = []
     for row in cleaned:
-        if not _comment_parent_candidate_allowed(source, row):
+        tier = _comment_parent_candidate_tier(source, row)
+        if not tier:
             continue
         ref = _seed_ref(source, row)
         if not ref or ref in excluded:
             continue
         rows.append(row)
 
-    rows.sort(key=parent_heat_score, reverse=True)
+    rows.sort(
+        key=lambda row: (
+            1 if _comment_parent_candidate_tier(source, row) == "direct" else 0,
+            parent_heat_score(row),
+        ),
+        reverse=True,
+    )
     if not rows:
         return [], [], "no_relevant_parent_rows"
 
@@ -614,6 +686,10 @@ def _probe_items(folder, plan, source, actor_id, actor_input, wanted, rate,
     the sample — the comments under them are — so they are never written into
     the normalized set, only mined for parent references.
     """
+    # This marker distinguishes "worker refused to start because time was gone"
+    # from "an Actor call actually started and may already have been charged".
+    # Continuation workers must never repay the latter.
+    audit.setdefault("probe_last_attempted", {})[source] = False
     if cancel_check():
         return []
     status = store.read(folder / "status.json", {}) or {}
@@ -640,6 +716,11 @@ def _probe_items(folder, plan, source, actor_id, actor_input, wanted, rate,
     except Exception as exc:
         audit["warnings"].append(f"{source}:page_discovery:orchestrator_failed:{exc}")
         return []
+    probe_attempted = bool(resilient.attempts)
+    audit.setdefault("probe_last_attempted", {})[source] = probe_attempted
+    audit.setdefault("probe_last_accounted_cost_usd", {})[source] = round(
+        float(resilient.accounted_cost_usd or 0.0), 6
+    )
     _update_budget(folder, resilient.accounted_cost_usd)
     data_items, _ = split_diagnostic_rows(resilient.items)
     deadline_hit = "worker_deadline_reached" in (resilient.failure_kinds or [])
@@ -679,7 +760,9 @@ def _owned_parent_refs(source, plan, cfg, max_parents, *, date_from, date_to,
         if url not in refs:
             refs.append(url)
             meta.append({"ref": url, "comments": 0, "url": url,
-                         "text": operator_parent_context(plan), "origin": "operator_link"})
+                         "text": operator_parent_context(plan), "origin": "operator_link",
+                         "market_score": 0.0, "subject_qualified": True,
+                         "qualification_tier": "operator"})
 
     pages = operator_page_refs(plan, source)
     if pages and cfg.get("page_enabled", True):
@@ -727,15 +810,24 @@ def _owned_parent_refs(source, plan, cfg, max_parents, *, date_from, date_to,
             found = {"ref": ref, "comments": int(row.get("commentsCount")
                                                  or row.get("comments") or 0),
                      "url": row.get("url"), "text": text or operator_parent_context(plan),
-                     "origin": "owned_page"}
+                     "origin": "owned_page",
+                     "market_score": 0.0, "subject_qualified": True,
+                     "qualification_tier": "operator"}
             refs.append(ref)
             meta.append(found)
             discovered.append(found)
         # Successful zero-yield is also a result and must not be re-paid on
         # every continuation. If the clock stopped after useful rows arrived,
         # accept that bounded parent set and let the next worker harvest comments.
-        cache_complete = page_outcome == "complete" or (
-            page_outcome == "deadline_with_rows" and bool(discovered)
+        probe_attempted = bool((audit.get("probe_last_attempted") or {}).get(source))
+        cache_complete = (
+            page_outcome == "complete"
+            or (page_outcome == "deadline_with_rows" and bool(discovered))
+            # If a paid page-discovery call actually started, never buy that
+            # identical page lookup again after a worker handoff. Persist even
+            # a zero-row partial outcome; later open-search routes can still
+            # deepen conversation without duplicate spend.
+            or (page_outcome == "deadline" and probe_attempted)
         )
         if cache_path and cache_complete:
             RunStore().write(cache_path, {
@@ -841,21 +933,7 @@ def _conversation_probe_target(comment_target: int, max_parents: int) -> int:
     )
 
 def _conversation_parent_is_strong(source: str, row: dict) -> bool:
-    if not _comment_parent_candidate_allowed(source, row):
-        return False
-    cleaning = row.get("cleaning") if isinstance(row.get("cleaning"), dict) else {}
-    flags = {str(x) for x in (cleaning.get("flags") or [])}
-    reasons = {str(x) for x in (cleaning.get("reasons") or [])}
-    if "no_subject_signal" in flags or "subject_not_mentioned" in reasons:
-        return False
-    if not any(reason.startswith("core_term:") for reason in reasons):
-        return False
-    try:
-        if float(cleaning.get("market_score", 0) or 0) < float(RULESET_CONFIG["market_review_below"]):
-            return False
-    except Exception:
-        return False
-    return True
+    return _comment_parent_candidate_tier(source, row) is not None
 
 
 def _conversation_probe_input(
@@ -982,7 +1060,12 @@ def _discover_conversation_parent_candidates(
             heartbeat=lambda _note, _s=source: heartbeat(_s),
             charge_cap_usd=sr.get("max_charge_usd"),
         )
-        if not audit.get("deadline_reached"):
+        probe_attempted = bool((audit.get("probe_last_attempted") or {}).get(source))
+        # A route becomes durable once it actually started a paid Actor call,
+        # even if the worker deadline arrived before a retry. Leaving such a
+        # route pending made the next worker buy the identical search again.
+        # Only a deadline reached BEFORE the first Actor attempt keeps it owed.
+        if probe_attempted or not audit.get("deadline_reached"):
             done.add(route_key)
             state[source] = sorted(done)
             store.write(state_path, state)
@@ -991,6 +1074,16 @@ def _discover_conversation_parent_candidates(
             normalized = normalize_dataset(
                 source, raw_rows, mapping=output_mapping_for(source)
             )
+            route_query = None
+            for query_field in ("query", "searchTerms", "search", "queries", "keywords", "directUrls", "startUrls"):
+                value = inp.get(query_field)
+                if value not in (None, "", []):
+                    route_query = copy.deepcopy(value)
+                    break
+            for row in normalized:
+                row["subject_search_provenance"] = True
+                row["collection_route"] = purpose
+                row["collection_query"] = route_query
             parent_from = date_from - timedelta(days=PARENT_LOOKBACK_DAYS)
             normalized = [row for row in normalized if in_range(row, parent_from, date_to)]
             if normalized:
@@ -1091,7 +1184,8 @@ def adaptive_expand_after_cleaning(
         evidence_layer: str = "primary",
         origin: str | None = None,
         seed_refs: list[str] | None = None,
-        seed_context: dict[str, str] | None = None,
+        seed_context: dict[str, str | dict] | None = None,
+        max_new_normalized: int | None = None,
         minimum_attempt_charge_usd: float = 0.0,
         logical_max_charge_usd: float | None = None,
     ):
@@ -1160,6 +1254,7 @@ def adaptive_expand_after_cleaning(
                 folder, source, combined, date_from, date_to, mapping=mapping,
                 evidence_layer=evidence_layer, origin=origin,
                 seed_refs=seed_refs, seed_context=seed_context,
+                max_new_normalized=max_new_normalized,
             )
             report = clean_run(folder, plan=plan, cancel_check=cancel_check)
 
@@ -1248,7 +1343,7 @@ def adaptive_expand_after_cleaning(
             routes,
             key=lambda sr: 0 if str(sr.get("purpose") or "") == "semantic_broad_probe" else 1,
         )
-        for idx, sr in enumerate(routes[:3]):
+        for idx, sr in enumerate(routes[:6]):
             if missing <= 0 or cancel_check():
                 break
             if deadline_check():
@@ -1447,11 +1542,21 @@ def adaptive_expand_after_cleaning(
                         max(1, len(batch_refs) * max_per_parent),
                     )
 
+                    actor_wanted = batch_wanted
+                    actor_per_parent = _comment_per_parent_limit(
+                        source, batch_wanted, len(batch_refs), max_per_parent
+                    )
+                    if source == "x":
+                        actor_wanted += len(batch_refs)
+                        actor_per_parent += 1
+
                     try:
                         inp = build_comment_deepening_input(
-                            source, batch_refs, batch_wanted,
-                            max_per_parent=max_per_parent,
+                            source, batch_refs, actor_wanted,
+                            max_per_parent=actor_per_parent,
                             include_replies=bool(cfg.get("comment_include_replies", True)),
+                            date_from=date_from,
+                            date_to=date_to,
                         )
                     except ValueError as exc:
                         audit["warnings"].append(
@@ -1485,13 +1590,19 @@ def adaptive_expand_after_cleaning(
                     )
                     ok = do_call(
                         source, actor_id, f"comment_deepening_{bucket}",
-                        inp, batch_wanted, rate,
+                        inp, actor_wanted, rate,
                         mapping=mapping, evidence_layer="comment", origin=bucket,
                         seed_refs=batch_refs,
                         seed_context={
-                            str(m.get("ref")): str(m.get("text") or "")
+                            str(m.get("ref")): {
+                                "text": str(m.get("text") or ""),
+                                "market_score": float(m.get("market_score", 0) or 0),
+                                "subject_qualified": bool(m.get("subject_qualified", False)),
+                                "qualification_tier": str(m.get("qualification_tier") or ""),
+                            }
                             for m in batch_meta if m.get("ref")
                         },
+                        max_new_normalized=batch_wanted,
                         minimum_attempt_charge_usd=minimum_attempt_charge_usd,
                     )
                     arrived = max(0, collected_count() - before_batch)
@@ -1670,82 +1781,107 @@ def adaptive_expand_after_cleaning(
             got_open = 0 if "open" in done_buckets else harvest(
                 ranked_refs, ranked_meta, open_wanted, "open")
 
-            # If the explicit target is still short, try ONE more bounded wave
-            # using previously untried eligible parents. This is specifically for
-            # Actors whose engagement counts under-report which posts have comments.
+            # Continue through the already-discovered qualified parent pool until
+            # the explicit target is met, the pool is exhausted, the budget blocks,
+            # or this worker must hand off. This replaces the old hard-coded
+            # retry+wave2 ceiling: a 50-comment target could otherwise inspect only
+            # 36 of a 45-parent pool and stop even while safe untried parents existed.
+            #
+            # Selection is based on DURABLY attempted refs across every open_* pass,
+            # so a continuation worker advances to new parents instead of selecting
+            # the same retry wave and no-oping forever.
             got_open_retry = 0
+            got_open_wave2 = 0
             retry_refs: list[str] = []
             retry_meta: list[dict] = []
-            retry_mode = ""
-            missing_after_open = max(0, source_comment_target - collected_count())
-            if (
-                source_comment_target > 0
-                and missing_after_open > 0
-                and not last_call_hit_deadline
-                and not deadline_check()
-            ):
-                used_refs = set(owned_refs) | set(ranked_refs)
-                retry_refs, retry_meta, retry_mode = _comment_seed_refs(
-                    source,
-                    comment_cleaned,
-                    max_seeds=max_parents,
-                    exclude_refs=used_refs,
-                )
-                if retry_refs:
-                    retry_wanted = min(
-                        missing_after_open,
-                        len(retry_refs) * max_per_parent,
-                    )
-                    got_open_retry = harvest(
-                        retry_refs,
-                        retry_meta,
-                        retry_wanted,
-                        "open_retry",
-                    )
-                    audit.setdefault("comment_retry", {})[source] = {
-                        "selection": retry_mode,
-                        "parents": len(retry_refs),
-                        "requested": retry_wanted,
-                        "collected": got_open_retry,
-                    }
-
-            # One additional bounded harvest wave from the ALREADY-DISCOVERED
-            # parent cache. No new search Actor call is made here; this preserves
-            # the worker-handoff invariant that a paid discovery route is never
-            # bought twice on a continuation.
-            got_open_wave2 = 0
             wave2_refs: list[str] = []
             wave2_meta: list[dict] = []
-            missing_after_retry = max(0, source_comment_target - collected_count())
-            if (
+            extra_open_waves: list[dict] = []
+            extra_wave_index = 1
+
+            while (
                 source_comment_target > 0
-                and missing_after_retry > 0
+                and collected_count() < source_comment_target
                 and not last_call_hit_deadline
                 and not deadline_check()
             ):
-                used_refs = set(owned_refs) | set(ranked_refs) | set(retry_refs)
-                wave2_refs, wave2_meta, wave2_mode = _comment_seed_refs(
+                durable_harvest_state = store.read(
+                    folder / "comment-harvest-state.json", {}
+                ) or {}
+                durable_source_state = dict(
+                    durable_harvest_state.get(source) or {}
+                )
+                durable_by_bucket = dict(
+                    durable_source_state.get("attempted_refs_by_bucket") or {}
+                )
+                used_open_refs = set(owned_refs)
+                for durable_bucket, durable_refs in durable_by_bucket.items():
+                    if str(durable_bucket).startswith("open"):
+                        used_open_refs.update(str(x) for x in (durable_refs or []))
+
+                extra_refs, extra_meta, extra_mode = _comment_seed_refs(
                     source,
                     comment_cleaned,
                     max_seeds=max_parents,
-                    exclude_refs=used_refs,
+                    exclude_refs=used_open_refs,
                 )
-                if wave2_refs:
-                    wave2_wanted = min(
-                        missing_after_retry,
-                        len(wave2_refs) * max_per_parent,
-                    )
-                    got_open_wave2 = harvest(
-                        wave2_refs,
-                        wave2_meta,
-                        wave2_wanted,
-                        "open_wave2",
-                    )
+                if not extra_refs:
+                    break
+
+                missing_now = max(
+                    0, source_comment_target - collected_count()
+                )
+                extra_wanted = min(
+                    missing_now,
+                    len(extra_refs) * max_per_parent,
+                )
+                if extra_wanted <= 0:
+                    break
+
+                extra_bucket = f"open_extra_{extra_wave_index}"
+                extra_got = harvest(
+                    extra_refs,
+                    extra_meta,
+                    extra_wanted,
+                    extra_bucket,
+                )
+                extra_open_waves.append({
+                    "wave": extra_wave_index,
+                    "bucket": extra_bucket,
+                    "selection": extra_mode,
+                    "parents": len(extra_refs),
+                    "requested": extra_wanted,
+                    "collected": extra_got,
+                    "discovery_reused_cached_pool": True,
+                })
+
+                # Preserve legacy audit/status fields while allowing any number
+                # of bounded extra waves behind them.
+                if extra_wave_index == 1:
+                    retry_refs, retry_meta = extra_refs, extra_meta
+                    got_open_retry = extra_got
+                elif extra_wave_index == 2:
+                    wave2_refs, wave2_meta = extra_refs, extra_meta
+                    got_open_wave2 = extra_got
+
+                extra_wave_index += 1
+
+            if extra_open_waves:
+                audit.setdefault("comment_extra_waves", {})[source] = extra_open_waves
+                first = extra_open_waves[0]
+                audit.setdefault("comment_retry", {})[source] = {
+                    "selection": first["selection"],
+                    "parents": first["parents"],
+                    "requested": first["requested"],
+                    "collected": first["collected"],
+                }
+                if len(extra_open_waves) > 1:
+                    second = extra_open_waves[1]
                     audit.setdefault("comment_wave2", {})[source] = {
-                        "selection": wave2_mode,
-                        "parents": len(wave2_refs),
-                        "requested": wave2_wanted,
-                        "collected": got_open_wave2,
+                        "selection": second["selection"],
+                        "parents": second["parents"],
+                        "requested": second["requested"],
+                        "collected": second["collected"],
                         "discovery_reused_cached_pool": True,
                     }
 

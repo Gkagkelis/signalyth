@@ -247,6 +247,12 @@ def normalize_item(source: str, item: dict, mapping: dict | None = None):
         "url": str(url) if url else None,
         "content_type": mapped(item, mapping, "content_type", ("type", "productType", "kind", "postType")),
         "parent_post": mapped(item, mapping, "parent_post", ("parentPost", "parentData", "quotedTweet", "retweetedTweet")),
+        # Internal collection provenance is carried through normalization so
+        # parent discovery can distinguish a result reached through a
+        # subject-anchored research route from arbitrary platform noise.
+        "collection_route": str(item.get("__signalyth_collection_purpose") or "") or None,
+        "collection_query": item.get("__signalyth_collection_query"),
+        "subject_search_provenance": bool(item.get("__signalyth_subject_search_provenance", False)),
         "metric_availability": availability,
         "metric_coverage": round(known / 5.0, 4),
         "metric_paths": {"followers": followers_path, "views": views_path, "likes": likes_path, "comments": comments_path, "shares": shares_path},

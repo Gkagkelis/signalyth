@@ -243,10 +243,10 @@ class MidSourceCutTest(unittest.TestCase):
              patch("app.services.relevance_expansion.ApifyRunner", FakeApify), \
              patch("app.services.ai_analysis.OpenAIResponsesProvider", FakeModel):
 
-            # One source under v30: six diversified searches, two semantic
-            # probes, page discovery at call 9, FIRST comment call at 10.
-            # Cutting right after it leaves the owned pass done and open unrun.
-            new_worker = cut_worker_after_call(self.manager, 10)
+            # cut_worker_after_call now counts COMMENT calls, not absolute
+            # Actor-call position. Cut after the first completed comment batch:
+            # owned evidence exists, while open/backfill still belong to worker B.
+            new_worker = cut_worker_after_call(self.manager, 1)
             self.manager._worker(run_id)
             calls_a = list(FakeApify.calls)
 
