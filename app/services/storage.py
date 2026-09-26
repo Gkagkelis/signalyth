@@ -178,7 +178,25 @@ class RunStore:
             remote = str((meta or {}).get("checkpointed_at") or "")
             stamp_file = folder / ".signalyth-archive-stamp"
             local = stamp_file.read_text(encoding="utf-8").strip() if stamp_file.exists() else ""
-            needs_refresh = bool(remote) and remote != local
+            # Refresh ONLY when the durable archive is strictly NEWER than the
+            # local copy. archive-meta.json is read through Blob/CDN and can
+            # lag behind the checkpoint this very worker just made; treating
+            # any difference as "remote moved forward" replaced a live
+            # workspace (fresh analysis files included) with an OLDER archive
+            # mid-pipeline — NBG run 20260926T142313Z-d4659ef0 lost its
+            # completed analysis twice this way. Stamps are UTC isoformat, so
+            # lexicographic comparison is chronological; a non-ISO local
+            # marker ("legacy-refreshed") never loses to a lagging remote.
+            def _iso(s: str) -> bool:
+                return len(s) >= 19 and s[:4].isdigit() and s[4] == "-"
+            if not remote:
+                needs_refresh = False
+            elif not local:
+                needs_refresh = True
+            elif _iso(remote) and _iso(local):
+                needs_refresh = remote > local
+            else:
+                needs_refresh = False
             if not remote and not local:
                 # Legacy run archived before version stamps existed. Heal a possibly
                 # mid-run local copy ONCE per instance — but never clobber a copy that
