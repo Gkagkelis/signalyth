@@ -90,3 +90,12 @@ def test_baseline_registry_carries_the_known_minimums():
     assert d["tiktok"]["price_min_charge_usd"] == 0.5
     assert d["tiktok"]["comment_price_min_charge_usd"] == 0.5
     assert d["facebook"]["price_min_charge_usd"] == 0.03
+
+
+def test_patch_model_carries_the_minimum_charge_fields():
+    # The API's PATCH body model silently drops unknown fields, which is how
+    # run 20260926T121905Z lost the minimums a second time. Pin them here.
+    from app.models import SourceConfigUpdate
+    upd = SourceConfigUpdate(price_min_charge_usd=0.5, comment_price_min_charge_usd=0.5)
+    dumped = upd.model_dump(exclude_none=True)
+    assert dumped == {"price_min_charge_usd": 0.5, "comment_price_min_charge_usd": 0.5}

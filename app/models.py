@@ -171,6 +171,12 @@ class SourceConfigUpdate(BaseModel):
     # from the primary discovery Actor. Curated production contracts may be
     # enabled directly; the per-run Comments switch remains the paid opt-in.
     comment_enabled: bool | None = None
+    # Some Actors refuse to start below a fixed minimum run charge; these floors
+    # lift per-call caps to it (a cap, not a charge). Absent from this model,
+    # the PATCH body silently dropped them and the registry never learned the
+    # minimums — run 20260926T121905Z failed TikTok and Facebook a second time.
+    price_min_charge_usd: float | None = Field(default=None, ge=0, le=100)
+    comment_price_min_charge_usd: float | None = Field(default=None, ge=0, le=100)
     comment_price_per_1000_hint: float | None = Field(default=None, ge=0, le=10000)
     comment_max_per_parent: int | None = Field(default=None, ge=1, le=1000)
     comment_max_parents: int | None = Field(default=None, ge=1, le=100)
