@@ -20,8 +20,13 @@ def run_signalyth(run_id: str) -> dict:
     except RunNotFound:
         return {"run_id": run_id, "status": "not_found"}
     finally:
-        try:
-            store.checkpoint_run(run_id)
-        except Exception:
-            pass
+        # NO unconditional checkpoint here. This finally runs for EVERY task —
+        # including a redelivered stale message whose run_now stood down after
+        # being displaced by a newer worker. Its unconditional checkpoint
+        # archived the STALE local workspace over the active worker's fresh
+        # archive; the active worker's next folder refresh then pulled that
+        # clobbered (strictly newer-stamped, older-content) copy back and its
+        # just-written analysis files "vanished" — the loop that stalled NBG
+        # run 20260926T142313Z-d4659ef0 for two hours. _worker's own finally
+        # already checkpoints, correctly guarded by lease ownership.
         manager.shutdown(wait=False)
