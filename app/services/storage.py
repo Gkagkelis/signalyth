@@ -126,16 +126,45 @@ class RunStore:
         except Exception:
             status = {}
         claimed = int(status.get("normalized_total") or 0)
-        if claimed <= 0:
+        # normalized_total is only written when collection finalizes. A worker
+        # replaced MID-collection leaves it at 0 while per-source rows already
+        # say money was spent — and a metadata-only restore of that state used
+        # to look like "nothing collected yet", so the replacement silently
+        # re-collected (and re-paid) every source. Count both signals.
+        collected_by_sources = 0
+        for row in (status.get("sources") or {}).values():
+            if isinstance(row, dict):
+                try:
+                    collected_by_sources += max(0, int(row.get("collected") or 0))
+                except Exception:
+                    continue
+        if claimed <= 0 and collected_by_sources <= 0:
             return True, "nothing collected yet"
         present = len(self.read(folder / "normalized-all.json", []) or [])
         if (folder / ".signalyth-metadata-only").exists() and present <= 0:
-            return False, (f"the run collected {claimed} records but only its settings could be "
+            shown = claimed or collected_by_sources
+            return False, (f"the run collected {shown} records but only its settings could be "
                            "restored here — the evidence itself is not reachable")
+        if claimed <= 0:
+            # Mid-collection archive restored intact: per-source evidence files
+            # are authoritative and the finalize step rebuilds normalized-all.
+            return True, "mid-collection evidence restored"
         if present < claimed:
             return False, (f"the run collected {claimed} records but only {present} are in this "
                            "workspace; the rest did not survive the worker being replaced")
         return True, "ok"
+
+    def clear_metadata_only_marker(self, folder: Path) -> None:
+        """Make a validated workspace authoritative again.
+
+        Called ONLY after evidence_intact() confirmed nothing paid is missing
+        (e.g. a planned run that had not collected yet). From that point the
+        local workspace is the real state and checkpoints must be allowed.
+        """
+        try:
+            (folder / ".signalyth-metadata-only").unlink(missing_ok=True)
+        except Exception:
+            pass
 
     def _refresh_if_outdated(self, run_id: str, folder: Path) -> None:
         import time as _time
@@ -680,6 +709,15 @@ class RunStore:
         if not self.cloud.enabled:
             return
         folder = self.folder_for(run_id)
+        # A workspace restored as metadata-only holds SETTINGS, not evidence.
+        # Archiving it would overwrite whatever the durable store has (or will
+        # accept) with a copy that is empty by construction — a worker that
+        # failed to restore must never become the author of the archive.
+        if (folder / ".signalyth-metadata-only").exists():
+            self._record_durability(
+                run_id, saved=False, generation=0,
+                error="refused: this worker only restored the run's settings, not its evidence")
+            return
         # Which milestone this archive is about to contain. Recorded with the
         # outcome either way, so a later worker can compare it against how far
         # the status says the run has progressed.

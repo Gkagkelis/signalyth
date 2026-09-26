@@ -64,8 +64,8 @@ def cut_worker_after_call(manager, limit: int):
     def out_of_time() -> bool:
         return sum(1 for call in FakeApify.calls if is_comment_call(call)) >= limit
 
-    manager._deadline_reached = lambda margin_seconds=0.0: out_of_time()
-    manager._seconds_left = lambda margin_seconds=0.0: (-1.0 if out_of_time() else float("inf"))
+    manager._deadline_reached = lambda margin_seconds=0.0, run_id=None: out_of_time()
+    manager._seconds_left = lambda margin_seconds=0.0, run_id=None: (-1.0 if out_of_time() else float("inf"))
     # The cut worker would auto-queue a continuation into the executor, which
     # then runs IN PARALLEL with the test's own explicit "worker B". Two
     # writers on one run made these tests fail two times in four. In these

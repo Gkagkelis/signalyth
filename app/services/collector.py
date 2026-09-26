@@ -300,6 +300,7 @@ def execute_plan(
     cancel_check: Callable[[], bool] | None = None,
     continue_pipeline: bool = False,
     deadline_check: Callable[[], bool] | None = None,
+    checkpoint: Callable[[str], None] | None = None,
 ):
     """Execute a collection plan and persist observable lifecycle state.
 
@@ -844,6 +845,17 @@ def execute_plan(
         with state_lock:
             all_normalized.extend(normalized)
 
+        def _durable(step: str) -> None:
+            # Paid evidence exists on the scratch disk from this line on; make it
+            # durable NOW. Before v31.14 the first archive checkpoint happened at
+            # the soft-deadline requeue or the collection-finished milestone, so
+            # a hard-killed worker lost every source it had already paid for.
+            if checkpoint:
+                try:
+                    checkpoint(f"{source}:{step}")
+                except Exception:
+                    pass
+
         failed_subruns = int(source_status.get("subruns_failed", 0) or 0)
         partial_subruns = int(source_status.get("subruns_partial", 0) or 0)
         data_contract_failure = (
@@ -857,6 +869,7 @@ def execute_plan(
             )
         )
         if interrupted_time_budget:
+            _durable("deadline_partial")
             return {"cancelled": False, "deadline": True}
         if cancelled_mid_source:
             for later in source_status.get("subruns", []):
@@ -905,6 +918,7 @@ def execute_plan(
         })
         sync(f"{source} complete" if source_status["status"] in {"succeeded", "succeeded_empty"} else f"{source}: {source_status['status']}", source, code="source_complete" if source_status["status"] in {"succeeded", "succeeded_empty"} else "source_status")
 
+        _durable("terminal")
         return {"cancelled": bool(cancelled_mid_source)}
 
     def _apply_budget_safety_stop() -> dict:
