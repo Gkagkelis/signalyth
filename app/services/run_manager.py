@@ -1118,6 +1118,8 @@ class RunManager:
                         pass
                     self._note_worker_step(folder, f"apify_call:{source}")
 
+                adaptive_checkpoint_lock = threading.Lock()
+
                 def _adaptive_checkpoint(step: str) -> None:
                     # Durability boundary after EVERY paid comment/parent-
                     # discovery call: normalized comments, attempted refs and
@@ -1126,9 +1128,13 @@ class RunManager:
                     # continuation everything that was paid for. Failures
                     # propagate to the caller, which records them and goes on.
                     self._note_worker_step(folder, f"checkpoint:{step}")
-                    if not self._lease_ok(run_id):
-                        raise RunStateError("a newer worker owns this run; checkpoint skipped")
-                    self.store.checkpoint_run(run_id)
+                    # v31.11 runs comment sources on parallel threads; archive
+                    # builds serialize here so the per-call durability promise
+                    # holds for every source (a zip is seconds, a call minutes).
+                    with adaptive_checkpoint_lock:
+                        if not self._lease_ok(run_id):
+                            raise RunStateError("a newer worker owns this run; checkpoint skipped")
+                        self.store.checkpoint_run(run_id)
 
                 expanded = adaptive_expand_after_cleaning(
                     folder,

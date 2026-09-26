@@ -48,6 +48,9 @@ class Settings(BaseSettings):
     signalyth_collection_parallel_sources: int = 4 if RUNNING_ON_VERCEL else 1
     signalyth_dry_run: bool = True
     signalyth_max_parallel_runs: int = 2
+    # How many sources' comment layers run on parallel threads inside one
+    # adaptive pass. 1 restores the sequential behavior as a safety valve.
+    signalyth_comment_parallel_sources: int = 4
     openai_api_key: str = ""
     signalyth_ai_enabled: bool = False
     signalyth_ai_bulk_model: str = "gpt-5.6-luna"

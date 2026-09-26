@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 import copy
 import json
 import math
+import threading
 from pathlib import Path
 from typing import Callable
+
+from app.config import settings
 
 from app.registry import output_mapping_for, load_registry
 from app.services.apify_service import ApifyRunner
@@ -165,7 +169,63 @@ def _effective_open_comment_quota(target: int, configured_open: int, collected: 
     return max(configured_open, max(0, target - collected))
 
 
-def _append_source_items(
+#: One lock for every read-modify-write of the SHARED small files the comment
+#: layer touches (status.json, budget, normalized-all, harvest state,
+#: discovery state). v31.11 runs the per-source comment layers on parallel
+#: threads; these writes are milliseconds while the Apify calls they sit
+#: between are minutes, so serializing them costs nothing and prevents two
+#: sources losing each other's updates. RLock: some guarded helpers call
+#: other guarded helpers.
+_ADAPTIVE_STATE_LOCK = threading.RLock()
+
+
+class _BudgetLedger:
+    """Race-free budget envelope for parallel paid calls.
+
+    Two sources that each read "remaining: $1" and then both start $0.8-cap
+    calls overspend the run. Every paid call now RESERVES its cap here before
+    starting and settles the real charge after, so the sum of in-flight caps
+    plus recorded spend can never exceed the run's budget.
+    """
+
+    def __init__(self, folder: Path, plan: dict):
+        self.folder = folder
+        self.plan = plan
+        self.lock = threading.Lock()
+        self.reserved = 0.0
+
+    def _spent_remaining(self) -> float:
+        status = RunStore().read(self.folder / "status.json", {}) or {}
+        return _remaining_budget(status, self.plan)
+
+    def remaining(self) -> float:
+        with self.lock:
+            return max(0.0, self._spent_remaining() - self.reserved)
+
+    def reserve(self, cap: float) -> float:
+        """Grant up to ``cap`` of the unreserved budget; 0 means blocked."""
+        cap = max(0.0, float(cap or 0.0))
+        with self.lock:
+            available = max(0.0, self._spent_remaining() - self.reserved)
+            grant = min(cap, available)
+            self.reserved += grant
+            return grant
+
+    def settle(self, grant: float, charged: float) -> None:
+        with self.lock:
+            self.reserved = max(0.0, self.reserved - max(0.0, float(grant or 0.0)))
+        if charged and charged > 0:
+            _update_budget(self.folder, charged)
+
+
+def _append_source_items(*args, **kwargs) -> dict:
+    """Thread-safe wrapper: normalized-all.json is shared across the parallel
+    per-source comment layers, and its dedup-merge is a read-modify-write."""
+    with _ADAPTIVE_STATE_LOCK:
+        return _append_source_items_locked(*args, **kwargs)
+
+
+def _append_source_items_locked(
     folder: Path,
     source: str,
     items: list[dict],
@@ -701,7 +761,7 @@ def _post_ref_from_row(source: str, row: dict) -> tuple[str, str]:
 def _probe_items(folder, plan, source, actor_id, actor_input, wanted, rate,
                  audit, store, runner, cancel_check,
                  deadline_check=None, time_left=None, heartbeat=None,
-                 charge_cap_usd=None) -> list[dict]:
+                 charge_cap_usd=None, ledger=None) -> list[dict]:
     """Run an Actor for references only, without filing its rows as evidence.
 
     Page discovery exists to find WHERE the conversation is. Its posts are not
@@ -714,8 +774,11 @@ def _probe_items(folder, plan, source, actor_id, actor_input, wanted, rate,
     audit.setdefault("probe_last_attempted", {})[source] = False
     if cancel_check():
         return []
-    status = store.read(folder / "status.json", {}) or {}
-    remaining = _remaining_budget(status, plan)
+    if ledger is not None:
+        remaining = ledger.remaining()
+    else:
+        status = store.read(folder / "status.json", {}) or {}
+        remaining = _remaining_budget(status, plan)
     allowed = _max_affordable_items(remaining, rate, wanted)
     if allowed <= 0:
         audit["warnings"].append(f"{source}:page_discovery:budget_exhausted")
@@ -729,13 +792,21 @@ def _probe_items(folder, plan, source, actor_id, actor_input, wanted, rate,
     if cap <= 0:
         audit["warnings"].append(f"{source}:page_discovery:no_safe_charge_cap")
         return []
+    # Under parallel sources the cap must be RESERVED before the call starts,
+    # or two sources both spend the same remaining dollar.
+    grant = ledger.reserve(cap) if ledger is not None else cap
+    if ledger is not None and grant <= 0:
+        audit["warnings"].append(f"{source}:page_discovery:budget_exhausted")
+        return []
     try:
         resilient = run_actor_resilient(
             runner, actor_id, actor_input, max_items=allowed,
-            max_charge_usd=cap, rate_per_1000=rate, max_calls=2,
+            max_charge_usd=grant, rate_per_1000=rate, max_calls=2,
             deadline_check=deadline_check, time_left=time_left, heartbeat=heartbeat,
         )
     except Exception as exc:
+        if ledger is not None:
+            ledger.settle(grant, 0.0)
         audit["warnings"].append(f"{source}:page_discovery:orchestrator_failed:{exc}")
         return []
     probe_attempted = bool(resilient.attempts)
@@ -743,7 +814,10 @@ def _probe_items(folder, plan, source, actor_id, actor_input, wanted, rate,
     audit.setdefault("probe_last_accounted_cost_usd", {})[source] = round(
         float(resilient.accounted_cost_usd or 0.0), 6
     )
-    _update_budget(folder, resilient.accounted_cost_usd)
+    if ledger is not None:
+        ledger.settle(grant, resilient.accounted_cost_usd)
+    else:
+        _update_budget(folder, resilient.accounted_cost_usd)
     data_items, _ = split_diagnostic_rows(resilient.items)
     deadline_hit = "worker_deadline_reached" in (resilient.failure_kinds or [])
     if deadline_hit:
@@ -868,6 +942,11 @@ def _owned_parent_refs(source, plan, cfg, max_parents, *, date_from, date_to,
 
 
 def _update_budget(folder: Path, charged: float) -> dict:
+    with _ADAPTIVE_STATE_LOCK:
+        return _update_budget_locked(folder, charged)
+
+
+def _update_budget_locked(folder: Path, charged: float) -> dict:
     store = RunStore()
     status = store.read(folder / "status.json", {}) or {}
     budget = dict(status.get("budget") or {})
@@ -891,6 +970,7 @@ def _comment_status_update(folder: Path, source: str, *, current_message: str | 
     is observable while it happens — not only in the final audit file.
     """
     try:
+      with _ADAPTIVE_STATE_LOCK:
         store = RunStore()
         status = store.read(folder / "status.json", {}) or {}
         block = dict(status.get("comment_deepening") or {})
@@ -1018,6 +1098,7 @@ def _discover_conversation_parent_candidates(
     time_left,
     heartbeat,
     checkpoint=None,
+    ledger=None,
 ) -> list[dict]:
     """Discover extra parent posts without adding them to analysis evidence.
 
@@ -1098,6 +1179,7 @@ def _discover_conversation_parent_candidates(
             time_left=time_left,
             heartbeat=lambda _note, _s=source: heartbeat(_s),
             charge_cap_usd=sr.get("max_charge_usd"),
+            ledger=ledger,
         )
         probe_attempted = bool((audit.get("probe_last_attempted") or {}).get(source))
         # A route becomes durable once it actually started a paid Actor call,
@@ -1106,8 +1188,12 @@ def _discover_conversation_parent_candidates(
         # Only a deadline reached BEFORE the first Actor attempt keeps it owed.
         if probe_attempted or not audit.get("deadline_reached"):
             done.add(route_key)
-            state[source] = sorted(done)
-            store.write(state_path, state)
+            with _ADAPTIVE_STATE_LOCK:
+                # Re-read before writing: the file holds EVERY source's routes
+                # and another source's thread may have written since we read it.
+                state = store.read(state_path, {}) or {}
+                state[source] = sorted(done)
+                store.write(state_path, state)
 
         if raw_rows:
             normalized = normalize_dataset(
@@ -1258,12 +1344,9 @@ def adaptive_expand_after_cleaning(
         except Exception as exc:
             audit["warnings"].append(f"durable_checkpoint_failed:{step}:{exc}")
 
-    #: Set when the last Actor acquisition stopped because the worker ran out of
-    #: time rather than because it finished. Without this, a call that returned
-    #: some rows before stopping looked like an ordinary partial success, and
-    #: the caller wrote the source down as collected.
-    last_call_hit_deadline = False
-    last_call_outcome: dict = {"status": "not_run"}
+    #: Every paid call reserves its cap here before starting, so parallel
+    #: per-source threads can never jointly overspend the run budget.
+    ledger = _BudgetLedger(folder, plan)
 
     def do_call(
         source: str,
@@ -1282,37 +1365,35 @@ def adaptive_expand_after_cleaning(
         minimum_attempt_charge_usd: float = 0.0,
         logical_max_charge_usd: float | None = None,
     ):
-        nonlocal report, last_call_hit_deadline, last_call_outcome
-        last_call_hit_deadline = False
-        last_call_outcome = {"status": "not_started", "kind": kind, "source": source}
+        # Runs on parallel per-source threads (v31.11): everything about ONE
+        # call lives in locals and is RETURNED, never left in shared state.
+        nonlocal report
+        outcome = {"status": "not_started", "kind": kind, "source": source}
+        hit_deadline = False
 
         if cancel_check():
             audit["warnings"].append(f"{source}:{kind}:cancelled_before_call")
-            last_call_outcome = {"status": "cancelled", "kind": kind, "source": source}
-            return False
+            return False, {"status": "cancelled", "kind": kind, "source": source}, False
 
-        status = store.read(folder / "status.json", {}) or {}
-        remaining = _remaining_budget(status, plan)
+        remaining = ledger.remaining()
         minimum_attempt_charge_usd = max(0.0, float(minimum_attempt_charge_usd or 0.0))
         if minimum_attempt_charge_usd > remaining + 1e-9:
             audit["warnings"].append(
                 f"{source}:{kind}:minimum_actor_charge_exceeds_remaining_budget:"
                 f"{minimum_attempt_charge_usd:.6f}>{remaining:.6f}"
             )
-            last_call_outcome = {
+            return False, {
                 "status": "budget_blocked", "kind": kind, "source": source,
                 "reason": "minimum_actor_charge_exceeds_remaining_budget",
-            }
-            return False
+            }, False
 
         allowed = _max_affordable_items(remaining, rate, wanted)
         if allowed <= 0:
             audit["warnings"].append(f"{source}:{kind}:budget_exhausted")
-            last_call_outcome = {
+            return False, {
                 "status": "budget_blocked", "kind": kind, "source": source,
                 "reason": "budget_exhausted",
-            }
-            return False
+            }, False
 
         actor_input = _limit_adaptive_input(source, dict(actor_input), allowed)
         cap = _charge_cap(
@@ -1325,23 +1406,33 @@ def adaptive_expand_after_cleaning(
                 pass
         if cap <= 0:
             audit["warnings"].append(f"{source}:{kind}:no_safe_charge_cap")
-            last_call_outcome = {
+            return False, {
                 "status": "budget_blocked", "kind": kind, "source": source,
                 "reason": "no_safe_charge_cap",
-            }
-            return False
+            }, False
+
+        # Reserve before starting: under parallel sources, an unreserved cap
+        # lets two threads spend the same remaining dollar.
+        grant = ledger.reserve(cap)
+        if grant + 1e-9 < max(minimum_attempt_charge_usd, 0.001):
+            ledger.settle(grant, 0.0)
+            audit["warnings"].append(f"{source}:{kind}:budget_exhausted")
+            return False, {
+                "status": "budget_blocked", "kind": kind, "source": source,
+                "reason": "budget_exhausted",
+            }, False
 
         try:
             resilient = run_actor_resilient(
                 runner, actor_id, actor_input, max_items=allowed,
-                max_charge_usd=cap, rate_per_1000=rate, max_calls=4,
+                max_charge_usd=grant, rate_per_1000=rate, max_calls=4,
                 minimum_attempt_charge_usd=minimum_attempt_charge_usd,
                 deadline_check=deadline_check, time_left=time_left,
                 heartbeat=lambda _note, _s=source: heartbeat(_s),
             )
             charged = resilient.accounted_cost_usd
-            _update_budget(folder, charged)
-            last_call_hit_deadline = "worker_deadline_reached" in (resilient.failure_kinds or [])
+            ledger.settle(grant, charged)
+            hit_deadline = "worker_deadline_reached" in (resilient.failure_kinds or [])
             combined = [*resilient.items, *resilient.diagnostics]
             append = _append_source_items(
                 folder, source, combined, date_from, date_to, mapping=mapping,
@@ -1358,7 +1449,7 @@ def adaptive_expand_after_cleaning(
             if evidence_layer != "comment":
                 report = clean_run(folder, plan=plan, cancel_check=cancel_check)
 
-            if last_call_hit_deadline:
+            if hit_deadline:
                 outcome_status = "deadline"
             elif resilient.status == "failed":
                 outcome_status = "actor_failed"
@@ -1367,7 +1458,7 @@ def adaptive_expand_after_cleaning(
             else:
                 outcome_status = "success"
 
-            last_call_outcome = {
+            outcome = {
                 "status": outcome_status,
                 "kind": kind,
                 "source": source,
@@ -1394,16 +1485,16 @@ def adaptive_expand_after_cleaning(
 
             if resilient.status == "failed":
                 audit["warnings"].append(f"{source}:{kind}:resilient_failure")
-                return False
-            return True
+                return False, outcome, hit_deadline
+            return True, outcome, hit_deadline
 
         except Exception as exc:
+            ledger.settle(grant, 0.0)
             audit["warnings"].append(f"{source}:{kind}:orchestrator_failed:{exc}")
-            last_call_outcome = {
+            return False, {
                 "status": "actor_failed", "kind": kind, "source": source,
                 "reason": f"orchestrator_failed:{exc}",
-            }
-            return False
+            }, False
 
     # Normal adaptive discovery is still driven only by a genuine sample shortfall.
     xplan = _x_source_plan(plan)
@@ -1465,7 +1556,7 @@ def adaptive_expand_after_cleaning(
                 continue
             hard_cap = max(1, int(sr.get("target_items", 1) or 1))
             wanted = min(hard_cap, max(1, missing * 2))
-            ok = do_call(
+            ok, _refill_outcome, refill_deadline = do_call(
                 source,
                 str(sr.get("actor_id") or semantic_sp.get("actor_id") or ""),
                 purpose,
@@ -1474,7 +1565,7 @@ def adaptive_expand_after_cleaning(
                 semantic_sp.get("price_per_1000_hint"),
                 logical_max_charge_usd=sr.get("max_charge_usd"),
             )
-            if not last_call_hit_deadline:
+            if not refill_deadline:
                 semantic_done.add(route_key)
                 semantic_state["done_routes"] = sorted(semantic_done)
                 store.write(semantic_state_path, semantic_state)
@@ -1486,7 +1577,7 @@ def adaptive_expand_after_cleaning(
                 "completed": bool(ok),
                 "remaining_analyzable_shortfall": missing,
             })
-            if last_call_hit_deadline:
+            if refill_deadline:
                 audit["deadline_reached"] = True
                 break
 
@@ -1515,12 +1606,17 @@ def adaptive_expand_after_cleaning(
 
         selected.sort(key=_never_attempted)
         forecast_rows = {r.get("source"): r for r in ((plan.get("preflight_forecast") or {}).get("sources") or [])}
-        for sp in selected:
+        def _source_comment_layer(sp: dict) -> None:
+            """One source's full comment layer, isolated per worker thread.
+
+            Loop-level break/continue became returns: a deadline or skip ends
+            THIS source; the other sources decide for themselves.
+            """
             if cancel_check():
-                break
+                return
             source = str(sp.get("source"))
             if source not in {"x", "tiktok", "instagram", "facebook"}:
-                continue
+                return
             cfg = registry.get(source) or {}
             comment_info = comments_forecast(source, True, cfg)
             plan_comment_info = (forecast_rows.get(source) or {}).get("comments") or {}
@@ -1529,11 +1625,11 @@ def adaptive_expand_after_cleaning(
             if comment_info.get("status") in {"verified_disabled", "configured_disabled"}:
                 audit["warnings"].append(f"{source}:comment_actor_disabled_in_settings")
                 _comment_status_update(folder, source, status="skipped", reason="comment_actor_disabled_in_settings")
-                continue
+                return
             if comment_info.get("status") not in {"verified_available", "configured_available"}:
                 audit["warnings"].append(f"{source}:comment_deepening_not_operational")
                 _comment_status_update(folder, source, status="skipped", reason="comment_deepening_not_operational")
-                continue
+                return
             # Durable idempotence, per PASS rather than per source. A file on
             # disk only proves the first pass ran; skipping on that alone is how
             # a resumed run silently dropped open search and the backfill.
@@ -1557,7 +1653,7 @@ def adaptive_expand_after_cleaning(
                     shortfall=terminal_shortfall,
                     reason=terminal_reason or "already_collected_in_previous_invocation",
                 )
-                continue
+                return
             if done_buckets:
                 audit["warnings"].append(
                     f"{source}:comment_deepening_resuming_after:{','.join(sorted(done_buckets))}")
@@ -1570,7 +1666,7 @@ def adaptive_expand_after_cleaning(
             if not actor_id:
                 audit["warnings"].append(f"{source}:comment_deepening_missing_actor")
                 _comment_status_update(folder, source, status="skipped", reason="no_comment_actor_configured")
-                continue
+                return
             # The operator's per-source comment target governs the layer. The
             # registry values are a safety ceiling for a single Actor call, not
             # the size of the evidence: a run asking for 300 comments from a
@@ -1598,6 +1694,9 @@ def adaptive_expand_after_cleaning(
                 return len(store.read(comment_path, []) or [])
 
             comment_attempt_outcomes: list[dict] = []
+            # Per-source deadline tracker: with parallel sources there is no
+            # meaningful "last call" globally, only this source's last call.
+            layer_state = {"hit_deadline": False}
 
             def harvest(refs: list[str], seed_meta: list[dict], wanted: int, bucket: str) -> int:
                 """Buy comments under refs in provider-safe batches.
@@ -1698,7 +1797,7 @@ def adaptive_expand_after_cleaning(
                             f"up to {batch_wanted} under {len(batch_refs)} posts"
                         ),
                     )
-                    ok = do_call(
+                    ok, call_outcome, call_deadline = do_call(
                         source, actor_id, f"comment_deepening_{bucket}",
                         inp, actor_wanted, rate,
                         mapping=mapping, evidence_layer="comment", origin=bucket,
@@ -1715,8 +1814,9 @@ def adaptive_expand_after_cleaning(
                         max_new_normalized=batch_wanted,
                         minimum_attempt_charge_usd=minimum_attempt_charge_usd,
                     )
+                    layer_state["hit_deadline"] = bool(call_deadline)
                     arrived = max(0, collected_count() - before_batch)
-                    outcome = dict(last_call_outcome or {})
+                    outcome = dict(call_outcome or {})
                     outcome.update({
                         "bucket": bucket,
                         "parents": len(batch_refs),
@@ -1735,7 +1835,7 @@ def adaptive_expand_after_cleaning(
                             f"{outcome.get('status') or 'unknown'}"
                         )
 
-                    if last_call_hit_deadline:
+                    if call_deadline:
                         all_batches_finished = False
                         # The comments this interrupted call did return are on
                         # disk; make them durable before handing off.
@@ -1747,8 +1847,12 @@ def adaptive_expand_after_cleaning(
                     attempted_refs.update(str(r) for r in batch_refs)
                     attempted_by_bucket[bucket] = sorted(attempted_refs)
                     source_state["attempted_refs_by_bucket"] = attempted_by_bucket
-                    harvest_state[source] = source_state
-                    store.write(harvest_state_path, harvest_state)
+                    with _ADAPTIVE_STATE_LOCK:
+                        # The file carries every source's refs; merge into a
+                        # fresh copy so parallel sources never clobber each other.
+                        harvest_state = store.read(harvest_state_path, {}) or {}
+                        harvest_state[source] = source_state
+                        store.write(harvest_state_path, harvest_state)
                     # Normalized comments, attempted refs and status are now on
                     # disk for this PAID call; a worker killed during the next
                     # call must find all three durable, or it re-pays this one.
@@ -1757,7 +1861,7 @@ def adaptive_expand_after_cleaning(
                     if source_comment_target > 0 and collected_count() >= source_comment_target:
                         break
 
-                if all_batches_finished and not last_call_hit_deadline:
+                if all_batches_finished and not layer_state["hit_deadline"]:
                     bucket_finished(bucket)
                 return max(0, collected_count() - before_total)
 
@@ -1771,6 +1875,7 @@ def adaptive_expand_after_cleaning(
                     # without these it was the longest silent stretch of the run.
                     deadline_check=deadline_check, time_left=time_left,
                     heartbeat=lambda _note, _s=source: heartbeat(_s),
+                    ledger=ledger,
                 ),
                 audit=audit,
                 cache_path=folder / f"page-parents-{source}.json",
@@ -1783,7 +1888,7 @@ def adaptive_expand_after_cleaning(
                     folder, source, status="deferred",
                     reason="page_discovery_worker_deadline_resumes_automatically",
                 )
-                break
+                return
 
             owned_quota = owned_comment_quota(source_comment_target, plan.get("owned_share_pct"))
             open_quota = max(0, source_comment_target - owned_quota)
@@ -1792,7 +1897,7 @@ def adaptive_expand_after_cleaning(
                 audit["warnings"].append(f"{source}:comment_deepening_deferred_worker_deadline")
                 audit["deadline_reached"] = True
                 _comment_status_update(folder, source, status="deferred", reason="worker_deadline_reached_resumes_automatically")
-                break
+                return
 
             if not owned_refs:
                 # Nothing was ever pasted for this source: both passes that read
@@ -1852,6 +1957,7 @@ def adaptive_expand_after_cleaning(
                     time_left=time_left,
                     heartbeat=heartbeat,
                     checkpoint=durable_checkpoint,
+                    ledger=ledger,
                 )
                 merged_rows = {
                     str(row.get("id")): row
@@ -1878,7 +1984,7 @@ def adaptive_expand_after_cleaning(
             if not owned_refs and not ranked_refs:
                 audit["warnings"].append(f"{source}:{selection_mode}")
                 _comment_status_update(folder, source, status="skipped", reason=selection_mode)
-                continue
+                return
             audit.setdefault("comment_selection", {})[source] = selection_mode
             audit.setdefault("comment_seeds", {})[source] = [*owned_meta, *ranked_meta]
 
@@ -1921,7 +2027,7 @@ def adaptive_expand_after_cleaning(
             while (
                 source_comment_target > 0
                 and collected_count() < source_comment_target
-                and not last_call_hit_deadline
+                and not layer_state["hit_deadline"]
                 and not deadline_check()
             ):
                 durable_harvest_state = store.read(
@@ -2021,15 +2127,10 @@ def adaptive_expand_after_cleaning(
                 got_backfill = harvest(owned_refs, owned_meta,
                                        min(missing, len(owned_refs) * max_per_parent), "owned_backfill")
 
-            # ONE cleaning pass per finished source replaces the per-call
-            # re-clean this layer used to run: the comments this source bought
-            # enter the report here, durably, before the next source starts.
-            report = clean_run(folder, plan=plan, cancel_check=cancel_check)
-
             collected_now = collected_count()
             every_pass_ran = (
                 set(COMMENT_BUCKETS) <= done_buckets
-                and not last_call_hit_deadline
+                and not layer_state["hit_deadline"]
                 and not deadline_check()
             )
             terminal_status, terminal_reason, comment_shortfall = comment_fulfillment_status(
@@ -2083,7 +2184,40 @@ def adaptive_expand_after_cleaning(
                     else f"Comments — {source}: {collected_now}"
                 ),
             )
-            shortfall = int(report.get("trusted_sample_shortfall", 0) or 0)
+            return
+
+        workers = int(getattr(settings, "signalyth_comment_parallel_sources", 4) or 4)
+        workers = max(1, min(workers, len(selected) or 1))
+        if workers <= 1 or len(selected) <= 1:
+            for sp in selected:
+                if cancel_check():
+                    break
+                try:
+                    _source_comment_layer(sp)
+                except Exception as exc:
+                    audit["warnings"].append(f"{sp.get('source')}:comment_layer_error:{exc}")
+        else:
+            # Apify calls dominate wall time; one thread per source makes the
+            # whole comment stage as slow as its SLOWEST source instead of the
+            # sum of all of them. Shared state goes through
+            # _ADAPTIVE_STATE_LOCK and every paid cap through the ledger.
+            with ThreadPoolExecutor(max_workers=workers,
+                                    thread_name_prefix="signalyth-comments") as pool:
+                futures = {pool.submit(_source_comment_layer, sp): str(sp.get("source"))
+                           for sp in selected}
+                for future, src in futures.items():
+                    try:
+                        future.result()
+                    except Exception as exc:
+                        # One source's failure must not sink the others; its
+                        # durable state stays honestly unfinished for the
+                        # continuation to pick up.
+                        audit["warnings"].append(f"{src}:comment_layer_error:{exc}")
+
+        # ONE cleaning pass after every source finished replaces the per-call
+        # and per-source re-cleans: all sources' comments enter the report
+        # together, before the audit totals below.
+        report = clean_run(folder, plan=plan, cancel_check=cancel_check)
 
     final_shortfall = int(report.get("trusted_sample_shortfall", 0) or 0)
     audit["final_trusted_shortfall"] = final_shortfall
