@@ -1528,17 +1528,41 @@ class RunManager:
             # The analysis finished on a worker that was replaced before its
             # files reached the archive (run 20260925T094032Z-0e94d435). The
             # OpenAI batch cache is durable, so re-running the analysis is
-            # cheap; failing the run here threw away a complete collection.
+            # cheap. The old answer — requeue once and give up — looped NBG
+            # run 20260926T142313Z-d4659ef0 for an hour: every fresh worker
+            # re-ran the analysis, lost the files again in the next hand-off,
+            # and the single rebuild attempt was long spent. Rebuild INLINE,
+            # in THIS worker, at the exact point of consumption: no hand-off
+            # fits between the rebuild and the aggregation that needs it.
+            analysis_dir = folder / "analysis"
+            present = sorted(p.name for p in analysis_dir.glob("*")) if analysis_dir.is_dir() else []
+            status = self.store.read_status(run_id)
             rebuilds = int(status.get("analysis_rebuild_attempts") or 0)
-            if rebuilds < 1:
+            status.update({
+                "analysis_rebuild_attempts": rebuilds + 1,
+                "current": {"source": None, "code": "analysis_rebuild_inline",
+                            "message": "Analysis files were lost in a worker hand-off; rebuilding them in-place from the saved evidence and the per-batch cache"},
+            })
+            status.setdefault("analysis_rebuild_diagnostics", []).append({
+                "at": _utcnow(), "analysis_files_present": present,
+            })
+            self.store.write_status(run_id, status)
+            try:
+                analyze_run(
+                    folder,
+                    plan=plan,
+                    cancel_check=lambda: self.store.cancel_requested_folder(folder),
+                    force=True,
+                    deadline_check=lambda: self._analysis_deadline_check(run_id),
+                )
+            except AIAnalysisTimeBudgetExceeded:
                 status = self.store.read_status(run_id)
                 status.update({
                     "status": "queued",
-                    "phase": "cleaning",
+                    "phase": "ai_analysis",
                     "fatal_error": None,
-                    "analysis_rebuild_attempts": rebuilds + 1,
-                    "current": {"source": None, "code": "analysis_rebuild",
-                                "message": "Analysis files were lost in a worker hand-off; rebuilding the analysis from the saved evidence"},
+                    "current": {"source": None, "code": "ai_analysis_continuation",
+                                "message": "Inline analysis rebuild ran out of worker time; it continues automatically from the cached batches"},
                 })
                 self.store.write_status(run_id, status)
                 try:
@@ -1550,6 +1574,8 @@ class RunManager:
                 except Exception:
                     pass
                 return
+            except Exception:
+                pass  # the file re-check below produces the honest failure
         try:
             intelligence = build_intelligence(folder, plan=plan)
         except Exception as exc:
