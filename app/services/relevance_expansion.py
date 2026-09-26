@@ -1349,7 +1349,14 @@ def adaptive_expand_after_cleaning(
                 seed_refs=seed_refs, seed_context=seed_context,
                 max_new_normalized=max_new_normalized,
             )
-            report = clean_run(folder, plan=plan, cancel_check=cancel_check)
+            # Cleaning the whole run takes tens of seconds and used to rerun
+            # after EVERY paid comment call, dominating the layer's wall time.
+            # Comment progress is measured from the normalized-comments file,
+            # not from this report, so comment calls defer cleaning to one
+            # pass per source (below); primary-evidence calls still re-clean,
+            # because the semantic refill steers by the refreshed shortfall.
+            if evidence_layer != "comment":
+                report = clean_run(folder, plan=plan, cancel_check=cancel_check)
 
             if last_call_hit_deadline:
                 outcome_status = "deadline"
@@ -2013,6 +2020,11 @@ def adaptive_expand_after_cleaning(
             elif missing > 0 and owned_refs and not deadline_check():
                 got_backfill = harvest(owned_refs, owned_meta,
                                        min(missing, len(owned_refs) * max_per_parent), "owned_backfill")
+
+            # ONE cleaning pass per finished source replaces the per-call
+            # re-clean this layer used to run: the comments this source bought
+            # enter the report here, durably, before the next source starts.
+            report = clean_run(folder, plan=plan, cancel_check=cancel_check)
 
             collected_now = collected_count()
             every_pass_ran = (
