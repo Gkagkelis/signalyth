@@ -112,8 +112,11 @@ def test_resilience_knows_comment_and_parent_multi_target_fields(field):
 
 def test_comment_contracts_are_explicit_for_every_production_social():
     assert comment_actor_contract("x")["reply_depth"] == "direct"
-    assert comment_actor_contract("tiktok")["parent_batch_limit"] == 1
-    assert comment_actor_contract("instagram")["sort"] == "recent_activity"
+    # clockworks/tiktok-comments-scraper batches postURLs with a per-post cap
+    # (v31.10 actor benchmark; live schema 2026-09-26).
+    assert comment_actor_contract("tiktok")["parent_batch_limit"] == 5
+    assert comment_actor_contract("tiktok")["limit_scope"] == "per_parent"
+    assert comment_actor_contract("instagram")["limit_scope"] == "per_parent"
     assert comment_actor_contract("facebook")["sort"] == "newest"
     assert comment_actor_contract("facebook")["reply_depth"] == "top_level"
 
@@ -206,7 +209,9 @@ def test_open_comment_harvest_advances_through_all_untried_cached_parents():
 def test_per_parent_comment_limits_follow_batch_shortfall_without_affecting_global_actors():
     assert _comment_per_parent_limit("facebook", 20, 5, 40) == 4
     assert _comment_per_parent_limit("instagram", 17, 5, 40) == 4
-    assert _comment_per_parent_limit("tiktok", 20, 5, 40) == 40
+    # tiktok moved to a per-parent contract in v31.10, so it now follows the
+    # same batch-shortfall arithmetic instead of the global-limit passthrough.
+    assert _comment_per_parent_limit("tiktok", 20, 5, 40) == 4
     assert _comment_per_parent_limit("x", 20, 2, 40) == 40
 
 

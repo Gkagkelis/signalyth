@@ -101,21 +101,23 @@ COMMENT_ACTOR_CONTRACTS = {
         "reply_depth": "direct",
         "sort": "actor_default",
     },
-    # epctex maxItems is a run-level cap across startUrls. One parent per call
-    # guarantees every selected video receives an attempt.
+    # clockworks/tiktok-comments-scraper (live schema read 2026-09-26):
+    # commentsPerPost is a PER-POST cap over the postURLs list, so multiple
+    # parents batch safely into one run instead of one call per video.
     "tiktok": {
-        "parent_batch_limit": 1,
-        "limit_scope": "global",
+        "parent_batch_limit": 5,
+        "limit_scope": "per_parent",
         "reply_depth": "nested_when_includeReplies",
         "sort": "actor_default",
     },
-    # ScrapeSmith exposes a per-post cap. Small batches bound worker wall time;
-    # recent ordering protects exact-date-window research from old popular rows.
+    # apify/instagram-comment-scraper (official; live schema read 2026-09-26):
+    # resultsLimit is PER POST over directUrls; includeNestedComments extracts
+    # replies. Small batches bound worker wall time.
     "instagram": {
         "parent_batch_limit": 5,
         "limit_scope": "per_parent",
-        "reply_depth": "nested",
-        "sort": "recent_activity",
+        "reply_depth": "nested_when_includeReplies",
+        "sort": "actor_default",
     },
     # Scraper One uses a per-post resultsLimit and newest-first ordering. Keep
     # the five-parent cap from the production hotfix; do not leak that limit to
@@ -448,11 +450,22 @@ def build_comment_deepening_input(
             out["until"] = f"{until_exclusive.isoformat()}_00:00:00_UTC"
         return out
     if source == "tiktok":
-        return {"startUrls": refs, "includeReplies": bool(include_replies), "maxItems": max_items}
+        # clockworks/tiktok-comments-scraper (live schema read via the app's
+        # actor lookup, 2026-09-26): postURLs + commentsPerPost (PER POST);
+        # maxRepliesPerComment pulls a bounded number of replies per comment.
+        out = {"postURLs": refs, "commentsPerPost": per_parent}
+        if include_replies:
+            out["maxRepliesPerComment"] = 5
+        return out
     if source == "instagram":
-        # ScrapeSmith's schema uses a per-parent limit rather than maxItems.
-        # Documented enum: popular | recent_activity ("recent" alone is not a value).
-        return {"postUrls": refs, "maxCommentsPerPost": per_parent, "sortOrder": "recent_activity"}
+        # apify/instagram-comment-scraper (official; live schema read via the
+        # app's actor lookup, 2026-09-26): directUrls is required, resultsLimit
+        # is PER POST, includeNestedComments extracts replies.
+        return {
+            "directUrls": refs,
+            "resultsLimit": per_parent,
+            "includeNestedComments": bool(include_replies),
+        }
     if source == "facebook":
         # scraper_one/facebook-comments-scraper: resultsLimit is PER POST and
         # newest-first is essential for bounded windows. The actor has no native

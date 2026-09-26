@@ -15,9 +15,15 @@ def test_comment_input_shapes_are_actor_specific():
     assert x["mode"] == "replies"
     assert x["replyTweetIds"] == ["123"]
     assert x["maxItemsPerTarget"] == 7
-    assert build_comment_deepening_input("tiktok", ["https://www.tiktok.com/@u/video/123"], 9)["includeReplies"] is True
+    # clockworks/tiktok-comments-scraper: postURLs + per-post cap; replies
+    # come through maxRepliesPerComment (live schema, 2026-09-26).
+    tt = build_comment_deepening_input("tiktok", ["https://www.tiktok.com/@u/video/123"], 9)
+    assert tt["postURLs"] == ["https://www.tiktok.com/@u/video/123"]
+    assert tt["maxRepliesPerComment"] == 5
+    # apify/instagram-comment-scraper (official): directUrls + per-post
+    # resultsLimit + includeNestedComments (live schema, 2026-09-26).
     ig = build_comment_deepening_input("instagram", ["https://www.instagram.com/p/ABC/"], 12, max_per_parent=5)
-    assert ig == {"postUrls": ["https://www.instagram.com/p/ABC/"], "maxCommentsPerPost": 5, "sortOrder": "recent_activity"}
+    assert ig == {"directUrls": ["https://www.instagram.com/p/ABC/"], "resultsLimit": 5, "includeNestedComments": True}
     fb = build_comment_deepening_input(
         "facebook", ["https://www.facebook.com/x/posts/1"], 12,
         max_per_parent=6, include_replies=True,
@@ -110,7 +116,8 @@ def test_comment_can_be_contextually_relevant_via_parent_without_repeating_topic
 
 def test_comment_actor_parent_batch_contracts_protect_coverage():
     assert comment_parent_batch_limit("x") == 2
-    assert comment_parent_batch_limit("tiktok") == 1
+    # clockworks batches multiple postURLs per run with a per-post cap.
+    assert comment_parent_batch_limit("tiktok") == 5
     assert comment_parent_batch_limit("instagram") == 5
     assert comment_parent_batch_limit("facebook") == 5
 
