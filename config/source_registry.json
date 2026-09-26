@@ -79,7 +79,9 @@
     "page_price_per_1000_hint": 1.7,
     "page_kind": "username",
     "page_enabled": true,
-    "page_max_posts": 60
+    "page_max_posts": 60,
+    "price_min_charge_usd": 0.5,
+    "comment_price_min_charge_usd": 0.5
   },
   "instagram": {
     "label": "Instagram",
@@ -161,7 +163,8 @@
     "page_price_per_1000_hint": 2,
     "page_kind": "page_url",
     "page_enabled": true,
-    "page_max_posts": 60
+    "page_max_posts": 60,
+    "price_min_charge_usd": 0.03
   },
   "youtube": {
     "label": "YouTube",

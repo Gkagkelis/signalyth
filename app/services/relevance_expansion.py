@@ -120,6 +120,7 @@ def _comment_minimum_attempt_charge_usd(
     actor_input: dict,
     wanted: int,
     rate_per_1000: float | None,
+    actor_min_charge_usd: float = 0.0,
 ) -> float:
     """Minimum safe Apify event cap for one comment Actor attempt.
 
@@ -127,12 +128,13 @@ def _comment_minimum_attempt_charge_usd(
     deliberately conservative: at most one reply-query event per requested
     output item. This is a CAP, not a charge; Apify still bills only used events.
     """
+    actor_min_charge_usd = max(0.0, float(actor_min_charge_usd or 0.0))
     if source != "tiktok":
-        return 0.0
+        return actor_min_charge_usd
     refs = actor_input.get("startUrls") if isinstance(actor_input, dict) else None
     parent_count = len(refs) if isinstance(refs, list) else 0
     if parent_count <= 0:
-        return 0.0
+        return actor_min_charge_usd
     wanted = max(1, int(wanted or 0))
     item_cost = 0.0
     if rate_per_1000 not in (None, 0):
@@ -141,8 +143,10 @@ def _comment_minimum_attempt_charge_usd(
 
     query_cost = TIKTOK_COMMENT_QUERY_USD * parent_count
     reply_cost = TIKTOK_REPLY_QUERY_USD * wanted if actor_input.get("includeReplies") else 0.0
-    # Small headroom prevents floating-point/event-rounding edge cases.
-    return round((query_cost + reply_cost + item_cost) * 1.10, 6)
+    # Small headroom prevents floating-point/event-rounding edge cases; the
+    # Actor's own minimum run charge always wins when it is larger.
+    return max(actor_min_charge_usd,
+               round((query_cost + reply_cost + item_cost) * 1.10, 6))
 
 
 def _instagram_shortcode_parent_ref(row: dict) -> str:
@@ -761,7 +765,7 @@ def _post_ref_from_row(source: str, row: dict) -> tuple[str, str]:
 def _probe_items(folder, plan, source, actor_id, actor_input, wanted, rate,
                  audit, store, runner, cancel_check,
                  deadline_check=None, time_left=None, heartbeat=None,
-                 charge_cap_usd=None, ledger=None) -> list[dict]:
+                 charge_cap_usd=None, ledger=None, min_charge_usd=0.0) -> list[dict]:
     """Run an Actor for references only, without filing its rows as evidence.
 
     Page discovery exists to find WHERE the conversation is. Its posts are not
@@ -789,19 +793,29 @@ def _probe_items(folder, plan, source, actor_id, actor_input, wanted, rate,
             cap = min(cap, max(0.0, float(charge_cap_usd)))
         except Exception:
             pass
+    # Some Actors refuse to start below a fixed minimum run charge; lift the
+    # cap to it when the budget allows, or skip the probe honestly.
+    min_charge_usd = max(0.0, float(min_charge_usd or 0.0))
+    if min_charge_usd > 0:
+        if min_charge_usd > remaining + 1e-9:
+            audit["warnings"].append(f"{source}:page_discovery:minimum_actor_charge_exceeds_remaining_budget")
+            return []
+        cap = max(cap, min_charge_usd)
     if cap <= 0:
         audit["warnings"].append(f"{source}:page_discovery:no_safe_charge_cap")
         return []
     # Under parallel sources the cap must be RESERVED before the call starts,
     # or two sources both spend the same remaining dollar.
     grant = ledger.reserve(cap) if ledger is not None else cap
-    if ledger is not None and grant <= 0:
+    if ledger is not None and grant + 1e-9 < max(min_charge_usd, 0.001):
+        ledger.settle(grant, 0.0)
         audit["warnings"].append(f"{source}:page_discovery:budget_exhausted")
         return []
     try:
         resilient = run_actor_resilient(
             runner, actor_id, actor_input, max_items=allowed,
             max_charge_usd=grant, rate_per_1000=rate, max_calls=2,
+            minimum_attempt_charge_usd=min_charge_usd,
             deadline_check=deadline_check, time_left=time_left, heartbeat=heartbeat,
         )
     except Exception as exc:
@@ -1099,6 +1113,7 @@ def _discover_conversation_parent_candidates(
     heartbeat,
     checkpoint=None,
     ledger=None,
+    min_charge_usd=0.0,
 ) -> list[dict]:
     """Discover extra parent posts without adding them to analysis evidence.
 
@@ -1180,6 +1195,7 @@ def _discover_conversation_parent_candidates(
             heartbeat=lambda _note, _s=source: heartbeat(_s),
             charge_cap_usd=sr.get("max_charge_usd"),
             ledger=ledger,
+            min_charge_usd=min_charge_usd,
         )
         probe_attempted = bool((audit.get("probe_last_attempted") or {}).get(source))
         # A route becomes durable once it actually started a paid Actor call,
@@ -1786,6 +1802,7 @@ def adaptive_expand_after_cleaning(
 
                     minimum_attempt_charge_usd = _comment_minimum_attempt_charge_usd(
                         source, inp, batch_wanted, rate,
+                        actor_min_charge_usd=float(cfg.get("comment_price_min_charge_usd") or 0.0),
                     )
                     before_batch = collected_count()
                     heartbeat(source)
@@ -1958,6 +1975,7 @@ def adaptive_expand_after_cleaning(
                     heartbeat=heartbeat,
                     checkpoint=durable_checkpoint,
                     ledger=ledger,
+                    min_charge_usd=float((registry.get(source) or {}).get("price_min_charge_usd") or 0.0),
                 )
                 merged_rows = {
                     str(row.get("id")): row

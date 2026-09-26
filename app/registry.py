@@ -190,6 +190,9 @@ def update_source(source: str, changes: dict) -> dict:
         raise KeyError(source)
     allowed = {
         "actor_id", "locked", "enabled", "price_per_1000_hint",
+        # Some Actors refuse to start below a fixed minimum run charge; these
+        # floors lift the per-call caps to it (a cap, not a charge).
+        "price_min_charge_usd", "comment_price_min_charge_usd",
         "comment_enabled", "comment_price_per_1000_hint",
         "comment_max_per_parent", "comment_max_parents", "comment_include_replies",
     }
