@@ -459,6 +459,21 @@ def _seed_ref(source: str, row: dict) -> str:
     return ""
 
 
+#: Below this market score a PAID open comment parent must additionally prove
+#: it is clearly ABOUT the subject (trusted, or relevance above the review
+#: line). Run 20260925T130636Z: four live-score spam posts with market_score
+#: 0.27 (an aggregator page reposting global sports feeds that merely mention
+#: the subject) became paid comment parents and burned four of seven slots —
+#: while genuine short Greek-market posts can score 0.27-0.36 too, so a hard
+#: market floor alone would throw those away with the spam.
+OPEN_PARENT_MARKET_FLOOR = 0.5
+
+#: At most this many paid open parents per author/page. The same spam page
+#: posting its feed four times must not take four paid slots; two genuinely
+#: strong posts from one newsroom are still allowed.
+MAX_OPEN_PARENTS_PER_AUTHOR = 2
+
+
 def _comment_parent_candidate_allowed(source: str, row: dict) -> bool:
     """Hard gate for OPEN conversation parents.
 
@@ -502,8 +517,21 @@ def _comment_parent_candidate_allowed(source: str, row: dict) -> bool:
         return False
 
     try:
+        decision = str(cleaning.get("decision") or "")
+        if decision == "excluded":
+            # A record cleaning itself threw out is never worth a paid call.
+            return False
         market_score = float(cleaning.get("market_score", 0) or 0)
         if market_score < float(RULESET_CONFIG["market_review_below"]):
+            return False
+        if market_score < OPEN_PARENT_MARKET_FLOOR and not (
+            decision == "trusted"
+            or float(cleaning.get("relevance_score", 0) or 0)
+            >= float(RULESET_CONFIG["relevance_review_below"])
+        ):
+            # Weak market signal is acceptable only when the post is itself
+            # clearly ABOUT the subject. An aggregator feed that merely
+            # mentions it (market 0.27, low relevance) is not a paid doorway.
             return False
         if float(cleaning.get("spam_score", 0) or 0) >= float(RULESET_CONFIG["spam_exclude_at"]):
             return False
@@ -538,16 +566,22 @@ def _collect_seeds(source: str, rows: list[dict], max_seeds: int, skip_reported_
     refs: list[str] = []
     meta: list[dict] = []
     seen: set[str] = set()
+    author_counts: dict[str, int] = {}
     for row in rows:
         comments_n = int(row.get("comments", 0) or 0)
         availability = row.get("metric_availability") if isinstance(row.get("metric_availability"), dict) else {}
         comments_known = bool(availability.get("comments_known"))
         if skip_reported_zero and comments_known and comments_n <= 0:
             continue
+        author = str(row.get("author") or "").strip().casefold()
+        if author and author_counts.get(author, 0) >= MAX_OPEN_PARENTS_PER_AUTHOR:
+            continue
         ref = _seed_ref(source, row)
         if not ref or ref in seen:
             continue
         seen.add(ref)
+        if author:
+            author_counts[author] = author_counts.get(author, 0) + 1
         refs.append(ref)
         cleaning = row.get("cleaning") if isinstance(row.get("cleaning"), dict) else {}
         tier = _comment_parent_candidate_tier(source, row) or "direct"

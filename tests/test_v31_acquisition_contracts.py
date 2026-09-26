@@ -182,6 +182,10 @@ def test_a_parent_that_names_the_subject_is_still_direct():
     row = _provenance_parent()
     row["cleaning"]["reasons"] = ["core_term:eurojackpot", "greek_script"]
     row["cleaning"]["flags"] = []
+    # A row cleaning kept (not excluded) — v31.7 adds that a record cleaning
+    # itself threw out is never worth a paid comment call, so the fixture's
+    # leftover "excluded" decision must flip along with the subject reasons.
+    row["cleaning"]["decision"] = "review"
     assert _comment_parent_candidate_tier("facebook", row) == "direct"
 
 
