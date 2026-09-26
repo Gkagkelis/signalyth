@@ -199,37 +199,60 @@ class RunManager:
         self._lease_tokens: dict[str, str] = {}
         # Monotonic timestamp after which the current invocation must stop doing new
         # paid work, checkpoint and requeue a continuation. None disables the guard.
-        self._deadline_monotonic: float | None = None
+        # PER RUN: one serverless subscriber process handles several queue
+        # messages concurrently, so a single shared deadline was silently
+        # PUSHED FORWARD for every in-flight run each time a new message
+        # arrived — the run then blew straight past its soft deadline, never
+        # checkpointed, and the platform's hard kill destroyed its evidence
+        # (NBG run 20260926T131930Z-7e260342: 26 minutes, no checkpoint).
+        self._run_deadlines: dict[str, float] = {}
+        self._deadline_lock = threading.Lock()
+        self._deadline_monotonic: float | None = None  # fallback for run-less callers
 
-    def set_invocation_deadline(self, seconds: float | None) -> None:
-        if seconds and seconds > 0:
-            self._deadline_monotonic = time.monotonic() + float(seconds)
+    def set_invocation_deadline(self, seconds: float | None, run_id: str | None = None) -> None:
+        deadline = (time.monotonic() + float(seconds)) if seconds and seconds > 0 else None
+        if run_id:
+            with self._deadline_lock:
+                if deadline is None:
+                    self._run_deadlines.pop(run_id, None)
+                else:
+                    self._run_deadlines[run_id] = deadline
         else:
-            self._deadline_monotonic = None
+            self._deadline_monotonic = deadline
 
-    def _seconds_left(self, margin_seconds: float = 0.0) -> float:
+    def _deadline_for(self, run_id: str | None) -> float | None:
+        if run_id:
+            with self._deadline_lock:
+                own = self._run_deadlines.get(run_id)
+            if own is not None:
+                return own
+        return self._deadline_monotonic
+
+    def _seconds_left(self, margin_seconds: float = 0.0, run_id: str | None = None) -> float:
         """Seconds of this invocation still usable, after keeping a margin.
 
         A yes/no deadline cannot stop a worker from starting a three-minute
         Actor call with one minute to live. This can.
         """
-        if self._deadline_monotonic is None:
+        deadline = self._deadline_for(run_id)
+        if deadline is None:
             return float("inf")
-        return (self._deadline_monotonic - max(0.0, margin_seconds)) - time.monotonic()
+        return (deadline - max(0.0, margin_seconds)) - time.monotonic()
 
-    def _deadline_reached(self, margin_seconds: float = 0.0) -> bool:
-        if self._deadline_monotonic is None:
+    def _deadline_reached(self, margin_seconds: float = 0.0, run_id: str | None = None) -> bool:
+        deadline = self._deadline_for(run_id)
+        if deadline is None:
             return False
-        return time.monotonic() >= self._deadline_monotonic - max(0.0, margin_seconds)
+        return time.monotonic() >= deadline - max(0.0, margin_seconds)
 
-    def _analysis_deadline_check(self) -> bool:
+    def _analysis_deadline_check(self, run_id: str | None = None) -> bool:
         """Deadline check used to gate NEW analysis batch submissions.
 
         In-flight OpenAI requests can run up to the client timeout (60s) after
         the last submission, and the final checkpoint/requeue also needs time,
         so submissions must stop with a safety margin before the soft deadline.
         """
-        return self._deadline_reached(margin_seconds=75.0)
+        return self._deadline_reached(margin_seconds=75.0, run_id=run_id)
 
     @staticmethod
     def _status_age_seconds(status: dict) -> float | None:
@@ -454,8 +477,11 @@ class RunManager:
 
     def run_now(self, run_id: str) -> None:
         """Execute one run in the current process (used by the Vercel Celery subscriber)."""
-        self.set_invocation_deadline(settings.signalyth_worker_soft_deadline_seconds)
-        self._worker(run_id)
+        self.set_invocation_deadline(settings.signalyth_worker_soft_deadline_seconds, run_id=run_id)
+        try:
+            self._worker(run_id)
+        finally:
+            self.set_invocation_deadline(None, run_id=run_id)
 
     def _claim_lease(self, run_id: str) -> str:
         """Stamp this invocation as the owner of the run.
@@ -574,6 +600,16 @@ class RunManager:
                 )
                 return
 
+            # A worker whose restore fell back to settings-only must stop HERE,
+            # before the collection path: its status may already say sources
+            # were paid for, and re-running the plan would pay for them again.
+            if not self._evidence_guard(run_id):
+                return
+            # The workspace is now validated: nothing paid is missing from it.
+            # Drop the metadata-only marker (if any) so this worker's
+            # checkpoints are allowed to become the authoritative archive.
+            self.store.clear_metadata_only_marker(folder)
+
             if self.store.cancel_requested_folder(folder):
                 self._mark_cancelled_before_start(run_id)
                 return
@@ -611,8 +647,10 @@ class RunManager:
                     cancel_check=lambda: self.store.cancel_requested_folder(folder),
                     continue_pipeline=True,
                     deadline_check=lambda: self._deadline_reached(
-                        margin_seconds=float(settings.signalyth_collection_deadline_margin_seconds)
+                        margin_seconds=float(settings.signalyth_collection_deadline_margin_seconds),
+                        run_id=run_id,
                     ),
+                    checkpoint=lambda source: self._collection_checkpoint(run_id, source),
                 )
             except CollectionTimeBudgetExceeded:
                 # Not a failure: completed sources are terminal on disk/Blob and are
@@ -808,7 +846,7 @@ class RunManager:
                 pass
 
     def _reprocess_deadline_checkpoint(self, run_id: str, next_stage: str) -> bool:
-        if not self._deadline_reached(margin_seconds=60.0):
+        if not self._deadline_reached(margin_seconds=60.0, run_id=run_id):
             return False
         self._queue_reprocess_continuation(
             run_id,
@@ -867,7 +905,7 @@ class RunManager:
                         plan=plan,
                         cancel_check=lambda: self.store.cancel_requested_folder(folder),
                         force=True,
-                        deadline_check=self._analysis_deadline_check,
+                        deadline_check=lambda: self._analysis_deadline_check(run_id),
                     )
                 except AIAnalysisTimeBudgetExceeded:
                     self._queue_reprocess_continuation(
@@ -1010,6 +1048,29 @@ class RunManager:
         except Exception as exc:
             self._rollback_reprocess(run_id, "failed", str(exc))
 
+    def _collection_checkpoint(self, run_id: str, source: str) -> None:
+        """Make one source's paid evidence durable the moment it is complete.
+
+        Collection writes evidence to the local scratch disk only; before this
+        hook the FIRST durable copy was made at the soft-deadline requeue or at
+        the collection-finished milestone. A worker hard-killed anywhere in
+        between lost every source it had already paid for (NBG run
+        20260926T131930Z-7e260342: 6/6 sources collected, $0.38 paid, zero
+        records durable). A failed mid-collection save is recorded by the
+        durability ledger but must not fail the source that just succeeded.
+        """
+        try:
+            token = self._lease_tokens.get(run_id, "")
+            if token and not self._owns_lease(run_id, token):
+                return
+            try:
+                self._note_worker_step(self.store.folder_for(run_id), f"checkpoint_source_{source}")
+            except Exception:
+                pass
+            self.store.checkpoint_run(run_id)
+        except Exception:
+            pass
+
     def _evidence_guard(self, run_id: str) -> bool:
         """Stop the run rather than let it quietly shrink. True = safe to go on.
 
@@ -1142,10 +1203,12 @@ class RunManager:
                     initial_report=report,
                     cancel_check=lambda: self.store.cancel_requested_folder(folder),
                     deadline_check=lambda: self._deadline_reached(
-                        margin_seconds=float(settings.signalyth_collection_deadline_margin_seconds)
+                        margin_seconds=float(settings.signalyth_collection_deadline_margin_seconds),
+                        run_id=run_id,
                     ),
                     time_left=lambda: self._seconds_left(
-                        margin_seconds=float(settings.signalyth_collection_deadline_margin_seconds)
+                        margin_seconds=float(settings.signalyth_collection_deadline_margin_seconds),
+                        run_id=run_id,
                     ),
                     heartbeat=_adaptive_heartbeat,
                     checkpoint=_adaptive_checkpoint,
@@ -1265,7 +1328,7 @@ class RunManager:
                 folder,
                 plan=plan,
                 cancel_check=lambda: self.store.cancel_requested_folder(folder),
-                deadline_check=self._analysis_deadline_check,
+                deadline_check=lambda: self._analysis_deadline_check(run_id),
             )
         except AIAnalysisCancelled:
             self._mark_cancelled_after_collection(run_id)
@@ -1359,7 +1422,7 @@ class RunManager:
                         plan=plan,
                         cancel_check=lambda: self.store.cancel_requested_folder(folder),
                         force=True,
-                        deadline_check=self._analysis_deadline_check,
+                        deadline_check=lambda: self._analysis_deadline_check(run_id),
                     )
                 status_refill = self.store.read_status(run_id)
                 status_refill["semantic_refill"] = {"status": refill.get("status"), "summary": refill, "completed_at": _utcnow()}
