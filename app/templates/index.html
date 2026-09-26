@@ -599,8 +599,17 @@ async function renderRuns(){
       await maybeOpenReviewGate(x.run_id,x);break;
     }
     if((active||anyStale)&&current==='runs'){runsPollTimer=setTimeout(()=>renderRuns(),2000)}
-  }catch(_){ }
+  }catch(_){
+    // A single failed fetch (laptop asleep, brief offline) used to kill the
+    // whole polling chain: the list then showed yesterday's "running" cards
+    // forever while the runs had long finished. Keep polling with a backoff.
+    if(current==='runs'){if(runsPollTimer)clearTimeout(runsPollTimer);runsPollTimer=setTimeout(()=>renderRuns(),5000)}
+  }
 }
+// Returning to the tab after hours must show today's truth, not a frozen list:
+// background tabs throttle timers, so refresh explicitly on wake.
+document.addEventListener('visibilitychange',()=>{if(!document.hidden&&current==='runs'){lastRunsHtml='';renderRuns()}});
+window.addEventListener('focus',()=>{if(current==='runs'){lastRunsHtml='';renderRuns()}});
 async function deleteRun(runId){
   // Δύο διαφορετικές πράξεις: ελευθέρωση χώρου vs οριστική απώλεια.
   let fp=null;
@@ -738,6 +747,11 @@ async function openRunDetails(runId,isRefresh){
     if(['queued','running','cancelling'].includes(d.status)){
       if(detailPollTimer)clearTimeout(detailPollTimer);
       detailPollTimer=setTimeout(()=>{const o=document.getElementById('reviewOverlay');if(o&&o.classList.contains('open')&&detailRunId===runId)openRunDetails(runId,true)},2500);
+    }else{
+      // The modal just learned this run is terminal. The list behind it may
+      // still say "running" from a dead poll chain; repaint it now so the two
+      // views never disagree about whether a run finished.
+      lastRunsHtml='';if(current==='runs')renderRuns();
     }
   }catch(err){if(!isRefresh)alert(err.message||String(err));else{detailPollTimer=setTimeout(()=>{const o=document.getElementById('reviewOverlay');if(o&&o.classList.contains('open')&&detailRunId===runId)openRunDetails(runId,true)},4000)}}
 }
