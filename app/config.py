@@ -28,11 +28,14 @@ class Settings(BaseSettings):
     signalyth_worker_soft_deadline_seconds: int = 700 if RUNNING_ON_VERCEL else 0
     # A run whose status is "running" but whose status.json has not been updated for
     # this long is treated as orphaned by a killed worker and may be resumed.
-    # MUST stay above the soft deadline. While a comment Actor is running the
-    # worker writes nothing, so a healthy worker looks silent; if "stale" were
-    # shorter than the deadline, a second worker would be started on top of a
-    # live one. 1200 > 700 leaves room for the longest quiet stretch.
-    signalyth_stale_running_after_seconds: int = 1200
+    # Since v31.5 a live worker heartbeats status.json every ≤20s EVEN while an
+    # Apify Actor call is blocking, so a healthy worker is never silent for
+    # minutes: the old 1200s (chosen when comment calls were write-silent) made
+    # every worker death cost 20 minutes of dead run time. 300s detects a dead
+    # worker in five minutes while staying an order of magnitude above the
+    # heartbeat interval; the worker lease still guarantees a false positive
+    # cannot produce two writers.
+    signalyth_stale_running_after_seconds: int = 300
     # New collection sources are not started when less than this many seconds
     # remain before the soft deadline, so a typical source (subruns + persist)
     # finishes before Vercel's hard kill and the run continues in a new worker.

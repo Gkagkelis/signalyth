@@ -623,9 +623,26 @@ def runs():
 @app.get("/api/runs/{run_id}")
 def get_run(run_id: str):
     try:
-        return store.get_run(run_id)
+        payload = store.get_run(run_id)
     except RunNotFound:
         raise HTTPException(status_code=404, detail="Run not found")
+    # Self-healing watchdog: the run screen polls this endpoint every few
+    # seconds, so it doubles as the detector for a worker that died without
+    # requeuing. enqueue() re-checks the stale window and the lease under its
+    # own lock, and a live worker heartbeats every ≤20s, so a false positive
+    # cannot start a second writer. Without this, a dead worker cost the run
+    # 20+ idle minutes until someone pressed Start by hand.
+    try:
+        if payload.get("status") in {"running", "cancelling"}:
+            age = manager._status_age_seconds(payload)
+            stale_after = max(60, int(settings.signalyth_stale_running_after_seconds))
+            if age is not None and age >= stale_after and payload.get("status") == "running":
+                manager.enqueue(run_id)
+                payload = store.get_run(run_id)
+                payload["auto_resumed"] = True
+    except Exception:
+        pass  # observability endpoint: healing is best-effort, reading never fails
+    return payload
 
 
 @app.post("/api/runs")
