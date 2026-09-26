@@ -668,10 +668,11 @@ def execute_plan(
                         cap_scale = route_target / max(1, planned_route_target)
                         safe_cap = min(safe_cap, planned_cap * cap_scale)
                 min_charge = float((load_registry().get(source) or {}).get("price_min_charge_usd") or 0.0)
-                safe_cap = apply_actor_min_charge(
-                    safe_cap, min_charge,
-                    min(max(0.0, source_cap - source_spent), max(0.0, guard.remaining)),
-                )
+                # The floor is judged against the RUN's remaining budget, not the
+                # per-source share: the minimum is a cap (actual billing stays at
+                # usage), and a $0.50 floor must not silently amputate TikTok
+                # from every small-budget run whose per-source slice is $0.33.
+                safe_cap = apply_actor_min_charge(safe_cap, min_charge, max(0.0, guard.remaining))
                 if safe_cap <= 0:
                     sr_status.update({"status":"skipped_budget_safety","completed_at":_utcnow(),"error":"No remaining acquisition budget for this top-up route."})
                     source_status["subruns_completed"] += 1
