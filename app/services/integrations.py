@@ -38,7 +38,9 @@ OUTPUT_ALIASES: dict[str, list[str]] = {
 }
 
 INPUT_ALIASES: dict[str, list[str]] = {
-    "query": ["query", "search", "searchquery", "searchterm", "keyword", "keywords", "queries", "searchterms", "searchqueries"],
+    # "categories" is deliberately LAST: apify/facebook-search-scraper takes its
+    # search terms there, but any conventionally named query field must win first.
+    "query": ["query", "search", "searchquery", "searchterm", "keyword", "keywords", "queries", "searchterms", "searchqueries", "categories"],
     "urls": ["urls", "starturls", "start_urls", "directurls", "direct_urls", "starturl", "url"],
     "max_items": ["maxitems", "max_items", "resultslimit", "resultslimit", "maxresults", "limit", "maxposts", "maxvideos", "maxcomments"],
     "date_from": ["from", "datefrom", "date_from", "startdate", "start_date", "since", "newerthan", "fromdate", "publishedafter"],
@@ -284,13 +286,25 @@ def suggest_input_mapping(schema: dict) -> dict[str, str]:
         alias_norms = [_keynorm(x) for x in aliases]
         best: tuple[int, str] | None = None
         for name in names:
+            spec = props.get(name)
+            spec = spec if isinstance(spec, dict) else {}
+            # A field constrained to a fixed enum can never carry free text.
+            # facebook-search-scraper's searchType ("pages"|"posts"|"reels"|...)
+            # must not swallow the search query: every value we would send is
+            # rejected by Apify's own input validation at run time.
+            if semantic == "query" and isinstance(spec.get("enum"), list) and spec["enum"]:
+                continue
             n = _keynorm(name)
             score = 0
             if n in alias_norms:
-                score = 100
-            elif any(a in n or n in a for a in alias_norms if len(a) >= 4):
-                score = 70
-            if score and (best is None or score > best[0]):
+                # Exact matches rank by alias order so a conventional name
+                # ("query") always beats a last-resort one ("categories").
+                score = 100 - alias_norms.index(n)
+            else:
+                partial = [i for i, a in enumerate(alias_norms) if len(a) >= 4 and (a in n or n in a)]
+                if partial:
+                    score = 70 - partial[0]
+            if score > 0 and (best is None or score > best[0]):
                 best = (score, name)
         if best:
             result[semantic] = best[1]
