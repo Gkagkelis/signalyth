@@ -59,3 +59,13 @@ def test_zero_evidence_still_fails_hard(tmp_path, monkeypatch):
     status = store.read(tmp_path / "status.json", {})
     assert status.get("status") == "failed"
     assert status.get("phase") == "evidence_unavailable"
+
+
+def test_every_post_collection_stage_failure_is_recoverable():
+    """intelligence_failed stranded a run whose analysis re-runs from cache."""
+    import inspect
+    from app.services import run_manager as rm
+    src = inspect.getsource(rm.RunManager.enqueue)
+    for phase in ("ai_analysis_failed", "intelligence_failed", "investigations_failed",
+                  "visualizations_failed", "exports_failed", "evidence_unavailable"):
+        assert f'"{phase}"' in src, f"{phase} must be a recoverable stage failure"

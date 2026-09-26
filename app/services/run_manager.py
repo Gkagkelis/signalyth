@@ -320,7 +320,15 @@ class RunManager:
             # evidence_unavailable is recoverable when the archive still holds
             # evidence: the guard reconciles the counter on the next worker and
             # the pipeline resumes from the durable records (v31.15).
-            recoverable_stage_failure = current == "failed" and phase in {"ai_analysis_failed", "exports_failed", "evidence_unavailable"}
+            recoverable_stage_failure = current == "failed" and phase in {
+                # Every post-collection stage failure is recoverable: paid
+                # evidence is durable, cleaning is deterministic, AI analysis
+                # resumes from its per-batch cache, and the later stages are
+                # pure computation over saved files. Only true collection
+                # failures stay terminal.
+                "ai_analysis_failed", "intelligence_failed", "investigations_failed",
+                "visualizations_failed", "exports_failed", "evidence_unavailable",
+            }
             if current in self.store.TERMINAL_STATUSES and not recoverable_stage_failure:
                 raise RunStateError(f"Run is already terminal: {current}")
             if current not in {"planned", "queued"} and not recoverable_stage_failure:
