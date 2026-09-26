@@ -271,6 +271,28 @@ def _normalize_partial(source: str, source_raw: list[dict], desired_target: int,
     return normalized, metrics
 
 
+def apply_actor_min_charge(safe_cap: float, min_charge: float, headroom: float) -> float:
+    """Raise a route's charge cap to the Actor's own minimum when affordable.
+
+    Several top Actors refuse to start below a fixed minimum run charge
+    (clockworks: $0.50, apify/facebook-search-scraper: $0.024). A cap computed
+    from expected item cost alone sat below that and the whole route failed
+    with "Maximum cost per run is less than the allowed minimum" — run
+    20260926T112403Z lost TikTok and Facebook to exactly this. The minimum is
+    a CAP, not a charge: Apify still bills only what the run uses.
+
+    Returns the (possibly raised) cap, or 0.0 when the minimum itself does not
+    fit in the remaining headroom — the caller then skips the route safely.
+    """
+    safe_cap = max(0.0, float(safe_cap or 0.0))
+    min_charge = max(0.0, float(min_charge or 0.0))
+    if min_charge <= 0 or safe_cap >= min_charge:
+        return safe_cap
+    if min_charge <= max(0.0, float(headroom or 0.0)) + 1e-9:
+        return min_charge
+    return 0.0
+
+
 def execute_plan(
     plan: dict,
     run_id: str,
@@ -645,6 +667,11 @@ def execute_plan(
                     if planned_cap > 0:
                         cap_scale = route_target / max(1, planned_route_target)
                         safe_cap = min(safe_cap, planned_cap * cap_scale)
+                min_charge = float((load_registry().get(source) or {}).get("price_min_charge_usd") or 0.0)
+                safe_cap = apply_actor_min_charge(
+                    safe_cap, min_charge,
+                    min(max(0.0, source_cap - source_spent), max(0.0, guard.remaining)),
+                )
                 if safe_cap <= 0:
                     sr_status.update({"status":"skipped_budget_safety","completed_at":_utcnow(),"error":"No remaining acquisition budget for this top-up route."})
                     source_status["subruns_completed"] += 1
@@ -658,6 +685,7 @@ def execute_plan(
                         max_charge_usd=float(sr["max_charge_usd"]),
                         rate_per_1000=sp.get("price_per_1000_hint"),
                         max_calls=int(sr.get("max_attempt_calls", 6) or 6),
+                        minimum_attempt_charge_usd=min_charge,
                         # A blocking Actor call is minutes of silence; the ≤20s
                         # heartbeat thread keeps status.json fresh so a worker
                         # death is visible from the API. sync() is lock-guarded.
