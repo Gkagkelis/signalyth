@@ -317,7 +317,10 @@ class RunManager:
             if existing is not None and not existing.done():
                 return status
             phase = str(status.get("phase") or "")
-            recoverable_stage_failure = current == "failed" and phase in {"ai_analysis_failed", "exports_failed"}
+            # evidence_unavailable is recoverable when the archive still holds
+            # evidence: the guard reconciles the counter on the next worker and
+            # the pipeline resumes from the durable records (v31.15).
+            recoverable_stage_failure = current == "failed" and phase in {"ai_analysis_failed", "exports_failed", "evidence_unavailable"}
             if current in self.store.TERMINAL_STATUSES and not recoverable_stage_failure:
                 raise RunStateError(f"Run is already terminal: {current}")
             if current not in {"planned", "queued"} and not recoverable_stage_failure:
@@ -1081,6 +1084,35 @@ class RunManager:
         """
         ok, reason = self.store.evidence_intact(run_id)
         if ok:
+            return True
+        # Partial loss with the archive still holding real evidence: a worker
+        # died between bumping normalized_total (status syncs to cloud on every
+        # write) and archiving the batch behind it, so status is a few records
+        # AHEAD of the durable truth. Killing the whole run over an unarchived
+        # tail batch throws away everything that IS saved. Reconcile down to
+        # the archive's contents and record the shrink BY NAME in the status —
+        # v31.5 forbids the run quietly shrinking, not an audited recovery.
+        try:
+            folder = self.store.folder_for(run_id)
+            present = len(self.store.read(folder / "normalized-all.json", []) or [])
+        except Exception:
+            present = 0
+        if present > 0:
+            status = self.store.read_status(run_id)
+            claimed = int(status.get("normalized_total") or 0)
+            audits = list(status.get("evidence_reconciliations") or [])
+            audits.append({
+                "at": _utcnow(),
+                "claimed": claimed,
+                "recovered": present,
+                "lost_records": max(0, claimed - present),
+                "reason": reason,
+            })
+            status["evidence_reconciliations"] = audits
+            status["normalized_total"] = present
+            status["sample_shortfall"] = max(
+                0, int(status.get("sample_target") or 0) - present)
+            self.store.write_status(run_id, status)
             return True
         status = self.store.read_status(run_id)
         status.update({
