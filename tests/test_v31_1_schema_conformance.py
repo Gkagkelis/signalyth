@@ -117,18 +117,25 @@ class TestDiscoveryInputsUseOnlyDocumentedFields:
 
 
 class TestCommentInputsUseOnlyDocumentedFields:
-    def test_instagram_sort_order_is_a_documented_enum_value(self):
+    def test_instagram_comment_input_matches_the_official_actor_schema(self):
+        # apify/instagram-comment-scraper, schema read live through the app's
+        # actor lookup on 2026-09-26: directUrls (required), resultsLimit
+        # (per post), includeNestedComments.
         inp = build_comment_deepening_input("instagram", ["https://www.instagram.com/p/ABC/"], 40,
                                             max_per_parent=40)
-        assert set(inp) <= {"postUrls", "maxCommentsPerPost", "sortOrder"}
-        assert inp["sortOrder"] in {"popular", "recent_activity"}
-        # Dated research wants the newest activity, not all-time favourites.
-        assert inp["sortOrder"] == "recent_activity"
+        assert set(inp) <= {"directUrls", "resultsLimit", "includeNestedComments"}
+        assert inp["directUrls"] == ["https://www.instagram.com/p/ABC/"]
+        assert inp["resultsLimit"] == 40
 
-    def test_tiktok_comment_input_is_documented(self):
+    def test_tiktok_comment_input_matches_the_clockworks_schema(self):
+        # clockworks/tiktok-comments-scraper, schema read live through the
+        # app's actor lookup on 2026-09-26: postURLs, commentsPerPost (per
+        # post), maxRepliesPerComment.
         inp = build_comment_deepening_input("tiktok", ["https://www.tiktok.com/@u/video/7"], 40,
                                             max_per_parent=40)
-        assert set(inp) <= {"startUrls", "includeReplies", "endPage", "maxItems", "customMapFunction"}
+        assert set(inp) <= {"postURLs", "commentsPerPost", "topLevelCommentsPerPost", "maxRepliesPerComment"}
+        assert inp["postURLs"] == ["https://www.tiktok.com/@u/video/7"]
+        assert inp["commentsPerPost"] == 40
 
     def test_facebook_comment_input_is_documented_for_the_registered_actor(self):
         inp = build_comment_deepening_input(
