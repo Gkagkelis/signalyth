@@ -1745,28 +1745,20 @@ def adaptive_expand_after_cleaning(
                 batch_limit = comment_parent_batch_limit(source)
                 before_total = collected_count()
                 all_batches_finished = True
+                batch_starts = list(range(0, len(pairs), batch_limit))
 
-                for batch_index in range(0, len(pairs), batch_limit):
-                    if deadline_check():
-                        all_batches_finished = False
-                        audit["deadline_reached"] = True
-                        audit["warnings"].append(
-                            f"{source}:{bucket}:comment_batch_deferred_worker_deadline"
-                        )
-                        break
+                def run_one_batch(batch_index: int, batch_pairs: list, batch_wanted: int) -> dict:
+                    """One paid comment call, safe to run beside its siblings.
 
-                    batch_pairs = pairs[batch_index:batch_index + batch_limit]
+                    Everything shared — the attempted-ref set, the harvest state
+                    file, the audit lists — is mutated under the adaptive state
+                    lock; the money goes through the same reservation ledger the
+                    parallel SOURCES already use, so concurrency here cannot
+                    overspend either. Returns what the wave loop needs to decide
+                    whether to keep going.
+                    """
                     batch_refs = [r for r, _ in batch_pairs]
                     batch_meta = [m for _, m in batch_pairs]
-                    already_arrived = max(0, collected_count() - before_total)
-                    remaining_wanted = max(0, wanted - already_arrived)
-                    if remaining_wanted <= 0:
-                        break
-                    batch_wanted = min(
-                        remaining_wanted,
-                        max(1, len(batch_refs) * max_per_parent),
-                    )
-
                     actor_wanted = batch_wanted
                     actor_per_parent = _comment_per_parent_limit(
                         source, batch_wanted, len(batch_refs), max_per_parent
@@ -1784,21 +1776,23 @@ def adaptive_expand_after_cleaning(
                             date_to=date_to,
                         )
                     except ValueError as exc:
-                        audit["warnings"].append(
-                            f"{source}:{bucket}:comment_input_unavailable:{exc}"
-                        )
-                        comment_attempt_outcomes.append({
-                            "bucket": bucket,
-                            "status": "actor_failed",
-                            "reason": f"comment_input_unavailable:{exc}",
-                            "parents": len(batch_refs),
-                            "requested": batch_wanted,
-                            "batch_index": batch_index // batch_limit,
-                        })
-                        # Invalid refs are terminal for this batch; record them so a
-                        # continuation does not buy the same impossible request.
-                        attempted_refs.update(str(r) for r in batch_refs)
-                        continue
+                        with _ADAPTIVE_STATE_LOCK:
+                            audit["warnings"].append(
+                                f"{source}:{bucket}:comment_input_unavailable:{exc}"
+                            )
+                            comment_attempt_outcomes.append({
+                                "bucket": bucket,
+                                "status": "actor_failed",
+                                "reason": f"comment_input_unavailable:{exc}",
+                                "parents": len(batch_refs),
+                                "requested": batch_wanted,
+                                "batch_index": batch_index,
+                            })
+                            # Invalid refs are terminal for this batch; record them
+                            # so a continuation does not buy the same impossible
+                            # request.
+                            attempted_refs.update(str(r) for r in batch_refs)
+                        return {"deadline": False, "arrived": 0}
 
                     minimum_attempt_charge_usd = _comment_minimum_attempt_charge_usd(
                         source, inp, batch_wanted, rate,
@@ -1831,40 +1825,47 @@ def adaptive_expand_after_cleaning(
                         max_new_normalized=batch_wanted,
                         minimum_attempt_charge_usd=minimum_attempt_charge_usd,
                     )
-                    layer_state["hit_deadline"] = bool(call_deadline)
-                    arrived = max(0, collected_count() - before_batch)
                     outcome = dict(call_outcome or {})
+                    # THIS call's own additions. A file-length delta counts the
+                    # rows a sibling batch appended at the same moment, which
+                    # would mislabel a successful call "empty".
+                    if "normalized_added" in outcome:
+                        arrived = max(0, int(outcome.get("normalized_added") or 0))
+                    else:
+                        arrived = max(0, collected_count() - before_batch)
                     outcome.update({
                         "bucket": bucket,
                         "parents": len(batch_refs),
                         "requested": batch_wanted,
                         "collected": arrived,
-                        "batch_index": batch_index // batch_limit,
+                        "batch_index": batch_index,
                         "parent_refs": list(batch_refs),
                     })
                     if ok and arrived <= 0 and outcome.get("status") == "success":
                         outcome["status"] = "empty"
-                    comment_attempt_outcomes.append(outcome)
-
-                    if not ok:
-                        audit["warnings"].append(
-                            f"{source}:{bucket}:actor_call_failed_or_budget_exhausted:"
-                            f"{outcome.get('status') or 'unknown'}"
+                    with _ADAPTIVE_STATE_LOCK:
+                        layer_state["hit_deadline"] = (
+                            layer_state["hit_deadline"] or bool(call_deadline)
                         )
+                        comment_attempt_outcomes.append(outcome)
+                        if not ok:
+                            audit["warnings"].append(
+                                f"{source}:{bucket}:actor_call_failed_or_budget_exhausted:"
+                                f"{outcome.get('status') or 'unknown'}"
+                            )
 
                     if call_deadline:
-                        all_batches_finished = False
                         # The comments this interrupted call did return are on
                         # disk; make them durable before handing off.
                         durable_checkpoint(f"{source}:{bucket}:comment_batch_deadline")
-                        break
+                        return {"deadline": True, "arrived": arrived}
 
                     # The Actor call ended normally (success, empty or a bounded
                     # failure). Persist these refs before the next paid call.
-                    attempted_refs.update(str(r) for r in batch_refs)
-                    attempted_by_bucket[bucket] = sorted(attempted_refs)
-                    source_state["attempted_refs_by_bucket"] = attempted_by_bucket
                     with _ADAPTIVE_STATE_LOCK:
+                        attempted_refs.update(str(r) for r in batch_refs)
+                        attempted_by_bucket[bucket] = sorted(attempted_refs)
+                        source_state["attempted_refs_by_bucket"] = attempted_by_bucket
                         # The file carries every source's refs; merge into a
                         # fresh copy so parallel sources never clobber each other.
                         harvest_state = store.read(harvest_state_path, {}) or {}
@@ -1874,7 +1875,74 @@ def adaptive_expand_after_cleaning(
                     # disk for this PAID call; a worker killed during the next
                     # call must find all three durable, or it re-pays this one.
                     durable_checkpoint(f"{source}:{bucket}:comment_batch")
+                    return {"deadline": False, "arrived": arrived}
 
+                # v31.19: the batches of ONE source may run concurrently. The
+                # sources were already parallel (v31.11), but a source holding
+                # forty parents still bought its batches strictly one after the
+                # other, and the comment layer IS the run's wall clock. Waves
+                # keep both feedback rules of the sequential loop intact — never
+                # request more than `wanted` in total, stop the moment the
+                # source target is met — by re-reading them between waves and
+                # allocating each wave's requests out of what is still wanted.
+                wave_size = max(1, int(
+                    getattr(settings, "signalyth_comment_parallel_batches", 1) or 1))
+                cursor = 0
+                while cursor < len(batch_starts):
+                    if deadline_check():
+                        all_batches_finished = False
+                        audit["deadline_reached"] = True
+                        audit["warnings"].append(
+                            f"{source}:{bucket}:comment_batch_deferred_worker_deadline"
+                        )
+                        break
+
+                    already_arrived = max(0, collected_count() - before_total)
+                    remaining_wanted = max(0, wanted - already_arrived)
+                    if remaining_wanted <= 0:
+                        break
+
+                    # Allocate this wave out of what is still wanted, so the
+                    # concurrent requests together ask for no more than the
+                    # sequential loop would have.
+                    wave: list[tuple[int, list, int]] = []
+                    unallocated = remaining_wanted
+                    for start in batch_starts[cursor:cursor + wave_size]:
+                        if unallocated <= 0:
+                            break
+                        batch_pairs = pairs[start:start + batch_limit]
+                        batch_wanted = min(
+                            unallocated,
+                            max(1, len(batch_pairs) * max_per_parent),
+                        )
+                        wave.append((start // batch_limit, batch_pairs, batch_wanted))
+                        unallocated -= batch_wanted
+                    if not wave:
+                        break
+                    cursor += len(wave)
+
+                    if len(wave) == 1:
+                        results = [run_one_batch(*wave[0])]
+                    else:
+                        with ThreadPoolExecutor(
+                            max_workers=len(wave),
+                            thread_name_prefix=f"signalyth-cmt-{source}",
+                        ) as pool:
+                            futures = [pool.submit(run_one_batch, *item) for item in wave]
+                            results = []
+                            for future in futures:
+                                try:
+                                    results.append(future.result())
+                                except Exception as exc:  # one batch must not kill the source
+                                    with _ADAPTIVE_STATE_LOCK:
+                                        audit["warnings"].append(
+                                            f"{source}:{bucket}:comment_batch_error:{exc}"
+                                        )
+                                    results.append({"deadline": False, "arrived": 0})
+
+                    if any(r.get("deadline") for r in results):
+                        all_batches_finished = False
+                        break
                     if source_comment_target > 0 and collected_count() >= source_comment_target:
                         break
 

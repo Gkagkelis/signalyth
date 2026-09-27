@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 import uuid
@@ -39,6 +40,39 @@ class RunStateError(RuntimeError):
 #: the comment layer writes when it stops at the worker deadline and expects to
 #: be resumed, not skipped.
 UNFINISHED_STEP_STATES = {"running", "queued", "deferred", "pending", "retrying"}
+
+
+def coalescing_checkpointer(build: Callable[[], None]) -> Callable[[], None]:
+    """Serialize archive builds WITHOUT making the callers queue behind them.
+
+    The comment layer's durability promise is that every completed paid call
+    is covered by an archive build that STARTS after it finished. A blocking
+    lock keeps that promise but pays for it twice over once the layer is
+    parallel — v31.11 put the sources on threads, v31.19 the batches inside
+    each source — because every thread then waits out every other thread's
+    upload and the builds, not the Actor calls, become the wall clock.
+
+    A caller that finds a build already running marks the workspace dirty and
+    returns immediately. The running builder loops until nothing is dirty, so
+    the late call still gets a build that started after it completed: the
+    promise holds, the callers never queue, and N calls arriving during one
+    build cost one extra build instead of N.
+    """
+    lock = threading.Lock()
+    dirty = threading.Event()
+
+    def request() -> None:
+        dirty.set()
+        if not lock.acquire(blocking=False):
+            return  # a build is running; it will loop for what we just marked
+        try:
+            while dirty.is_set():
+                dirty.clear()
+                build()
+        finally:
+            lock.release()
+
+    return request
 
 
 def resume_at_analysis(prior_status: dict, folder: Path, plan: dict | None = None) -> bool:
@@ -1219,7 +1253,12 @@ class RunManager:
                         pass
                     self._note_worker_step(folder, f"apify_call:{source}")
 
-                adaptive_checkpoint_lock = threading.Lock()
+                def _build_adaptive_archive() -> None:
+                    if not self._lease_ok(run_id):
+                        raise RunStateError("a newer worker owns this run; checkpoint skipped")
+                    self.store.checkpoint_run(run_id)
+
+                adaptive_archive = coalescing_checkpointer(_build_adaptive_archive)
 
                 def _adaptive_checkpoint(step: str) -> None:
                     # Durability boundary after EVERY paid comment/parent-
@@ -1229,13 +1268,7 @@ class RunManager:
                     # continuation everything that was paid for. Failures
                     # propagate to the caller, which records them and goes on.
                     self._note_worker_step(folder, f"checkpoint:{step}")
-                    # v31.11 runs comment sources on parallel threads; archive
-                    # builds serialize here so the per-call durability promise
-                    # holds for every source (a zip is seconds, a call minutes).
-                    with adaptive_checkpoint_lock:
-                        if not self._lease_ok(run_id):
-                            raise RunStateError("a newer worker owns this run; checkpoint skipped")
-                        self.store.checkpoint_run(run_id)
+                    adaptive_archive()
 
                 expanded = adaptive_expand_after_cleaning(
                     folder,

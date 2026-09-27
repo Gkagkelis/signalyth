@@ -144,7 +144,14 @@ def test_comment_harvest_persists_batch_progress_across_worker_handoffs():
     assert 'harvest_state_path = folder / "comment-harvest-state.json"' in source
     assert "batch_limit = comment_parent_batch_limit(source)" in source
     assert 'attempted_by_bucket[bucket] = sorted(attempted_refs)' in source
-    assert "batch_pairs = pairs[batch_index:batch_index + batch_limit]" in source
+    # Parents are still sliced at the provider's batch limit. v31.19 made the
+    # batches of one source run in parallel waves, so the slice is taken from
+    # the wave's own offset rather than a loop counter; pin the invariant, not
+    # the variable name. The behaviour these lines exist for — a handoff never
+    # re-paying a finished batch — is proven live in
+    # test_v31_5_per_call_checkpoint and, across concurrent siblings, in
+    # test_v31_19_parallel_comment_batches.
+    assert "pairs[start:start + batch_limit]" in source
 
 
 def test_collection_resume_preserves_adaptive_and_comment_spend():
