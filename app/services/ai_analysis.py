@@ -882,11 +882,24 @@ def _analysis_report(enriched: list[dict], trusted_input_hash: str, context: dic
     review = [r for r in enriched if r["ai_analysis"]["decision"] == "review"]
     excluded = [r for r in enriched if r["ai_analysis"]["decision"] == "excluded"]
     failed = [r for r in enriched if "provider_partial_failure" in r["ai_analysis"].get("flags", [])]
-    if enriched and failed and len(failed) == len(enriched) and len(enriched) > max(1, int(settings.signalyth_ai_batch_size)):
-        # TOTAL, systemic provider failure (more than one full batch, zero successes):
-        # this is a quota/key/model-access outage, never a per-record hiccup.
+    # Records the model was never ASKED about cannot testify to its health: an
+    # empty record or one stopped by the cost guard is a SIGNALYTH decision,
+    # not a provider answer. Judge the provider only on what it was sent.
+    asked = [
+        r for r in enriched
+        if not ({"insufficient_text_for_ai", "ai_budget_guard"} & set(r["ai_analysis"].get("flags", [])))
+    ]
+    asked_failed = [r for r in asked if "provider_partial_failure" in r["ai_analysis"].get("flags", [])]
+    if asked and len(asked_failed) == len(asked):
+        # TOTAL provider failure: every request that left the building came back
+        # empty. This used to require more than one full batch (12 records), so a
+        # small run sailed through with zero analysis and still shipped a polished
+        # report reading "neutral" everywhere — run 20260927T085252Z-cdddbdc0, four
+        # records, OpenAI credit exhausted, exports generated as if nothing were
+        # wrong. A report with no analysis behind it is worse than no report, at
+        # any size, so the count no longer excuses it.
         errors = []
-        for r in failed:
+        for r in asked_failed:
             e = str(r["ai_analysis"].get("provider_error") or "").strip()
             if e and e not in errors:
                 errors.append(e)
