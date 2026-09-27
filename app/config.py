@@ -54,6 +54,14 @@ class Settings(BaseSettings):
     # How many sources' comment layers run on parallel threads inside one
     # adaptive pass. 1 restores the sequential behavior as a safety valve.
     signalyth_comment_parallel_sources: int = 4
+    # How many comment BATCHES of the same source run at once. Parallel
+    # sources (above) stopped helping once one source held forty parents: its
+    # batches still went one after another and the comment layer is the run's
+    # wall clock. Waves of this size share the run's budget ledger and the
+    # adaptive state lock, so the money and the files stay as safe as they are
+    # sequentially. 1 = the classic strictly-ordered loop, which local runs and
+    # the deterministic handoff tests keep.
+    signalyth_comment_parallel_batches: int = 4 if RUNNING_ON_VERCEL else 1
     openai_api_key: str = ""
     signalyth_ai_enabled: bool = False
     signalyth_ai_bulk_model: str = "gpt-5.6-luna"
