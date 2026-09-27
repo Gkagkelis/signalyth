@@ -146,7 +146,12 @@ class TestEverySelectedSourceMustReportBack:
         assert resume_at_analysis(status, folder, plan=plan) is True
 
     def test_a_source_that_cannot_do_comments_is_not_waited_for(self, tmp_path):
-        """YouTube has no comment Actor; waiting for it would hang every run."""
+        """News has no comment Actor; waiting for it would hang every run.
+
+        This was youtube until v31.21 gave it a real comment route. The rule it
+        guards has not changed: a selected source outside
+        COMMENT_CAPABLE_SOURCES must never hold the analysis back.
+        """
         folder = _folder_with_cleaning(tmp_path)
         status = {
             "status": "running",
@@ -155,7 +160,7 @@ class TestEverySelectedSourceMustReportBack:
             "comment_deepening": {"facebook": {"status": "collected", "collected": 5,
                                                "buckets_done": ["owned", "open", "backfill"]}},
         }
-        plan = _real_plan(["facebook", "youtube"])
+        plan = _real_plan(["facebook", "news"])
         assert resume_at_analysis(status, folder, plan=plan) is True
 
     def test_without_a_plan_it_stays_conservative(self, tmp_path):
