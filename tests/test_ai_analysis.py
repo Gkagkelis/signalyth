@@ -6,6 +6,7 @@ from pathlib import Path
 
 from app.config import settings
 from app.services.ai_analysis import (
+    AIAnalysisProviderOutage,
     AIAnalysisCancelled,
     AIProviderError,
     OpenAIResponsesProvider,
@@ -228,18 +229,67 @@ class AIAnalysisTests(unittest.TestCase):
         self.assertIn("ungrounded_evidence_dropped", ai["flags"])
 
     def test_provider_batch_failure_never_auto_retries_or_risks_double_spend(self):
+        """One dead batch among several: flagged, not retried, not silent.
+
+        Four records at batch_size 2 means the batch holding record 2 explodes
+        while the other succeeds, so the run still has analysis and returns.
+        v31.23 stops a run where EVERY batch fails (covered below), which is
+        why this case is deliberately partial.
+        """
         provider = ExplodingProvider()
-        result = analyze_records([row(1, "Eurojackpot one"), row(2, "Eurojackpot bad"), row(3, "Eurojackpot three")], plan(), provider, batch_size=3)
+        result = analyze_records(
+            [row(1, "Eurojackpot one"), row(2, "Eurojackpot bad"),
+             row(3, "Eurojackpot three"), row(4, "Eurojackpot four")],
+            plan(), provider, batch_size=2)
+        self.assertEqual(provider.counter, 2)  # one call per batch, no retry
+        failed = [x for x in result["analyzed"] if x["id"] in {"1", "2"}]
+        survived = [x for x in result["analyzed"] if x["id"] in {"3", "4"}]
+        self.assertTrue(all(x["ai_analysis"]["decision"] == "review" for x in failed))
+        self.assertTrue(all("provider_partial_failure" in x["ai_analysis"]["flags"] for x in failed))
+        self.assertTrue(all("provider_partial_failure" not in x["ai_analysis"]["flags"] for x in survived))
+        self.assertEqual([x["id"] for x in result["analyzed"]], ["1", "2", "3", "4"])
+
+    def test_a_totally_dead_provider_stops_the_run_without_retrying(self):
+        """v31.23: zero analysis must never be dressed up as a neutral report.
+
+        The failure still costs exactly one call per batch — a run that stops
+        must not also double-spend on the way out.
+        """
+        provider = ExplodingProvider()
+        with self.assertRaises(AIAnalysisProviderOutage) as caught:
+            analyze_records([row(2, "Eurojackpot bad")], plan(), provider, batch_size=1)
         self.assertEqual(provider.counter, 1)
-        self.assertTrue(all(x["ai_analysis"]["decision"] == "review" for x in result["analyzed"]))
-        self.assertTrue(all("provider_partial_failure" in x["ai_analysis"]["flags"] for x in result["analyzed"]))
+        self.assertIn("deliberate bad record", str(caught.exception))
 
     def test_wrong_record_ids_never_attach_analysis_and_never_auto_retry(self):
+        """A model answering about the wrong records analyses none of them."""
+        class WrongIdsOnBadBatch(ScriptedProvider):
+            def analyze_batch(self, records, context, tier):
+                self.counter += 1
+                self.calls.append({"tier": tier, "ids": [r["record_id"] for r in records]})
+                mangle = any(r["record_id"] == "2" for r in records)
+                items = [annotation(r, record_id="WRONG" if mangle else r["record_id"])
+                         for r in records]
+                return ProviderBatchResult(items=items, model="fake",
+                                           response_id=f"x-{self.counter}", usage={})
+
+        provider = WrongIdsOnBadBatch()
+        result = analyze_records(
+            [row(1, "Eurojackpot one"), row(2, "Eurojackpot two"),
+             row(3, "Eurojackpot three"), row(4, "Eurojackpot four")],
+            plan(), provider, batch_size=2)
+        self.assertEqual(provider.counter, 2)  # no retry of the mangled batch
+        # Records are never given someone else's analysis, and never renamed.
+        self.assertEqual([x["id"] for x in result["analyzed"]], ["1", "2", "3", "4"])
+        mangled = [x for x in result["analyzed"] if x["id"] in {"1", "2"}]
+        self.assertTrue(all("provider_partial_failure" in x["ai_analysis"]["flags"] for x in mangled))
+
+    def test_wrong_record_ids_everywhere_stop_the_run(self):
         provider = WrongIdsProvider()
-        result = analyze_records([row(1, "Eurojackpot one"), row(2, "Eurojackpot two")], plan(), provider, batch_size=2)
+        with self.assertRaises(AIAnalysisProviderOutage):
+            analyze_records([row(1, "Eurojackpot one"), row(2, "Eurojackpot two")],
+                            plan(), provider, batch_size=2)
         self.assertEqual(provider.counter, 1)
-        self.assertTrue(all("provider_partial_failure" in x["ai_analysis"]["flags"] for x in result["analyzed"]))
-        self.assertEqual([x["id"] for x in result["analyzed"]], ["1", "2"])
 
     def test_trusted_input_is_never_mutated(self):
         rows = [row(1, "Eurojackpot Ελλάδα")]
