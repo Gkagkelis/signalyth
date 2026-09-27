@@ -121,13 +121,36 @@ def classify_exception(exc: Exception) -> str:
     return "unknown"
 
 
+#: Fields that carry an actual post. A row holding none of them is not evidence,
+#: whatever else it contains.
+_CONTENT_FIELDS = (
+    "text", "caption", "message", "title", "content", "description",
+    "timestamp", "createdAt", "created_at", "date", "takenAt", "taken_at",
+    "publishedAt", "published_at",
+)
+
+
 def is_diagnostic_row(row: object) -> bool:
     if not isinstance(row, dict):
         return False
     rid = str(row.get("id") or "")
     result_type = _fold(row.get("resultType") or row.get("result_type") or row.get("type"))
     status = _fold(row.get("status"))
-    return rid.startswith("diag:") or result_type == "diagnostic" or status in DIAGNOSTIC_STATUSES
+    if rid.startswith("diag:") or result_type == "diagnostic" or status in DIAGNOSTIC_STATUSES:
+        return True
+    # An Actor that found nothing often SAYS so with a row instead of returning
+    # an empty dataset: apify/instagram-scraper answers an empty hashtag with
+    # {"error": "no_items", "errorDescription": ...} and no post fields.
+    # Counted as data, such a row normalizes without a date and the source is
+    # reported "Actor returned data, but required normalized/date fields were
+    # unusable. Possible schema or mapping drift." — which reads to a client as
+    # a broken integration when the honest answer is "nobody posted under that
+    # tag". Only a row that carries an error AND no content at all qualifies,
+    # so a real post that happens to include an error field stays evidence.
+    error = row.get("error") or row.get("errorDescription") or row.get("error_description")
+    if error in (None, "", False):
+        return False
+    return not any(str(row.get(field) or "").strip() for field in _CONTENT_FIELDS)
 
 
 def split_diagnostic_rows(items: Iterable[dict]) -> tuple[list[dict], list[dict]]:
