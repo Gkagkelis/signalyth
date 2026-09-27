@@ -134,16 +134,16 @@ COMMENT_ACTOR_CONTRACTS = {
         "reply_depth": "top_level",
         "sort": "newest",
     },
-    # streamers/youtube-comments-scraper (live public schema read 2026-09-27):
-    # maxComments is documented "per video" over startUrls, so parents batch;
-    # sortCommentsBy=NEWEST_FIRST and the native oldestCommentDate keep a
-    # bounded window cheap. The actor exposes no reply control, so what comes
-    # back is the top-level comment stream.
+    # parseforge/youtube-comments-scraper (live schema + paid smoke, 2026-09-27):
+    # maxItems is documented "per run" over startUrls, so the batch shares one
+    # quota; includeReplies + maxRepliesPerComment pull the reply tier. The
+    # actor has no native date input, so SIGNALYTH enforces the window after
+    # normalization exactly as it does for facebook.
     "youtube": {
         "parent_batch_limit": 5,
-        "limit_scope": "per_parent",
-        "reply_depth": "top_level",
-        "sort": "newest",
+        "limit_scope": "global",
+        "reply_depth": "nested_when_includeReplies",
+        "sort": "actor_default",
     },
 }
 
@@ -220,11 +220,16 @@ SOURCE_CAPABILITIES = {
         "discovery": "primary_actor",
         "comment_deepening": {
             "mode": "companion_actor",
-            # streamers/youtube-comments-scraper: 24k users, 98.6% of 88k runs
-            # in 30 days, and the only leading YouTube comment Actor with a
-            # NATIVE date filter (oldestCommentDate). apidojo's has no date
-            # field at all, which makes a bounded research window guesswork.
-            "candidate_actor_id": "streamers/youtube-comments-scraper",
+            # parseforge/youtube-comments-scraper. Paid smokes on 2026-09-27
+            # compared the field the pipeline cannot do without — an ABSOLUTE
+            # comment date. streamers (24k users) returns only
+            # publishedTimeText ("2 weeks ago"), so every row would fail the
+            # window and the source would collect nothing, native input date
+            # filter or not; apidojo returns publishedTime with no reply tier.
+            # parseforge returns publishedAt, carries replies, ran 4,612 times
+            # in 30 days with zero failures, and costs $1.30/1k with no
+            # minimum run charge.
+            "candidate_actor_id": "parseforge/youtube-comments-scraper",
             "input_route": "comments",
             "input_field": "startUrls",
             "public_schema_known": True,
@@ -499,17 +504,19 @@ def build_comment_deepening_input(
         }
     if source == "youtube":
         # startUrls is a requestListSources field: objects, not bare strings.
-        # maxComments is documented PER VIDEO. oldestCommentDate is inclusive
-        # ("published after or on this date"), so the window's start maps
-        # straight onto it; there is no native upper bound, and date_to is
-        # enforced after normalization like every other source.
+        # maxItems is documented PER RUN, so the whole batch shares it — unlike
+        # the per-video actors above. aiEnhancement is pinned off on purpose:
+        # it nearly doubles the per-comment price to add sentiment SIGNALYTH
+        # computes itself. No native date input exists, so the window is
+        # enforced after normalization, as it is for facebook.
         out = {
             "startUrls": [{"url": r} for r in refs],
-            "maxComments": per_parent,
-            "sortCommentsBy": "NEWEST_FIRST",
+            "maxItems": max_items,
+            "includeReplies": bool(include_replies),
+            "aiEnhancement": False,
         }
-        if date_from:
-            out["oldestCommentDate"] = date_from.isoformat()
+        if include_replies:
+            out["maxRepliesPerComment"] = 5
         return out
     field = cap.get("input_field")
     if not field:
