@@ -92,6 +92,17 @@ def _facebook_flatten(items: list[dict]) -> list[dict]:
     return out
 
 
+def _youtube_video_id(value: str) -> str:
+    """The 11-character video id inside any YouTube URL form we accept."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if "/" not in text and "?" not in text:
+        return text  # already a bare id
+    match = re.search(r"(?:v=|/shorts/|/live/|youtu\.be/|/embed/)([A-Za-z0-9_-]{6,})", text)
+    return match.group(1) if match else ""
+
+
 def _parent_from_seed(source: str, raw: dict, seed_refs: list[str]) -> str | None:
     if source == "instagram":
         return str(raw.get("postUrl") or raw.get("inputUrl") or (seed_refs[0] if len(seed_refs) == 1 else "")) or None
@@ -111,6 +122,26 @@ def _parent_from_seed(source: str, raw: dict, seed_refs: list[str]) -> str | Non
             for ref in seed_refs:
                 if _video_id(ref) == aweme:
                     return ref
+        return seed_refs[0] if len(seed_refs) == 1 else None
+    if source == "youtube":
+        # The Actor echoes the video it was given; match on the video id so a
+        # batched call attributes each comment to the right parent instead of
+        # collapsing the whole batch onto the first URL.
+        vid = str(
+            raw.get("videoId")
+            or raw.get("video_id")
+            or _youtube_video_id(str(raw.get("videoUrl") or raw.get("pageUrl")
+                                     or raw.get("inputUrl") or raw.get("url") or ""))
+            or ""
+        )
+        if vid:
+            for ref in seed_refs:
+                if _youtube_video_id(ref) == vid:
+                    return ref
+        for key in ("videoUrl", "pageUrl", "inputUrl", "postUrl"):
+            candidate = str(raw.get(key) or "").strip()
+            if candidate:
+                return candidate
         return seed_refs[0] if len(seed_refs) == 1 else None
     if source == "x":
         # Thread mode returns descendants whose immediate inReplyToId may be
@@ -208,6 +239,29 @@ def normalize_comment_dataset(
             except Exception:
                 threading_depth = 0
             layer = "reply" if parent_comment_id or threading_depth > 0 else "comment"
+        elif source == "youtube":
+            # streamers/youtube-comments-scraper publishes no example output,
+            # so every plausible field name for each column is listed and the
+            # live smoke test decides. A relative stamp ("2 weeks ago") simply
+            # fails to parse and the row drops out of the window, which is the
+            # safe direction: no invented dates in the evidence.
+            text = _mapped(raw, mapping, "text", ("comment", "text", "commentText", "content"), "")
+            date_raw = _mapped(raw, mapping, "date", (
+                "publishedAt", "published_at", "publishDate", "commentedAt",
+                "date", "timestamp", "createdAt", "time",
+            ))
+            author = _mapped(raw, mapping, "author", (
+                "author", "authorName", "authorDisplayName", "channelName", "username",
+            ))
+            native_id = _first(raw, ("commentId", "cid", "id"))
+            likes = _int(_mapped(raw, mapping, "likes", ("voteCount", "likeCount", "likes", "votes"), 0))
+            replies = _int(_mapped(raw, mapping, "comments", ("replyCount", "repliesCount", "replies"), 0))
+            shares = 0
+            url = _mapped(raw, mapping, "url", ("commentUrl", "url"))
+            parent_comment_id = str(
+                raw.get("replyToCommentId") or raw.get("parentCommentId") or raw.get("parentId") or ""
+            ) or None
+            layer = "reply" if parent_comment_id else "comment"
         else:
             text = _mapped(raw, mapping, "text", ("text", "commentText", "content"), "")
             date_raw = _mapped(raw, mapping, "date", ("timestamp", "createdAt", "date"))

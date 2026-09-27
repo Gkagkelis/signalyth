@@ -91,6 +91,12 @@ def discovery_actor_contract(source: str) -> dict:
 # Acquisition contracts live here so provider semantics are not scattered across
 # orchestration code. These are deliberately conservative research defaults:
 # coverage and resumability matter more than minimizing Actor call count.
+#: The sources SIGNALYTH can buy comments for. One list, imported everywhere:
+#: youtube sat half-wired for months — a candidate Actor in the capability map,
+#: but every gate hardcoded the other four, so a political run could only ever
+#: report YouTube as neutral coverage.
+COMMENT_CAPABLE_SOURCES = frozenset({"x", "tiktok", "instagram", "facebook", "youtube"})
+
 COMMENT_ACTOR_CONTRACTS = {
     # Xquik's maxItems is global across a run; maxItemsPerTarget prevents one
     # parent from consuming the whole quota. mode=replies is the documented
@@ -123,6 +129,17 @@ COMMENT_ACTOR_CONTRACTS = {
     # the five-parent cap from the production hotfix; do not leak that limit to
     # other actors. This actor does not expose a nested-reply control.
     "facebook": {
+        "parent_batch_limit": 5,
+        "limit_scope": "per_parent",
+        "reply_depth": "top_level",
+        "sort": "newest",
+    },
+    # streamers/youtube-comments-scraper (live public schema read 2026-09-27):
+    # maxComments is documented "per video" over startUrls, so parents batch;
+    # sortCommentsBy=NEWEST_FIRST and the native oldestCommentDate keep a
+    # bounded window cheap. The actor exposes no reply control, so what comes
+    # back is the top-level comment stream.
+    "youtube": {
         "parent_batch_limit": 5,
         "limit_scope": "per_parent",
         "reply_depth": "top_level",
@@ -203,13 +220,17 @@ SOURCE_CAPABILITIES = {
         "discovery": "primary_actor",
         "comment_deepening": {
             "mode": "companion_actor",
-            "candidate_actor_id": "apidojo/youtube-comments-scraper",
+            # streamers/youtube-comments-scraper: 24k users, 98.6% of 88k runs
+            # in 30 days, and the only leading YouTube comment Actor with a
+            # NATIVE date filter (oldestCommentDate). apidojo's has no date
+            # field at all, which makes a bounded research window guesswork.
+            "candidate_actor_id": "streamers/youtube-comments-scraper",
             "input_route": "comments",
             "input_field": "startUrls",
             "public_schema_known": True,
             "live_verified": False,
-            "enabled": False,
-            "note": "Available for a later phase; not enabled by this four-social rollout.",
+            "enabled": True,
+            "note": "YouTube comments are where political audiences actually argue; video titles alone can only ever read neutral.",
         },
     },
     "news": {
@@ -251,7 +272,7 @@ def comments_forecast(source: str, requested: bool, registry_cfg: dict | None = 
     registry_cfg = registry_cfg or {}
     route_status = str(registry_cfg.get("comment_deepening_status") or "unverified")
     configured_actor = registry_cfg.get("comment_actor_id") or cap.get("candidate_actor_id")
-    production_scope = source in {"x", "tiktok", "instagram", "facebook"}
+    production_scope = source in COMMENT_CAPABLE_SOURCES
     live_verified = bool(cap.get("live_verified")) or route_status == "verified"
     contract_ready = bool(production_scope and cap.get("public_schema_known") and configured_actor and route_status in {"configured", "verified"})
     configured_enabled = bool(registry_cfg.get("comment_enabled", False))
@@ -477,7 +498,19 @@ def build_comment_deepening_input(
             "commentsSortType": "newest",
         }
     if source == "youtube":
-        return {"startUrls": refs, "maxItems": max_items}
+        # startUrls is a requestListSources field: objects, not bare strings.
+        # maxComments is documented PER VIDEO. oldestCommentDate is inclusive
+        # ("published after or on this date"), so the window's start maps
+        # straight onto it; there is no native upper bound, and date_to is
+        # enforced after normalization like every other source.
+        out = {
+            "startUrls": [{"url": r} for r in refs],
+            "maxComments": per_parent,
+            "sortCommentsBy": "NEWEST_FIRST",
+        }
+        if date_from:
+            out["oldestCommentDate"] = date_from.isoformat()
+        return out
     field = cap.get("input_field")
     if not field:
         raise ValueError(f"No comment-route input field is known for source {source}.")

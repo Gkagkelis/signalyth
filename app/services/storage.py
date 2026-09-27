@@ -10,6 +10,7 @@ from tempfile import NamedTemporaryFile
 from uuid import uuid4
 
 from app.config import settings
+from app.services.source_capabilities import COMMENT_CAPABLE_SOURCES
 from app.services.cloud_persistence import cloud_persistence
 from app.services.scratch import ensure_free_space, is_no_space_error
 
@@ -781,7 +782,7 @@ class RunStore:
             "comments_requested": bool(plan.get("comments_requested")),
             "comment_sources": [
                 sp.get("source") for sp in (plan.get("sources") or [])
-                if sp.get("source") in {"x", "tiktok", "instagram", "facebook"}
+                if sp.get("source") in COMMENT_CAPABLE_SOURCES
             ],
         }
 
