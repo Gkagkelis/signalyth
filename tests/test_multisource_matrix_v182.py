@@ -70,9 +70,13 @@ def test_comments_forecast_distinguishes_operational_readiness_from_live_confirm
     assert cc["fully_live_verified"] is False
     assert cc["verification_blockers"] == []
     rows = {r["source"]: r for r in plan.preflight_forecast["sources"]}
-    for source in ("x", "tiktok", "instagram", "facebook"):
+    # v31.21 added youtube: a curated public contract makes a route
+    # operationally ready, and only a paid smoke makes it live-verified.
+    for source in ("x", "tiktok", "instagram", "facebook", "youtube"):
         assert rows[source]["comments"]["status"] in {"configured_available", "verified_available"}
-    assert rows["youtube"]["comments"]["status"] == "not_applicable"
+    # news has no comment Actor and never will: articles have no comment stream
+    # SIGNALYTH can buy.
+    assert rows["news"]["comments"]["status"] == "not_applicable"
     assert rows["news"]["comments"]["status"] == "not_applicable"
 
 

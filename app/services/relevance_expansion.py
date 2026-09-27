@@ -25,6 +25,7 @@ from app.services.smart_collection import (
 )
 from app.services.storage import RunStore
 from app.services.source_capabilities import (
+    COMMENT_CAPABLE_SOURCES,
     build_comment_deepening_input,
     comment_actor_contract,
     comment_parent_batch_limit,
@@ -318,8 +319,9 @@ PARENT_LOOKBACK_DAYS = 30
 #: run before the source can be called finished.
 COMMENT_BUCKETS = ("owned", "open", "backfill")
 
-#: Sources with a comment Actor. Nothing waits on the others.
-COMMENT_CAPABLE_SOURCES = {"x", "tiktok", "instagram", "facebook"}
+#: Sources with a comment Actor live in source_capabilities; re-exported here
+#: because run_manager and the orchestration tests have always imported it from
+#: this module.
 
 #: States that mean the source is still owed work.
 _UNFINISHED_COMMENT_STATES = {"running", "queued", "pending", "deferred", "retrying"}
@@ -1631,7 +1633,7 @@ def adaptive_expand_after_cleaning(
             if cancel_check():
                 return
             source = str(sp.get("source"))
-            if source not in {"x", "tiktok", "instagram", "facebook"}:
+            if source not in COMMENT_CAPABLE_SOURCES:
                 return
             cfg = registry.get(source) or {}
             comment_info = comments_forecast(source, True, cfg)
@@ -2309,7 +2311,7 @@ def adaptive_expand_after_cleaning(
     audit["final_trusted_shortfall"] = final_shortfall
     audit["comment_evidence_total"] = sum(
         len(store.read(folder / f"normalized-comments-{s}.json", []) or [])
-        for s in ("x", "tiktok", "instagram", "facebook")
+        for s in sorted(COMMENT_CAPABLE_SOURCES)
     )
     audit["status"] = "target_met" if final_shortfall <= 0 else "exhausted_or_shortfall"
     audit["stop_rule"] = "Stop at target/budget/source exhaustion; configured comment routes must be enabled and comments are re-cleaned for direct or parent-context relevance."
