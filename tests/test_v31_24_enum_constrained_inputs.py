@@ -123,3 +123,57 @@ def test_a_non_greek_market_still_gets_a_valid_member():
     plan = make_source_plan("news", 80, draft, ["National Bank"], _news_registry(), 1.0)
     for sub in plan.subruns:
         assert sub.input["language"] in GOOGLE_NEWS_LANGUAGES
+
+
+# ---------------------------------------------------------------------------
+# v31.25 — a textual semantic never lands in a yes/no or numeric field
+# ---------------------------------------------------------------------------
+
+def test_market_is_not_written_into_a_boolean_geotag_filter():
+    """The live defect that cost a whole verification run.
+
+    streamers/youtube-scraper exposes `hasLocation` — "only videos carrying a
+    geotag". Name-only matching read it as the country field, every search was
+    narrowed to a tiny geotagged subset, and the 1-30 September run collected
+    0 videos.
+    """
+    from app.services.integrations import suggest_input_mapping
+    mapping = suggest_input_mapping({"properties": {
+        "searchQueries": {"type": "array"},
+        "startUrls": {"type": "array"},
+        "maxResults": {"type": "integer"},
+        "hasLocation": {"type": "boolean"},
+    }})
+    assert mapping.get("country") != "hasLocation"
+    assert "hasLocation" not in mapping.values()
+    assert mapping["query"] == "searchQueries"
+
+
+def test_a_real_string_country_field_is_still_mapped():
+    from app.services.integrations import suggest_input_mapping
+    mapping = suggest_input_mapping({"properties": {
+        "keywords": {"type": "array"},
+        "country": {"type": "string"},
+        "language": {"type": "string"},
+    }})
+    assert mapping["country"] == "country"
+    assert mapping["language"] == "language"
+
+
+def test_dates_are_not_written_into_numeric_lookalikes():
+    from app.services.integrations import suggest_input_mapping
+    mapping = suggest_input_mapping({"properties": {
+        "query": {"type": "string"},
+        "dateFrom": {"type": "integer"},
+        "fromDate": {"type": "string"},
+    }})
+    assert mapping.get("date_from") == "fromDate"
+
+
+def test_a_boolean_may_still_serve_a_boolean_semantic():
+    from app.services.integrations import suggest_input_mapping
+    mapping = suggest_input_mapping({"properties": {
+        "query": {"type": "string"},
+        "comments": {"type": "boolean"},
+    }})
+    assert mapping.get("comments") == "comments"
