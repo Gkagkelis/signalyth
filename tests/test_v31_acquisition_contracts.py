@@ -67,7 +67,11 @@ def test_instagram_topic_only_uses_bare_subject_only_as_semantic_probe(monkeypat
         sr for sr in sp["semantic_topup_subruns"]
         if sr.get("purpose") == "semantic_broad_probe"
     ]
-    assert not any("/explore/tags/nike/" in u.casefold() for u in primary_urls)
+    # Owner decision, 16 Oct 2026: the bare subject tag is now collected on a
+    # market run as well, because excluding it left Instagram at 1 record
+    # against a target of 100. The bounded probe it used to be confined to is
+    # unchanged and still exists — that is what this test now pins.
+    assert any("/explore/tags/nike/" in u.casefold() for u in primary_urls)
     assert semantic
     assert "/explore/tags/nike/" in semantic[0]["input"]["directUrls"][0].casefold()
 
