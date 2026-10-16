@@ -276,6 +276,11 @@ def _keynorm(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(value or "").casefold())
 
 
+# Semantics whose value is always text the caller supplies. A boolean or
+# numeric field can never hold one, however close its name looks.
+_TEXTUAL_INPUT_SEMANTICS = frozenset({"query", "urls", "country", "language", "date_from", "date_to"})
+
+
 def suggest_input_mapping(schema: dict) -> dict[str, str]:
     props = (schema or {}).get("properties") or {}
     if not isinstance(props, dict):
@@ -293,6 +298,13 @@ def suggest_input_mapping(schema: dict) -> dict[str, str]:
             # must not swallow the search query: every value we would send is
             # rejected by Apify's own input validation at run time.
             if semantic == "query" and isinstance(spec.get("enum"), list) and spec["enum"]:
+                continue
+            # A semantic that carries text cannot live in a yes/no or numeric
+            # field. streamers/youtube-scraper's `hasLocation` ("only videos
+            # with a geotag") swallowed the market and narrowed every search to
+            # a tiny geotagged subset: the 1-30 September verification run
+            # collected 0 videos. Match on meaning, not only on the name.
+            if semantic in _TEXTUAL_INPUT_SEMANTICS and spec.get("type") in {"boolean", "integer", "number"}:
                 continue
             n = _keynorm(name)
             score = 0
