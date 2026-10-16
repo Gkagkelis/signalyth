@@ -12,6 +12,7 @@ from app.registry import load_registry
 from app.services.smart_collection import x_search_input, canonical_topic
 from app.services.source_capabilities import comments_forecast
 from app.services.resilience import get_safe_batch_size
+from app.services.integrations import enum_input_value
 
 GREEK_MAP = {
     "α":"a","ά":"a","β":"v","γ":"g","δ":"d","ε":"e","έ":"e","ζ":"z","η":"i","ή":"i",
@@ -488,9 +489,25 @@ def make_generic_source_plan(source: str, target: int, draft: AnalysisDraft, que
         if isinstance(value, str): return "string"
         return None
 
+    def field_enum(field: str | None):
+        spec = (cfg.get("input_schema_fields") or {}).get(field) if field else None
+        options = spec.get("enum") if isinstance(spec, dict) else None
+        return options if isinstance(options, list) and options else None
+
     def set_semantic(inp: dict, semantic: str, value):
         field = mapping.get(semantic)
         if not field or value is None:
+            return
+        options = field_enum(field)
+        if options:
+            # A field with a fixed value list cannot take the draft's raw value.
+            # Pick the member that expresses it (Google News' "GR:el" for the
+            # draft's "el" in the Greek market); when none does, leave the
+            # committed template's own valid value in place rather than
+            # replacing it with one the Actor rejects or silently ignores.
+            chosen = enum_input_value(value, options, [inp.get(f) for f in mapping.values()] + [value])
+            if chosen is not None:
+                inp[field] = chosen
             return
         typ = field_type(field)
         if typ == "array" and not isinstance(value, list): value = [value]

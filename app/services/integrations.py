@@ -389,6 +389,49 @@ def build_probe_input(schema: dict, context: dict | None = None) -> tuple[dict, 
     return probe, sorted(unresolved), mapping
 
 
+_ENUM_PART_SPLIT = re.compile(r"[:\-_/|,]")
+
+
+def enum_input_value(value: Any, options: list, companions: Any = None) -> Any | None:
+    """Return the enum member that expresses ``value``, or None if none does.
+
+    An Actor field constrained to a fixed list cannot take a free-form value.
+    Sending one is rejected by Apify's own input validation, or — worse —
+    silently ignored so the Actor falls back to its default. Google News'
+    ``language`` is the live example: its members are composites such as
+    ``"GR:el"``, so the draft's bare ``"el"`` is invalid and the Actor quietly
+    serves ``US:en`` instead. A whole month of Greek coverage came back as
+    three English articles.
+
+    Matching is exact first, then case-insensitive, then composite: a member is
+    accepted when its parts carry our value together with a companion value
+    (the market/country we are also sending), which is what makes "el" + "GR"
+    resolve to "GR:el" rather than to an unrelated Greek-adjacent member.
+    """
+    if value is None or not isinstance(options, list) or not options:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    for option in options:
+        if option == value:
+            return option
+    low = text.casefold()
+    for option in options:
+        if str(option).strip().casefold() == low:
+            return option
+    hints = set()
+    for item in (companions if isinstance(companions, (list, tuple, set)) else [companions]):
+        if isinstance(item, str) and item.strip():
+            hints.add(item.strip().casefold())
+    hints.discard(low)
+    for option in options:
+        parts = {p.casefold() for p in _ENUM_PART_SPLIT.split(str(option)) if p}
+        if low in parts and (not hints or hints & parts):
+            return option
+    return None
+
+
 def sanitize_actor_input_types(schema: dict, payload: dict) -> tuple[dict, list[str]]:
     """Remove schema-incompatible example/default values before Apify validation.
 
@@ -407,6 +450,14 @@ def sanitize_actor_input_types(schema: dict, payload: dict) -> tuple[dict, list[
         spec = props.get(key)
         if not isinstance(spec, dict):
             cleaned[key] = value
+            continue
+        options = spec.get("enum")
+        if isinstance(options, list) and options:
+            chosen = enum_input_value(value, options, list(dict(payload or {}).values()))
+            if chosen is None:
+                mismatches.append(str(key))
+            else:
+                cleaned[key] = chosen
             continue
         typ = spec.get("type")
         try:
