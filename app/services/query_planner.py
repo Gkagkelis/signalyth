@@ -416,9 +416,16 @@ def instagram_discovery_tags(draft: AnalysisDraft) -> list[str]:
         # goes to the REAL market-anchored tags: the Greek alias spelling and
         # topic+context concatenations people actually use. No country tag is
         # ever fabricated.
-        tags = []
-        for alias in routes["aliases"][:2]: tags.append(hashtag(alias))
-        for term in [*routes["required"], *routes["contexts"]][:2]: tags.append(hashtag(f"{topic} {term}"))
+        # Owner decision, 16 Oct 2026: collect the obvious tag too and let the
+        # Greek-relevance filter do its job. Gluing the topic to a context term
+        # invents a hashtag nobody posts under — the 1-30 September Εθνική
+        # Τράπεζα run spent two of its three tags on #ΕθνικήΤράπεζαΕθνικήςΤράπεζας
+        # and #ΕθνικήΤράπεζαNBG and collected 1 record against a target of 100.
+        # Local alias spellings still LEAD, so primary evidence stays
+        # market-anchored; the plain topic tag follows as a real, if broader,
+        # route rather than being dropped.
+        tags = [hashtag(alias) for alias in routes["aliases"][:2]]
+        tags.append(hashtag(topic))
         tags = uniq([t for t in tags if t])[:4]
         # A subject-only market brief can legitimately have no safe local
         # hashtag. Do NOT turn the bare global hashtag into primary evidence on

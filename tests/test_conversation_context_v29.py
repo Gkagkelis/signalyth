@@ -179,9 +179,20 @@ class TestBareSubjectPlacement:
 # ---------------------------------------------------------------------------
 class TestInstagramAndTheProbe:
     def test_instagram_primary_is_a_real_market_anchored_tag(self):
+        """The local alias still LEADS. What changed is what follows it.
+
+        Owner decision, 16 Oct 2026: the plain topic tag is collected too and
+        the Greek-relevance filter sorts it out, because excluding it cost real
+        coverage — the 1-30 September Εθνική Τράπεζα run collected 1 Instagram
+        record against a target of 100 while its budget went to
+        #ΕθνικήΤράπεζαΕθνικήςΤράπεζας and #ΕθνικήΤράπεζαNBG, two strings nobody
+        posts under. Primary order is unchanged; the global tag is no longer
+        dropped from the route list.
+        """
         tags = instagram_discovery_tags(_draft(["instagram"]))
-        assert tags[0] == "ευρωτζάκποτ"
-        assert "Eurojackpot" not in tags, "the global tag belongs to the probe, not primary"
+        assert tags[0] == "ευρωτζάκποτ", "the market-anchored alias must still lead"
+        assert "Eurojackpot" in tags, "the real topic tag is now collected, then filtered"
+        assert not any("ελλάδ" in t.casefold() or "greece" in t.casefold() for t in tags)
 
     def test_no_country_tag_is_ever_fabricated(self):
         for tag in instagram_discovery_tags(_draft(["instagram"])):
