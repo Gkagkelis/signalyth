@@ -522,7 +522,14 @@ def actor_commit(source: str):
     summary_fields = {}
     for field in (candidate.get("input_summary") or {}).get("fields") or []:
         if isinstance(field, dict) and field.get("name"):
-            summary_fields[field["name"]] = {"type": field.get("type"), "required": field.get("required", False)}
+            summary_fields[field["name"]] = {
+                "type": field.get("type"),
+                "required": field.get("required", False),
+                # Allowed values travel with the field so the run-time planner
+                # can pick a member instead of overwriting a pinned one with a
+                # value the Actor will reject or silently ignore.
+                "enum": field.get("enum") if isinstance(field.get("enum"), list) else None,
+            }
     try:
         saved = commit_actor_configuration(
             source,
