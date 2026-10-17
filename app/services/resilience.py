@@ -85,6 +85,16 @@ CAPACITY_MARKERS = (
     "concurrent actor runs", "concurrent runs", "memory limit", "exceed your limit",
     "exceeds the memory limit", "not enough memory", "exceeded the maximum number of",
 )
+#: The account is out of money for this billing cycle. Like a capacity refusal
+#: the job never launches, so it costs nothing — but unlike capacity it will
+#: not clear by waiting, so it must stop the route instead of retrying. Run
+#: 20261017T174324Z accounted $4.44 of phantom spend against its $6 envelope
+#: this way: twelve refused comment buckets, every one charged at its cap.
+CREDIT_MARKERS = (
+    "remaining usage", "isn't enough for this run", "is not enough for this run",
+    "not enough credit", "insufficient credit", "insufficient funds",
+    "monthly usage", "usage limit", "out of credit",
+)
 PERMANENT_MARKERS = (
     "401", "403", "unauthorized", "forbidden", "invalid input", "invalid-input", "validation",
     "not found", "private actor", "permission", "authentication", "bad request", "unsupported",
@@ -133,6 +143,10 @@ def classify_exception(exc: Exception) -> str:
     # Capacity is checked FIRST: the provider's own wording for it carries
     # "upgrade to a paid plan", which the permanent markers would otherwise
     # read as a permission problem.
+    # Credit is checked before capacity: both mention upgrading a plan, but an
+    # exhausted balance must never be retried.
+    if any(marker in text for marker in CREDIT_MARKERS):
+        return "credit_exhausted"
     if any(marker in text for marker in CAPACITY_MARKERS):
         return "capacity"
     if any(marker in text for marker in PERMANENT_MARKERS):
@@ -538,7 +552,7 @@ def run_actor_resilient(
             kind = classify_exception(exc)
             # A job refused for want of account capacity never launched, so it
             # cost nothing; charging the cap for it would starve later routes.
-            charged_for_attempt = 0.0 if kind == "capacity" else attempt_cap
+            charged_for_attempt = 0.0 if kind in {"capacity", "credit_exhausted"} else attempt_cap
             result.accounted_cost_usd += charged_for_attempt
             attempt.update({
                 "status": "exception",
@@ -582,7 +596,10 @@ def run_actor_resilient(
     # Stopping at the worker deadline is not success: there was more to fetch.
     # It reads as "partial" so the caller keeps what was paid for and requeues.
     has_transient = has_transient or "worker_deadline_reached" in result.failure_kinds
-    has_permanent = any(k in {"permanent", "unknown", "cost_cap_violation"} for k in result.failure_kinds)
+    has_permanent = any(
+        k in {"permanent", "unknown", "cost_cap_violation", "credit_exhausted"}
+        for k in result.failure_kinds
+    )
     # Capacity alone is not a failure of the route: it reads like a transient
     # wait so the caller keeps whatever was fetched and carries on.
     has_transient = has_transient or "capacity" in result.failure_kinds

@@ -787,7 +787,13 @@ def execute_plan(
                 # burn every remaining logical batch. Repeated transient infrastructure failures
                 # also stop this source after the resilient call has already exhausted its own
                 # split/retry policy. Other sources continue normally.
-                permanent_failure = mapped_status == "failed" and any(k in {"permanent", "unknown", "cost_cap_violation"} for k in resilient.failure_kinds)
+                # An exhausted balance stops this source immediately: no later
+                # route can succeed either, and each refusal would otherwise be
+                # accounted at its cap and drain the run's envelope.
+                permanent_failure = mapped_status == "failed" and any(
+                    k in {"permanent", "unknown", "cost_cap_violation", "credit_exhausted"}
+                    for k in resilient.failure_kinds
+                )
                 # Running out of ACCOUNT capacity says nothing about this Actor:
                 # our own parallel sources filled the plan's concurrent-run slots
                 # and the queue drains by itself. Counting it toward the breaker

@@ -172,3 +172,42 @@ def test_capacity_does_not_open_the_source_circuit_breaker(tmp_path, monkeypatch
         f"a full account must not skip healthy routes: {len(skipped)} skipped")
     assert not (row.get("circuit_breaker") or {}).get("open"), row.get("circuit_breaker")
     assert row["collected"] > 0, "the routes that ran must still deliver evidence"
+
+
+# ---------- 4. an exhausted balance is zero-cost and final ----------
+
+CREDIT = (
+    "Your remaining usage of $0.003762 this billing cycle isn't enough for this run. "
+    "Increase your limit by upgrading to a paid plan at https://console.apify.com/billing"
+)
+
+
+def test_an_exhausted_balance_is_its_own_classification():
+    assert classify_exception(Exception(CREDIT)) == "credit_exhausted"
+    # Both messages offer a paid plan; only one of them clears by waiting.
+    assert classify_exception(Exception(CONCURRENCY)) == "capacity"
+
+
+def test_an_exhausted_balance_is_never_charged_and_never_retried():
+    """Twelve refused comment buckets booked $4.44 of phantom spend against a
+    $6 envelope in run 20261017T174324Z, because a job that never launched was
+    accounted at its cap."""
+    calls = {"n": 0}
+    slept: list[float] = []
+
+    class Runner:
+        def run(self, actor_id, run_input, *, max_items, max_charge_usd):
+            calls["n"] += 1
+            raise RuntimeError(CREDIT)
+
+    result = run_actor_resilient(
+        Runner(), "apify/instagram-comment-scraper", {"postUrls": ["https://e/1"]},
+        max_items=120, max_charge_usd=0.60, max_calls=8, sleep_fn=slept.append,
+    )
+
+    assert calls["n"] == 1, "waiting cannot refill a balance; one attempt is enough"
+    assert not slept, "there is nothing to wait for"
+    assert result.accounted_cost_usd == 0.0, (
+        f"a job that never launched must cost nothing: {result.accounted_cost_usd}")
+    assert "credit_exhausted" in result.failure_kinds
+    assert result.status == "failed"
