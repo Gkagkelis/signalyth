@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import traceback
 import threading
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import math
@@ -1003,6 +1004,29 @@ def execute_plan(
                 continue
             queue.append((idx, sp))
         deadline_stop = False
+
+        def _source_worker_crashed(name: str | None, exc: BaseException) -> None:
+            # A source thread that dies must leave a terminal row behind. Before
+            # v31.27 the exception was swallowed into a nameless status line and
+            # the source stayed "running" forever, so finalization — which only
+            # looks for failed/partial — reported the run as a plain shortfall
+            # with one source silently never collected.
+            row = status.get("sources", {}).get(name) if name else None
+            if row is not None and row.get("status") not in SOURCE_TERMINAL:
+                row.update({
+                    "status": "failed",
+                    "completed_at": _utcnow(),
+                    "error": f"Source worker stopped unexpectedly: {exc}",
+                    "worker_error": "".join(
+                        traceback.format_exception_only(type(exc), exc)
+                    ).strip(),
+                })
+            sync(
+                f"{name or 'A source'}: worker failed safely; the rest of the run continues",
+                name,
+                code="source_worker_error",
+            )
+
         pool = ThreadPoolExecutor(max_workers=parallel_workers, thread_name_prefix="signalyth-src")
         futures: dict = {}
         qi = 0
@@ -1022,7 +1046,7 @@ def execute_plan(
                     break
                 done, _pending = wait(set(futures), return_when=FIRST_COMPLETED)
                 for fut in done:
-                    futures.pop(fut, None)
+                    name = futures.pop(fut, None)
                     try:
                         res = fut.result()
                         if res.get("cancelled"):
@@ -1030,21 +1054,21 @@ def execute_plan(
                         if res.get("deadline"):
                             deadline_stop = True
                     except Exception as exc:
-                        sync(f"Source worker failed safely: {exc}", None, code="source_worker_error")
+                        _source_worker_crashed(name, exc)
                 if deadline_stop or violation["hit"] or cancel_box["hit"]:
                     # Stop submitting; drain whatever is in flight.
                     if futures:
                         done, _pending = wait(set(futures))
                         for fut in done:
-                            futures.pop(fut, None)
+                            name = futures.pop(fut, None)
                             try:
                                 res = fut.result()
                                 if res.get("cancelled"):
                                     cancel_box["hit"] = True
                                 if res.get("deadline"):
                                     deadline_stop = True
-                            except Exception:
-                                pass
+                            except Exception as exc:
+                                _source_worker_crashed(name, exc)
                     break
         finally:
             pool.shutdown(wait=True)
@@ -1058,6 +1082,20 @@ def execute_plan(
         if deadline_stop:
             sync("Worker time budget reached; collection continues automatically in a new worker", None, code="collection_continuation")
             raise CollectionTimeBudgetExceeded("Worker time budget reached; run will continue automatically.")
+
+    # Fail-safe before anything is called finished: a source row that never
+    # reached a terminal state did not collect anything, and a run must never
+    # report success while one of its sources quietly never ran.
+    for _name, _row in (status.get("sources") or {}).items():
+        if _row.get("status") not in SOURCE_TERMINAL:
+            _row.update({
+                "status": "failed",
+                "completed_at": _utcnow(),
+                "error": _row.get("error") or (
+                    "Source ended without reporting a terminal state; no evidence "
+                    "was collected from it and nothing was charged for it."
+                ),
+            })
 
     status["phase"] = "finalizing"
     sync("Finalizing the collected sample", None, "finalizing", code="finalizing_collection")

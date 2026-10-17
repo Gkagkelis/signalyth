@@ -491,7 +491,20 @@ class CloudPersistence:
                     use_cache=False,
                 )
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(result.content)
+            # Atomic replace, never a truncating write in place. Collection runs
+            # up to four source threads that each reload the actor registry; an
+            # in-place rewrite let one thread read a half-written file and die
+            # with a JSONDecodeError (run 20261016T102618Z lost Instagram that
+            # way, silently). Readers now always see one whole version.
+            tmp_path = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+            try:
+                tmp_path.write_bytes(result.content)
+                os.replace(tmp_path, path)
+            finally:
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
             return True
         except Exception:
             return False
