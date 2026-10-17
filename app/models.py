@@ -47,6 +47,10 @@ class AnalysisDraft(BaseModel):
     brand_accent: str | None = Field(default=None, max_length=16)
     additional_context: list[str] = Field(default_factory=list, max_length=50)
     exclusions: list[str] = Field(default_factory=list, max_length=50)
+    #: Opt-in: the subject IS a physical place in the target market (a venue,
+    #: monument, museum or destination). Default off — every existing analysis
+    #: keeps the language-anchored market gate it has today.
+    place_subject: bool = False
     search_strategy: SearchStrategy = "balanced_smart"
     keyword_roles: dict[str, KeywordRole] = Field(default_factory=dict)
     query_overrides: dict[str, list[str]] = Field(default_factory=dict)
@@ -140,6 +144,8 @@ class CollectionPlan(BaseModel):
     context_terms: list[str]
     greeklish_variants: list[str]
     exclusions: list[str]
+    #: Carried from the draft; read by the cleaning market gate.
+    place_subject: bool = False
     search_strategy_version: str = "smart-collection-v2"
     target_semantics: str = "requested_analyzable_evidence"
     resilience_policy_version: str = "multisource-resilience-v1.8.4"

@@ -302,6 +302,24 @@ def _parent_market_signal(parent_text: str) -> float:
 
 
 def _market_score(row: dict, plan: dict, view: TextView) -> tuple[float, list[str]]:
+    if plan.get("place_subject"):
+        # Opt-in mode: the subject IS a physical place in the target market, so
+        # talking about the subject IS talking about the market, in whatever
+        # language the visitor writes — and the visitor's language is precisely
+        # the finding we are after. The default (language-anchored) gate below
+        # deleted exactly those voices: a German review of a venue in Athens
+        # scores 0 because it writes "Athen", not "Athens", and a Hebrew or
+        # Chinese one is capped at 0.10 by the dominant-foreign-script rule.
+        # The subject-mention requirement still applies: a record with no
+        # subject signal is excluded before this score is ever consulted.
+        core_terms = [x for x in plan.get("core_terms", []) if str(x).strip()]
+        if any(_term_present(view.folded, x) for x in core_terms):
+            return 1.0, ["place_subject_is_in_market"]
+        parent_context = str(row.get("parent_context") or "").strip()
+        if parent_context:
+            parent_folded = _text_view(parent_context).folded
+            if any(_term_present(parent_folded, x) for x in core_terms):
+                return 1.0, ["place_subject_parent_is_in_market"]
     if str(plan.get("market", "")).casefold() != "greece":
         market = _fold(plan.get("market"))
         return (0.9, ["market_term_match"]) if market and market in view.folded else (0.55, ["non_greece_market_no_native_rule"])

@@ -877,7 +877,7 @@ def build_collection_plan(draft: AnalysisDraft) -> CollectionPlan:
                           source_pages={s:[str(u).strip() for u in ((draft.source_pages or {}).get(s) or []) if str(u or "").strip()] for s in selected},
                           owned_share_pct=int(draft.owned_share_pct),
                           budget_check=budget_check,rebalancing_enabled=(draft.sample_mode=="automatic"),rebalance_max_rounds=2,
-                          core_terms=core,context_terms=context,greeklish_variants=aliases,exclusions=uniq([*draft.exclusions,*_role_terms(draft,"exclude")]),
+                          core_terms=core,context_terms=context,greeklish_variants=aliases,exclusions=uniq([*draft.exclusions,*_role_terms(draft,"exclude")]),place_subject=bool(draft.place_subject),
                           search_strategy_version="master30-search-v1",target_semantics="requested_final_analyzable_unique_in_range",
                           resilience_policy_version="multisource-resilience-master30-v1",preflight_forecast=_preflight_forecast(draft,plans,registry),sources=plans,
                           search_strategy=draft.search_strategy,keyword_roles={str(k):str(v) for k,v in (draft.keyword_roles or {}).items()},query_preview=preview,subject_name_suggestions=name_suggestions,
