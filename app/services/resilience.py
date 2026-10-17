@@ -63,11 +63,27 @@ def actor_run_timeout_seconds(actor_id: str) -> float:
         return FACEBOOK_COMMENT_RUN_TIMEOUT_SECONDS
     return ACTOR_RUN_TIMEOUT_SECONDS
 
+#: How long to wait for one of our own concurrent runs to finish, and how many
+#: times. Six attempts at 4s doubling to 60s covers a slow sibling run.
+CAPACITY_BACKOFF_SECONDS = 4.0
+CAPACITY_BACKOFF_CAP_SECONDS = 60.0
+CAPACITY_MAX_RETRIES = 6
+
 TRANSIENT_MARKERS = (
     "504", "503", "502", "429", "timeout", "timed out", "rate limit", "rate-limit",
     "temporarily unavailable", "temporary failure", "upstream", "retryable", "retry-exhausted",
     "fetch failed", "partial_failure", "partial failure", "connection reset", "connection aborted",
     "service unavailable", "gateway timeout", "network error",
+)
+#: The ACCOUNT is momentarily full, not the Actor broken. A free Apify plan
+#: allows 5 concurrent Actor runs; four parallel sources plus a comment call
+#: cross that line routinely. Treating it as an Actor fault opened the source
+#: circuit breaker and threw away every remaining route — run
+#: 20261017T172315Z lost all 13 X routes to one such message, and nothing was
+#: even charged, because the job never launched.
+CAPACITY_MARKERS = (
+    "concurrent actor runs", "concurrent runs", "memory limit", "exceed your limit",
+    "exceeds the memory limit", "not enough memory", "exceeded the maximum number of",
 )
 PERMANENT_MARKERS = (
     "401", "403", "unauthorized", "forbidden", "invalid input", "invalid-input", "validation",
@@ -114,6 +130,11 @@ def actual_cost_from_meta(meta: dict | None) -> float | None:
 
 def classify_exception(exc: Exception) -> str:
     text = _fold(f"{type(exc).__name__}: {exc}")
+    # Capacity is checked FIRST: the provider's own wording for it carries
+    # "upgrade to a paid plan", which the permanent markers would otherwise
+    # read as a permission problem.
+    if any(marker in text for marker in CAPACITY_MARKERS):
+        return "capacity"
     if any(marker in text for marker in PERMANENT_MARKERS):
         return "permanent"
     if any(marker in text for marker in TRANSIENT_MARKERS):
@@ -515,16 +536,32 @@ def run_actor_resilient(
             result.failure_kinds.append("permanent")
         except Exception as exc:
             kind = classify_exception(exc)
-            # Unknown actual cost is conservatively accounted at the cap.
-            result.accounted_cost_usd += attempt_cap
+            # A job refused for want of account capacity never launched, so it
+            # cost nothing; charging the cap for it would starve later routes.
+            charged_for_attempt = 0.0 if kind == "capacity" else attempt_cap
+            result.accounted_cost_usd += charged_for_attempt
             attempt.update({
                 "status": "exception",
                 "failure_kind": kind,
                 "error": str(exc),
-                "accounted_cost_usd": round(attempt_cap, 6),
+                "accounted_cost_usd": round(charged_for_attempt, 6),
             })
             result.failure_kinds.append(kind)
-            if kind == "transient":
+            if kind == "capacity":
+                # Wait for one of our own runs to finish rather than hammering
+                # the limit: the queue is ours, and it drains.
+                retry_no = int(task.get("retry_no", 0))
+                if retry_no < CAPACITY_MAX_RETRIES and calls < max_calls:
+                    result.adaptive_actions.append("waited_for_account_capacity")
+                    sleep_fn(min(CAPACITY_BACKOFF_CAP_SECONDS,
+                                 CAPACITY_BACKOFF_SECONDS * (2 ** retry_no)))
+                    queue.append({
+                        "input": deepcopy(task["input"]),
+                        "target": target,
+                        "depth": int(task.get("depth", 0)),
+                        "retry_no": retry_no + 1,
+                    })
+            elif kind == "transient":
                 children = split_input_for_retry(task["input"], target)
                 if children and calls + len(children) <= max_calls:
                     result.adaptive_actions.append("split_multi_target_after_exception")
@@ -546,6 +583,9 @@ def run_actor_resilient(
     # It reads as "partial" so the caller keeps what was paid for and requeues.
     has_transient = has_transient or "worker_deadline_reached" in result.failure_kinds
     has_permanent = any(k in {"permanent", "unknown", "cost_cap_violation"} for k in result.failure_kinds)
+    # Capacity alone is not a failure of the route: it reads like a transient
+    # wait so the caller keeps whatever was fetched and carries on.
+    has_transient = has_transient or "capacity" in result.failure_kinds
     if result.items:
         result.status = "partial" if (has_transient or has_permanent) else "succeeded"
     elif has_transient or has_permanent:
