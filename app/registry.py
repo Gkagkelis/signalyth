@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,6 +25,13 @@ COMMENT_PRODUCTION_ROLLOUT = {
     "instagram": {"actor_id": "scrapesmith/instagram-comments-scraper", "route": "comments", "input_field": "postUrls", "price": 0.50, "include_replies": True},
     "facebook": {"actor_id": "scraper_one/facebook-comments-scraper", "route": "comments", "input_field": "postUrls", "price": 0.40, "include_replies": False},
 }
+
+
+# Restoring a runtime config file and reading it are one critical section.
+# Collection runs several source threads in parallel and each one reloads the
+# registry per route; without this lock two threads can restore and read the
+# same file at the same time.
+_RUNTIME_FILE_LOCK = threading.RLock()
 
 
 def _ensure_runtime_file(path: Path, baseline: Path) -> None:
@@ -67,9 +75,30 @@ def _write_json_atomic(path: Path, data: Any) -> None:
         cloud_persistence.put_config_file(path.name, path)
 
 
+def _read_registry_file() -> dict:
+    with _RUNTIME_FILE_LOCK:
+        _ensure_runtime_file(REGISTRY_PATH, BASE_REGISTRY_PATH)
+        text = REGISTRY_PATH.read_text(encoding="utf-8")
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            # One restore produced an unreadable file. Fetch it again before
+            # giving up: the registry decides which Actor a paid route calls,
+            # so falling back to the shipped baseline could spend money on a
+            # superseded Actor. A clear failure is the safe outcome.
+            REGISTRY_PATH.unlink(missing_ok=True)
+            _ensure_runtime_file(REGISTRY_PATH, BASE_REGISTRY_PATH)
+            try:
+                return json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(
+                    "The source registry could not be read "
+                    f"({REGISTRY_PATH.name}: {exc}). No Actor was called."
+                ) from exc
+
+
 def load_registry() -> dict:
-    _ensure_runtime_file(REGISTRY_PATH, BASE_REGISTRY_PATH)
-    data = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
+    data = _read_registry_file()
     changed = False
     # Backward-compatible defaults plus one-time migration of the curated comment rollout.
     for source, cfg in data.items():
@@ -157,14 +186,15 @@ def public_registry() -> dict:
 
 
 def load_history() -> dict:
-    _ensure_runtime_file(HISTORY_PATH, BASE_HISTORY_PATH)
-    if not HISTORY_PATH.exists():
-        return {}
-    try:
-        data = json.loads(HISTORY_PATH.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
+    with _RUNTIME_FILE_LOCK:
+        _ensure_runtime_file(HISTORY_PATH, BASE_HISTORY_PATH)
+        if not HISTORY_PATH.exists():
+            return {}
+        try:
+            data = json.loads(HISTORY_PATH.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
 
 
 def source_history(source: str) -> list[dict]:
