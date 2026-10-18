@@ -14,6 +14,14 @@ from app.services.normalizer import normalize_dataset, normalize_dataset_with_au
 from app.services.schema_mapping import recover_mapping
 from app.services.storage import RunStore
 from app.registry import output_mapping_for, load_registry
+from app.services.time_slicing import (
+    MAX_SLICE_DEPTH,
+    apply_window,
+    detect_call_ceiling,
+    halve,
+    native_date_window,
+    returned_at_ceiling,
+)
 from app.config import settings
 from app.services.resilience import (
     ActorHealthStore,
@@ -24,6 +32,10 @@ from app.services.resilience import (
 )
 
 SOURCE_TERMINAL = {"succeeded", "succeeded_empty", "partial", "failed", "cancelled_partial", "skipped_cancelled", "skipped_budget_safety"}
+#: How many extra routes adaptive time slicing may add to one source. Each one
+#: is a paid call, so the ceiling is a cost guard as much as a loop guard; the
+#: source's own budget envelope stops them earlier when it runs out.
+MAX_SLICE_ROUTES_PER_SOURCE = 12
 
 
 class CollectionTimeBudgetExceeded(RuntimeError):
@@ -591,6 +603,10 @@ def execute_plan(
 
         cancelled_mid_source = False
         own_violation = False
+        slice_routes_added = 0
+        #: What each route returned, in order. A constant non-zero count across
+        #: unrelated queries reveals the Actor's own per-call ceiling.
+        route_returns: list[int] = []
         source_level_error: str | None = None
         consecutive_transient_failures = 0
         circuit_open = False
@@ -782,6 +798,65 @@ def execute_plan(
                     }
                     status["fatal_error"] = "Provider-reported run cost exceeded the allocated SIGNALYTH envelope; paid collection stopped safely."
                 source_status["subruns_completed"] += 1
+
+                # Adaptive time slicing. A route that came back FULL was cut off
+                # by the Actor's per-call ceiling, so the rest of its window was
+                # never seen: re-ask it over halves. A route that came back
+                # short had already returned everything the search holds, and
+                # slicing it would only pay for the same emptiness twice.
+                if mapped_status in {"succeeded", "partial"} and not sr.get("slice_depth"):
+                    # Only full-window routes inform the ceiling: a narrowed
+                    # slice returning less says nothing about the Actor.
+                    route_returns.append(len(resilient.items))
+                call_ceiling = detect_call_ceiling(route_returns)
+                if (
+                    mapped_status in {"succeeded", "partial"}
+                    and returned_at_ceiling(
+                        int(sr.get("target_items", 0) or 0), len(resilient.items), call_ceiling
+                    )
+                    and slice_routes_added + 2 <= MAX_SLICE_ROUTES_PER_SOURCE
+                    and int(sr.get("slice_depth", 0) or 0) < MAX_SLICE_DEPTH
+                    and not violation["hit"]
+                ):
+                    window = native_date_window(sr.get("input") or {}, date_to)
+                    halves = halve(window) if window else []
+                    if halves:
+                        for part_no, (part_from, part_to) in enumerate(halves, start=1):
+                            child = copy.deepcopy(sr)
+                            child["input"] = apply_window(sr["input"], window, part_from, part_to)
+                            child["purpose"] = f"{purpose}_slice_{part_from.isoformat()}"
+                            child["slice_depth"] = int(sr.get("slice_depth", 0) or 0) + 1
+                            subruns.append(child)
+                            source_status["subruns"].append({
+                                "index": len(source_status["subruns"]) + 1,
+                                "purpose": child["purpose"],
+                                "actor_id": child.get("actor_id"),
+                                "target_items": int(child.get("target_items", 0) or 0),
+                                "status": "pending",
+                                "started_at": None,
+                                "completed_at": None,
+                                "error": None,
+                                "attempts": [],
+                                "diagnostics": [],
+                                "adaptive_actions": [],
+                                "failure_kinds": [],
+                                "accounted_cost_usd": 0.0,
+                                "slice_of": purpose,
+                                "slice_window": {"from": part_from.isoformat(), "to": part_to.isoformat()},
+                            })
+                            slice_routes_added += 1
+                        source_status["subruns_total"] = len(source_status["subruns"])
+                        sr_status["adaptive_actions"] = [
+                            *(sr_status.get("adaptive_actions") or []),
+                            "window_split_after_full_result",
+                        ]
+                        sync(
+                            f"{source}: {purpose} came back full; re-asking it over "
+                            f"{len(halves)} narrower windows",
+                            source,
+                            code="adaptive_time_slice",
+                            purpose=purpose,
+                        )
 
                 # Source-level circuit breaker: a permanently invalid Actor/credential should not
                 # burn every remaining logical batch. Repeated transient infrastructure failures
