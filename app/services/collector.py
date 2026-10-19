@@ -879,7 +879,8 @@ def execute_plan(
                 # route can succeed either, and each refusal would otherwise be
                 # accounted at its cap and drain the run's envelope.
                 permanent_failure = mapped_status == "failed" and any(
-                    k in {"permanent", "unknown", "cost_cap_violation", "credit_exhausted"}
+                    k in {"permanent", "unknown", "cost_cap_violation",
+                          "credit_exhausted", "invalid_input"}
                     for k in resilient.failure_kinds
                 )
                 # Running out of ACCOUNT capacity says nothing about this Actor:

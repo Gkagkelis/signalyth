@@ -51,7 +51,9 @@ def _build(actor_id: str, *, include_replies: bool = True, date_from=date(2026, 
 
 def test_the_configured_actor_is_asked_with_its_own_field_name():
     built = _build(NEW_ACTOR)
-    assert built["startUrls"] == [POST]
+    # v31.35: `startUrls` is a requestListSources field, so each entry is an
+    # object carrying a `url` key.
+    assert built["startUrls"] == [{"url": POST}]
     assert "postUrls" not in built, (
         "postUrls belongs to the Actor this one replaced; sending it collects nothing")
     assert "commentsSortType" not in built, "that field does not exist on this Actor"

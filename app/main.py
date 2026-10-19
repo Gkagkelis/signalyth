@@ -565,7 +565,9 @@ def comment_route_smoke(source: str, body: CommentRouteSmokeRequest):
         raise HTTPException(status_code=409, detail="No comment/reply Actor candidate is configured for this source.")
 
     try:
-        run_input = build_comment_smoke_input(source, body.seed_refs, body.max_items)
+        run_input = build_comment_smoke_input(
+            source, body.seed_refs, body.max_items, actor_id=actor_id
+        )
         run_input.update(body.input_overrides or {})
         # Validation is free and must pass before the explicit paid smoke.
         validation = validate_actor_input(actor_id, run_input)
@@ -756,6 +758,31 @@ def delete_run(run_id: str, scope: str = Query(default="everywhere", pattern="^(
         return {"run_id": run_id, "deleted": False, "scope": "local", **freed}
     store.delete_run(run_id)
     return {"run_id": run_id, "deleted": True, "scope": "everywhere"}
+
+
+@app.get("/api/runs/{run_id}/diagnostics")
+def run_diagnostics(run_id: str):
+    """The plan a run was started from, and what the adaptive layers recorded.
+
+    The comment layer used to be a black box: a route could be refused by the
+    Actor on every single call and the run screen reported only "shortfall",
+    with the reason sitting unread in the run folder. Run 20261019T170033Z
+    spent its whole envelope that way. This is read-only and carries no
+    credential; it exists so the operator can see WHY a layer collected
+    nothing, and so a run's configuration can be read back and repeated.
+    """
+    try:
+        plan = store.read_plan(run_id)
+    except RunNotFound:
+        raise HTTPException(status_code=404, detail="Run not found")
+    folder = store.folder_for(run_id)
+    audit = store.read(folder / "smart-collection-expansion.json", {}) or {}
+    if not audit and store.cloud.enabled:
+        audit = store.cloud.get_json(run_id, "smart-collection-expansion.json") or {}
+    if isinstance(audit, dict):
+        # Steps are long and repetitive; the warnings are what diagnose a route.
+        audit = {k: v for k, v in audit.items() if k != "steps"}
+    return {"run_id": run_id, "plan": plan, "expansion_audit": audit}
 
 
 @app.get("/api/runs/{run_id}/footprint")

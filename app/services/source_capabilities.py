@@ -506,11 +506,20 @@ def build_comment_deepening_input(
         # 20261017T174324Z asked for 300 comments under 34 posts and collected
         # ZERO, reported only as a failed comment pass.
         if "dami_studio" in str(actor_id or "").casefold():
-            # Live schema read through the app's own Actor lookup, 19 Oct 2026:
-            # startUrls, resultsLimit (per post, max 50000),
-            # includeNestedComments, maxRepliesPerComment (max 1000),
-            # onlyCommentsNewerThan. `commentsSortType` does not exist here.
-            out: dict = {"startUrls": refs, "resultsLimit": per_parent}
+            # Live schema read from the Actor's default build, 19 Oct 2026:
+            # startUrls (editor `requestListSources`, so each entry is an
+            # OBJECT with a `url` key, NOT a bare string), resultsLimit (per
+            # post, max 50000), includeNestedComments, maxRepliesPerComment
+            # (max 1000), viewOption, onlyCommentsNewerThan.
+            # `commentsSortType` does not exist here.
+            # Bare strings are the same silent failure as the wrong field name:
+            # run 20261019T170033Z asked for 300 comments under 128 posts and
+            # collected ZERO.
+            out: dict = {
+                "startUrls": [{"url": u} for u in refs],
+                "resultsLimit": per_parent,
+                "viewOption": "RANKED_UNFILTERED",
+            }
             if include_replies:
                 out["includeNestedComments"] = True
                 out["maxRepliesPerComment"] = MAX_REPLIES_PER_COMMENT
@@ -636,8 +645,19 @@ def build_page_discovery_input(
     raise ValueError(f"Page discovery is not configured for source {source}.")
 
 
-def build_comment_smoke_input(source: str, seed_refs: list[str], max_items: int) -> dict:
-    """Build a capped one-time paid smoke input; live validation remains mandatory."""
+def build_comment_smoke_input(
+    source: str,
+    seed_refs: list[str],
+    max_items: int,
+    *,
+    actor_id: str | None = None,
+) -> dict:
+    """Build a capped one-time paid smoke input; live validation remains mandatory.
+
+    The smoke must build the SAME shape the production route will send, so the
+    Actor it is about to be committed against has to be named here too: a smoke
+    built blind validates an input no run will ever use.
+    """
     capped = max(1, min(10, int(max_items)))
     return build_comment_deepening_input(
         source,
@@ -645,4 +665,5 @@ def build_comment_smoke_input(source: str, seed_refs: list[str], max_items: int)
         capped,
         max_per_parent=capped,
         include_replies=True,
+        actor_id=actor_id,
     )

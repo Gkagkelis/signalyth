@@ -95,6 +95,17 @@ CREDIT_MARKERS = (
     "not enough credit", "insufficient credit", "insufficient funds",
     "monthly usage", "usage limit", "out of credit",
 )
+#: The Actor REFUSED the input against its own schema, so no run ever started
+#: and nothing was scraped. Apify words this "Input is not valid: Field
+#: input.startUrls.0 must be object", which matches none of the permanent
+#: markers below ("invalid input" has a space, "validation" does not appear),
+#: so it fell through to "unknown" and was charged at the attempt cap. Run
+#: 20261019T170033Z burned $2.69 of a $3 envelope on nineteen such refusals
+#: and then starved its X and Instagram comment routes out of budget.
+INVALID_INPUT_MARKERS = (
+    "input is not valid", "is not valid:", "field input.", "input schema",
+    "did not match the schema", "schema validation",
+)
 PERMANENT_MARKERS = (
     "401", "403", "unauthorized", "forbidden", "invalid input", "invalid-input", "validation",
     "not found", "private actor", "permission", "authentication", "bad request", "unsupported",
@@ -149,6 +160,10 @@ def classify_exception(exc: Exception) -> str:
         return "credit_exhausted"
     if any(marker in text for marker in CAPACITY_MARKERS):
         return "capacity"
+    # Checked before the permanent markers, which would read the same refusal
+    # as a generic fault and charge it: a schema refusal never launched a run.
+    if any(marker in text for marker in INVALID_INPUT_MARKERS):
+        return "invalid_input"
     if any(marker in text for marker in PERMANENT_MARKERS):
         return "permanent"
     if any(marker in text for marker in TRANSIENT_MARKERS):
@@ -552,7 +567,9 @@ def run_actor_resilient(
             kind = classify_exception(exc)
             # A job refused for want of account capacity never launched, so it
             # cost nothing; charging the cap for it would starve later routes.
-            charged_for_attempt = 0.0 if kind in {"capacity", "credit_exhausted"} else attempt_cap
+            charged_for_attempt = (
+                0.0 if kind in {"capacity", "credit_exhausted", "invalid_input"} else attempt_cap
+            )
             result.accounted_cost_usd += charged_for_attempt
             attempt.update({
                 "status": "exception",
@@ -597,7 +614,7 @@ def run_actor_resilient(
     # It reads as "partial" so the caller keeps what was paid for and requeues.
     has_transient = has_transient or "worker_deadline_reached" in result.failure_kinds
     has_permanent = any(
-        k in {"permanent", "unknown", "cost_cap_violation", "credit_exhausted"}
+        k in {"permanent", "unknown", "cost_cap_violation", "credit_exhausted", "invalid_input"}
         for k in result.failure_kinds
     )
     # Capacity alone is not a failure of the route: it reads like a transient
