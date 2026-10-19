@@ -571,9 +571,17 @@ def execute_plan(
         resume_from_idx = 0
         prior = prior_sources.get(source) or {}
         prior_rows = prior.get("subruns") or []
+        # The prior row list may be LONGER than this invocation's plan, because
+        # adaptive time slicing appends routes while the source is running and
+        # the next worker rebuilds the plan from the original subruns. Requiring
+        # an exact match made every continuation re-collect the source from
+        # scratch: run 20261019T155108Z restarted the news source at zero on
+        # each worker cycle, paying again each time and never finishing.
+        # The prefix is what matters — those routes are the same ones, in the
+        # same order, and they are already paid for.
         if (
             str(prior.get("status")) in {"running", "interrupted_time_budget"}
-            and len(prior_rows) == len(subruns)
+            and len(prior_rows) >= len(subruns)
             and (folder / f"raw-{source}.json").exists()
         ):
             try:
@@ -582,7 +590,7 @@ def execute_plan(
                 prior_raw = []
             done_statuses = {"pending", "running"}
             resumed_cost = 0.0
-            for i, row in enumerate(prior_rows):
+            for i, row in enumerate(prior_rows[:len(subruns)]):
                 if str(row.get("status") or "pending") in done_statuses:
                     break
                 source_status["subruns"][i] = copy.deepcopy(row)
@@ -603,6 +611,12 @@ def execute_plan(
 
         cancelled_mid_source = False
         own_violation = False
+        # Initialised HERE, not inside the collecting branch. A source that the
+        # budget guard turns away never enters that branch, and the terminal
+        # block below reads this flag unconditionally: run 20261019T155108Z lost
+        # Facebook to an UnboundLocalError on exactly that path, after a resumed
+        # worker found the envelope already spent by an earlier source.
+        interrupted_time_budget = False
         slice_routes_added = 0
         #: What each route returned, in order. A constant non-zero count across
         #: unrelated queries reveals the Actor's own per-call ceiling.
@@ -613,7 +627,6 @@ def execute_plan(
         if source_cap <= 0 or (base_cap > 0 and source_cap + 1e-9 < min(base_cap, guard.remaining)):
             source_level_error = "Budget guard left no safe acquisition budget for this source."
         else:
-            interrupted_time_budget = False
             for sr_idx, sr in enumerate(subruns):
                 if sr_idx < resume_from_idx:
                     continue
