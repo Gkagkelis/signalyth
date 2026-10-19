@@ -603,6 +603,12 @@ def execute_plan(
 
         cancelled_mid_source = False
         own_violation = False
+        # Initialised HERE, not inside the collecting branch. A source that the
+        # budget guard turns away never enters that branch, and the terminal
+        # block below reads this flag unconditionally: run 20261019T155108Z lost
+        # Facebook to an UnboundLocalError on exactly that path, after a resumed
+        # worker found the envelope already spent by an earlier source.
+        interrupted_time_budget = False
         slice_routes_added = 0
         #: What each route returned, in order. A constant non-zero count across
         #: unrelated queries reveals the Actor's own per-call ceiling.
@@ -613,7 +619,6 @@ def execute_plan(
         if source_cap <= 0 or (base_cap > 0 and source_cap + 1e-9 < min(base_cap, guard.remaining)):
             source_level_error = "Budget guard left no safe acquisition budget for this source."
         else:
-            interrupted_time_budget = False
             for sr_idx, sr in enumerate(subruns):
                 if sr_idx < resume_from_idx:
                     continue
