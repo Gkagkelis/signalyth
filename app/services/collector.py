@@ -237,8 +237,42 @@ def _execution_order(sources: list[dict], automatic: bool) -> list[dict]:
     return sorted(list(sources), key=key)
 
 
-def _planned_future_floor(execution_sources: list[dict], current_index: int) -> float:
-    return sum(_source_base_cap(sp) for sp in execution_sources[current_index + 1:])
+#: A source row in one of these states will not ask the guard for money again.
+#: ``interrupted_time_budget`` is deliberately absent: that source WILL be
+#: re-entered by the next worker and still needs its share held for it.
+_SETTLED_SOURCE_STATES = frozenset({
+    "succeeded", "succeeded_empty", "failed", "partial",
+    "cancelled", "cancelled_partial", "skipped_cancelled",
+})
+
+
+def _planned_future_floor(
+    execution_sources: list[dict],
+    current_index: int,
+    source_rows: dict | None = None,
+) -> float:
+    """Money still owed to the sources that have not finished yet.
+
+    A source that has already finished owes nothing: whatever it needed it has
+    already spent, and the guard counts that spend on its own. Reserving its
+    full planned cap on top of that charges the run twice for one source — and
+    with four sources collecting at once, or any resumed worker (which
+    re-enters the unfinished source AFTER the others have completed), that
+    double reservation is what turns the unfinished source away.
+
+    Run 20261019T181713Z lost 171 of 300 Facebook posts to exactly this, with
+    $1.55 of a $2.50 envelope still unspent: Facebook's planned cap is large
+    because its price hint is high, while the posts themselves cost $0.0002,
+    so the floor reserved for Instagram and news long after both had paid.
+    """
+    rows = source_rows or {}
+    total = 0.0
+    for sp in execution_sources[current_index + 1:]:
+        row = rows.get(sp.get("source")) or {}
+        if str(row.get("status") or "pending") in _SETTLED_SOURCE_STATES:
+            continue
+        total += _source_base_cap(sp)
+    return total
 
 
 def _adjusted_target(base_target: int, carry_shortfall: int, remaining_sources: int) -> int:
@@ -515,7 +549,9 @@ def execute_plan(
         desired_target = _adjusted_target(base_target, carry_in, remaining_count) if automatic else base_target
 
         base_cap = _source_base_cap(sp)
-        future_floor = _planned_future_floor(execution_sources, idx)
+        future_floor = _planned_future_floor(
+            execution_sources, idx, status.get("sources") or {}
+        )
         desired_ratio = (desired_target / base_target) if base_target > 0 else 1.0
         proposed_cap = base_cap * max(1.0, desired_ratio)
         extra_headroom = max(0.0, guard.remaining - future_floor - base_cap)
