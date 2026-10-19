@@ -425,6 +425,12 @@ def is_comment_parent_ref(source: str, value: str) -> bool:
 
     return False
 
+#: Replies per comment to pull when an Actor exposes the option. The vendor
+#: default is 60; a smaller number keeps a single viral thread from consuming
+#: a whole run's comment budget.
+MAX_REPLIES_PER_COMMENT = 20
+
+
 def build_comment_deepening_input(
     source: str,
     seed_refs: list[str],
@@ -434,6 +440,7 @@ def build_comment_deepening_input(
     include_replies: bool = True,
     date_from: date | None = None,
     date_to: date | None = None,
+    actor_id: str | None = None,
 ) -> dict:
     """Build the curated public-schema input shape for a comment/reply route."""
     cap = source_capabilities(source).get("comment_deepening") or {}
@@ -493,6 +500,25 @@ def build_comment_deepening_input(
             "includeNestedComments": bool(include_replies),
         }
     if source == "facebook":
+        # The field name is the Actor's, not the source's. dami_studio's
+        # scraper takes `startUrls`; the scraper_one one it replaced took
+        # `postUrls`. Sending the old name to the new Actor is silent: run
+        # 20261017T174324Z asked for 300 comments under 34 posts and collected
+        # ZERO, reported only as a failed comment pass.
+        if "dami_studio" in str(actor_id or "").casefold():
+            # Live schema read through the app's own Actor lookup, 19 Oct 2026:
+            # startUrls, resultsLimit (per post, max 50000),
+            # includeNestedComments, maxRepliesPerComment (max 1000),
+            # onlyCommentsNewerThan. `commentsSortType` does not exist here.
+            out: dict = {"startUrls": refs, "resultsLimit": per_parent}
+            if include_replies:
+                out["includeNestedComments"] = True
+                out["maxRepliesPerComment"] = MAX_REPLIES_PER_COMMENT
+            if date_from:
+                # A native lower bound: out-of-window comments are never
+                # fetched, so they are never paid for either.
+                out["onlyCommentsNewerThan"] = date_from.isoformat()
+            return out
         # scraper_one/facebook-comments-scraper: resultsLimit is PER POST and
         # newest-first is essential for bounded windows. The actor has no native
         # date input, so SIGNALYTH enforces date_from/date_to after normalization.
