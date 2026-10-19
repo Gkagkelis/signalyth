@@ -571,9 +571,17 @@ def execute_plan(
         resume_from_idx = 0
         prior = prior_sources.get(source) or {}
         prior_rows = prior.get("subruns") or []
+        # The prior row list may be LONGER than this invocation's plan, because
+        # adaptive time slicing appends routes while the source is running and
+        # the next worker rebuilds the plan from the original subruns. Requiring
+        # an exact match made every continuation re-collect the source from
+        # scratch: run 20261019T155108Z restarted the news source at zero on
+        # each worker cycle, paying again each time and never finishing.
+        # The prefix is what matters — those routes are the same ones, in the
+        # same order, and they are already paid for.
         if (
             str(prior.get("status")) in {"running", "interrupted_time_budget"}
-            and len(prior_rows) == len(subruns)
+            and len(prior_rows) >= len(subruns)
             and (folder / f"raw-{source}.json").exists()
         ):
             try:
@@ -582,7 +590,7 @@ def execute_plan(
                 prior_raw = []
             done_statuses = {"pending", "running"}
             resumed_cost = 0.0
-            for i, row in enumerate(prior_rows):
+            for i, row in enumerate(prior_rows[:len(subruns)]):
                 if str(row.get("status") or "pending") in done_statuses:
                     break
                 source_status["subruns"][i] = copy.deepcopy(row)
