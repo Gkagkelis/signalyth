@@ -1776,6 +1776,7 @@ def adaptive_expand_after_cleaning(
                             include_replies=bool(cfg.get("comment_include_replies", True)),
                             date_from=date_from,
                             date_to=date_to,
+                            actor_id=cfg.get("comment_actor_id"),
                         )
                     except ValueError as exc:
                         with _ADAPTIVE_STATE_LOCK:
